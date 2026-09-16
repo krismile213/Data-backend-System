@@ -1,0 +1,33 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ===== 日志 / 临时文件 =====
+*.log
+_diag.txt
+.pytest_cache/
+
+# ===== 本地运行状态（手工填报记录、KPI 快照，仅存本机）=====
+backend/state/
+
+# ===== 环境变量文件（含数据库口令，切勿提交）=====
+.env
+.env.*
+
+# ===== 前端依赖与构建产物（可重新生成）=====
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/*.timestamp-*.mjs
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
+# ===== Agent 工作区状态 =====
+.workbuddy/
