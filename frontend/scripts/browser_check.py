@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""browser_check.py — 真实浏览器渲染自检：17 个页面到底能不能进得去
+"""browser_check.py — 真实浏览器渲染自检：20 个页面到底能不能进得去
 
 为什么需要这个脚本（以及它和另外两个检查的分工）：
 
@@ -48,6 +48,8 @@ PAGES = [
     ("history", "趋势周报"), ("compare", "批次对比"), ("skus", "SKU 档案"),
     ("records", "明细查询"), ("anomalies", "异常排查"), ("rules", "规则配置"),
     ("manual", "操作手册"), ("dataadmin", "数据管理"),
+    # T10：单据增量（批次名固定后取代批次对比的「这周动了什么」视图）
+    ("deltas", "单据增量"),
 ]
 
 _STYLE_RE = re.compile(r"<style\b.*?</style>", re.S | re.I)

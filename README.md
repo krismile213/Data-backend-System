@@ -182,9 +182,29 @@ set "NPM=%USERPROFILE%\.workbuddy\binaries\node\versions\%NODE_VER%\npm.cmd"
   含可直接复用的交接检查表与招聘 JD 参考；
 - **流程事中与事后评估 使用说明**：事中日报页与事后评估页怎么读——段状态机、85% 预警线、
   日报 5 个 sheet、损益三指标口径、手机壳「目标待校准」提示与常见问题。
+- **单据增量 使用说明**：五类增量（新增单据 / 单据新动作 / 状态变化 / 进出未闭环）分别是什么、
+  什么时候没数据、疑似基线重算标记怎么看。
 
 文档源文件在仓库 `docs/` 目录，**直接编辑 `.md` 文件即可更新**，刷新页面生效；
 新增文档只需在 `backend/app/routers/manual.py` 的白名单里登记一行。
+
+### 13. 单据增量（未闭环 SKU 新增单据）
+
+**为什么不是「批次对比」**：现在的取数方式是钉钉每天导出最新全量、**批次目录名固定**
+（`Part*_xx.xlsx` 反复覆盖），批次表里永远只有一个批次在长 —— 没有第二个批次可比。
+所以改盯**同一批未闭环 SKU 身上的单据集合**，看它比上一次同步多了什么：
+
+- **五类增量**：新增单据 / 单据新动作（既有单据又推进一步）/ 状态变化 / 新进入未闭环 / 已闭环离开；
+- **只看未闭环 SKU**（复盘口径 `valid=False`，与复盘/预警同源），已闭环的不再跟踪；
+- **单据键 = `SKU|Part|审批编号`**（编号缺失时用创建时间兜底）——刻意**不用自增 ID**，
+  重导会整批删掉重建，用它会让每张单看起来都是新的；
+- 每次数据指纹变化自动拍一张快照（**指纹没变不产生事件**），持久化「最新基线 + 增量事件流」，
+  稳态约 200KB（每日全量快照方案约 100MB/年，已否决）；
+- 首次拍**只建基线不产生事件**；无活批次时**跳过**；新增单据占比 > 60% 打**疑似基线重算**标记；
+- 页面：KPI×5 + 增量走势 + 最近一次同步（三 Tab）+ 未闭环 SKU 增量排行（可点 SKU 钻取）+ 快照流水
+  + 导出 xlsx（5 sheet）；支持「立即拍快照」手动打点。
+
+> 详细模型定义见 `docs/SKU单据增量追踪模型.md`，页面怎么读见 `docs/单据增量使用说明.md`。
 
 ## 四、技术栈与结构
 
@@ -202,11 +222,11 @@ set "NPM=%USERPROFILE%\.workbuddy\binaries\node\versions\%NODE_VER%\npm.cmd"
     > 单进程 pandas 预热与用户的首次请求抢 CPU（GIL），而 `get_batch_data` 的按批次锁
     > 让用户请求只能排队等预热算完同一批次。礼让式预热不可能比不做更差，立即预热会。
     > 收益落在「用户没打开过的批次」上：切换批次合计 **3.43s → 0.11s**。
-  - `app/routers/`：18 组接口 —— batches / overview / timeliness / anomalies / records /
+  - `app/routers/`：19 组接口 —— batches / overview / timeliness / anomalies / records /
     compare / skus / review / scenarios / routes / transport / alerts / watch /
-    fillins / history / rules / dataadmin / manual
+    fillins / history / rules / dataadmin / manual / deltas
 - 前端：Vite + React + MUI + ECharts（`frontend/`）
-  - 页面按需懒加载（`React.lazy`），首屏只加载当前页面，不必为 17 个页面（含 2.6MB ECharts）买单；
+  - 页面按需懒加载（`React.lazy`），首屏只加载当前页面，不必为 20 个页面（含 2.6MB ECharts）买单；
   - 页面与批次同步到 URL（`?page=transport&batch=手机膜9.7`）：刷新保持、链接可分享、支持浏览器前进后退；
   - **视觉单一来源** `src/theme.js`：所有颜色先定义语义名再被引用
     （`SEMANTIC.danger` 超时/未达标、`warning` 进行中、`success` 达标、`info`、`neutral` 终止，
@@ -216,7 +236,7 @@ set "NPM=%USERPROFILE%\.workbuddy\binaries\node\versions\%NODE_VER%\npm.cmd"
     `StateViews`（`LoadingState` / `ErrorState` / `EmptyState` 三态）、`SectionCard`（带标题卡片容器）；
   - **数据请求** `src/hooks/useApi.js`：统一 `data / error / loading / refetch`，
     内置**请求序号防竞态**——切换批次或筛选时，先发出的旧请求不会覆盖新结果；
-    **17 个页面全部接入**，页内仅剩"选中项变化后清空详情"这类本地状态同步的 `useEffect`。
+    **20 个页面全部接入**，页内仅剩"选中项变化后清空详情"这类本地状态同步的 `useEffect`。
   - 样式统一走 MUI 的 `sx`：**Tailwind 已整体移除**（配置、依赖、`@tailwind` 指令）。
     它原先只被 9 处工具类用到，却要多养一套样式体系并承担 preflight 与 MUI 互相覆盖的风险；
     页面内已无 `className`，`index.css` 只保留挂载所需的最小重置，字体与背景由
@@ -281,6 +301,9 @@ set "NPM=%USERPROFILE%\.workbuddy\binaries\node\versions\%NODE_VER%\npm.cmd"
 | POST /api/etl/backup | 立即备份：`backend/state/` + 数据库导出 → `backups/时间戳/` |
 | GET /api/manual | 列出已收录的操作手册文档（标题 / 说明 / 更新时间） |
 | GET /api/manual/{key} | 取指定手册的 markdown 原文（白名单校验，未收录返回 404） |
+| GET /api/deltas?days=30&sku= | 单据增量：基线信息 + 最近一次增量 + 窗口聚合（byDay/bySku）+ 快照流水 |
+| POST /api/deltas/snapshot | 立即拍一张增量快照（force=true 同指纹强制重拍） |
+| GET /api/deltas/export?days=30 | 导出单据增量 xlsx（新增单据/单据新动作/状态变化/未闭环SKU汇总/口径说明 5 sheet） |
 
 批次不存在返回 404；空数据返回空结构而非 500。
 

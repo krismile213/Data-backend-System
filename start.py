@@ -18,6 +18,11 @@
     python start.py check       启动后跑在线可用性检查（接口 + 全部页面）
     python start.py verify      启动后跑完整验收链（离线 + 在线）
     python start.py backup      备份 state 文件 + MySQL dump
+    python start.py delta       跑一次单据增量（未闭环 SKU 新增单据）并打印报告
+                                可选：--days 7 / --category 手机壳 / --sku G506
+                                      / --export 路径.xlsx / --no-record（不拍快照）
+    python start.py verify-live 隔离端口在线验收（另起 8001 + 5174 跑新代码，
+                                不打扰 8000/5173 上正在用的实例）
     python start.py --no-pause  跑完不等回车（给脚本/自动化调用）
 """
 
@@ -337,8 +342,13 @@ def run_script(py: Path, script: Path, *args: str, cwd: Path | None = None) -> i
 
 
 def offline_checks(py: Path) -> int:
-    """离线三件套：后端测试 / G506 评估基线 / 分品类规则。"""
-    say("CHECK", "1/3 后端测试套件 ...")
+    """离线四件套：后端测试 / G506 评估基线 / 分品类规则 / 单据增量模型。
+
+    第 4 步（T10）为什么也算「离线验收」：单据增量是纯后端模型（state 文件 +
+    复盘口径），不依赖服务是否起得来，但**口径错一点业务看到的增量就是假的**
+    （比如把新单据的节点也算成新动作），所以它的契约断言必须进验收链。
+    """
+    say("CHECK", "1/4 后端测试套件 ...")
     # --basetemp 指到独立目录：pytest 收尾的 garbage 回收会去删 Temp\pytest-of-dell
     # 旧目录，触发本机 safe-delete 守卫（>50 条目）把整个进程 SystemExit 掉。
     tmp = Path(os.environ.get("TEMP", str(ROOT))) / "pytest-dt"
@@ -347,19 +357,24 @@ def offline_checks(py: Path) -> int:
     rc_t = subprocess.run([str(py), "-m", "pytest", "tests", "-q", f"--basetemp={tmp}"],
                           cwd=str(ROOT), env=_child_env()).returncode
 
-    say("CHECK", "2/3 G506 评估基线 ...")
+    say("CHECK", "2/4 G506 评估基线 ...")
     rc_2 = run_script(py, ROOT / "scripts" / "verify_t02.py")
 
-    say("CHECK", "3/3 分品类规则（膜 / 壳）...")
+    say("CHECK", "3/4 分品类规则（膜 / 壳）...")
     rc_3 = run_script(py, ROOT / "scripts" / "verify_shell_rules.py")
 
+    say("CHECK", "4/4 单据增量模型（未闭环 SKU）...")
+    rc_4 = run_script(py, ROOT / "scripts" / "verify_doc_delta.py")
+
     hr()
-    for rc, label in ((rc_t, "后端测试"), (rc_2, "G506 基线"), (rc_3, "分品类规则")):
+    pairs = ((rc_t, "后端测试"), (rc_2, "G506 基线"),
+             (rc_3, "分品类规则"), (rc_4, "单据增量模型"))
+    for rc, label in pairs:
         if rc != 0:
             say("WARN", f"{label} 未通过（退出码 {rc}）")
-    if rc_t == 0 and rc_2 == 0 and rc_3 == 0:
+    if all(rc == 0 for rc, _ in pairs):
         say("DONE", "离线验收链全部通过")
-    return 0 if (rc_t == 0 and rc_2 == 0 and rc_3 == 0) else 1
+    return 0 if all(rc == 0 for rc, _ in pairs) else 1
 
 
 def online_checks(py: Path) -> int:
@@ -441,13 +456,19 @@ def report(verbose: bool = True) -> tuple[bool, bool]:
 # ----------------------------------------------------------------------
 # main
 # ----------------------------------------------------------------------
-KNOWN = {"clean", "restart", "stop", "status", "check", "verify", "backup", "open", "help"}
+KNOWN = {"clean", "restart", "stop", "status", "check", "verify", "backup",
+         "open", "help", "delta"}
 
 
 def main(argv: list[str]) -> int:
     _init_console()
-    args = [a for a in argv if not a.startswith("--")]
     no_pause = "--no-pause" in argv
+    args = [a for a in argv if not a.startswith("--")]
+    if args and args[0].lower() in KNOWN:
+        # delta 要把后面的参数透传给脚本（--days 7 这类带值参数不能只认前缀）
+        extra = argv[argv.index(args[0]) + 1:]
+    else:
+        extra = []
     opt = (args[0].lower() if args else "")
 
     if opt and opt not in KNOWN:
@@ -507,6 +528,41 @@ def main(argv: list[str]) -> int:
             return 1
         rc = subprocess.run([str(py), "etl\\backup.py"],
                             cwd=str(BACKEND), env=_child_env()).returncode
+        print(flush=True)
+        return rc
+
+    # ---------- 单据增量（离线跑，不需要服务在跑）----------
+    if opt == "delta":
+        # 为什么放在这里而不是走 HTTP：查看增量不该先要求「把服务起起来」，
+        # 而且这一步本身就是服务的一个数据来源（拍快照）。
+        script = ROOT / "scripts" / "verify_doc_delta.py"
+        if not script.is_file():
+            say("ERROR", f"找不到 {script}")
+            return 1
+        say("DELTA", "未闭环 SKU 单据增量：先拍快照，再打印增量报告 ...")
+        print(flush=True)
+        rc = subprocess.run([str(py), str(script), "--record", *extra],
+                            cwd=str(ROOT), env=_child_env()).returncode
+        print(flush=True)
+        say("DONE" if rc == 0 else "WARN", f"单据增量退出码 {rc}")
+        print(flush=True)
+        return rc
+
+    # ---------- 隔离端口在线验收（不打扰 8000/5173 上正在用的实例）----------
+    if opt == "verify-live":
+        # 为什么需要：check / verify 会**复用** 8000 上已在跑的服务；若那是用户在用的
+        # **旧实例**，新接口会 404（看起来像代码坏了）。本命令另起 8001 + 5174 验收新代码，
+        # 跑完拆掉，并断言用户的 8000 / 5173 仍活着。
+        script = ROOT / "scripts" / "verify_live_isolated.py"
+        if not script.is_file():
+            say("ERROR", f"找不到 {script}")
+            return 1
+        say("VERIFY", "隔离端口在线验收（8001 后端 + 5174 前端，不动 8000/5173）...")
+        print(flush=True)
+        rc = subprocess.run([str(py), str(script), *extra],
+                            cwd=str(ROOT), env=_child_env()).returncode
+        print(flush=True)
+        say("DONE" if rc == 0 else "WARN", f"隔离验收退出码 {rc}")
         print(flush=True)
         return rc
 
@@ -611,6 +667,8 @@ def main(argv: list[str]) -> int:
     print(flush=True)
     print("页面白屏时：    python start.py check", flush=True)
     print("完整验收链：    python start.py verify", flush=True)
+    print("单据增量报告：  python start.py delta", flush=True)
+    print("隔离端口验收：  python start.py verify-live", flush=True)
     print("强制整体重启：  python start.py restart", flush=True)
     print("查状态 / 停服务：python start.py status  |  python start.py stop", flush=True)
     print(flush=True)

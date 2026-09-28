@@ -94,6 +94,9 @@ PATHS = [
     "/api/inflight/alerts",
     "/api/inflight/progress",
     "/api/inflight/daily-report",
+    # T10：单据增量（未闭环 SKU 的新增单据追踪）+ xlsx 导出
+    "/api/deltas",
+    "/api/deltas/export",
 ]
 for b in [x for x in (BATCH, ALT_BATCH) if x]:
     PATHS += [

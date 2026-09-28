@@ -8,10 +8,11 @@ rem    start.bat            normal start (reuse services already running)
 rem    start.bat restart    kill stale listeners on 8000 / 5173, then start
 rem    start.bat stop       stop both services and exit
 rem    start.bat status     show whether each service is alive, then exit
-rem    start.bat check      start, then run the full availability check (API + 17 pages)
+rem    start.bat check      start, then run the full availability check (API + all pages)
 rem    start.bat verify     start, then run the whole acceptance chain (offline + online)
 rem    start.bat clean      remove vite dep cache, then start
 rem    start.bat backup     back up state files + MySQL dump, then exit
+rem    start.bat delta      doc-delta for unclosed SKUs (snapshot + report), then exit
 rem    start.bat help       print this list, then exit
 rem
 rem  NOTE: keep this file pure ASCII (no Chinese) to avoid cmd
@@ -53,12 +54,12 @@ if errorlevel 1 set "HAS_CURL=0"
 rem ---------- normalize the option word ----------
 set "ARG=%~1"
 set "OPT_KNOWN=0"
-for %%O in (clean restart stop status check verify backup help) do (
+for %%O in (clean restart stop status check verify backup delta help) do (
     if /i "!ARG!"=="%%O" set "OPT_KNOWN=1"
 )
 if not "!ARG!"=="" if "!OPT_KNOWN!"=="0" (
     echo [WARN ] unknown option "!ARG!" - falling back to a normal start.
-    echo         valid options: restart / stop / status / check / verify / clean / backup / help
+    echo         valid options: restart / stop / status / check / verify / clean / backup / delta / help
     echo.
 )
 
@@ -72,8 +73,11 @@ if /i "!ARG!"=="help" (
     echo                        ^(API endpoints + all pages in a real browser^)
     echo   start.bat verify     same as check, plus the offline acceptance chain
     echo                        ^(backend tests / G506 baseline / category rules^)
+    echo                        ^(plus the doc-delta model check^)
     echo   start.bat clean      remove vite dep cache, then start
     echo   start.bat backup     back up state files + MySQL dump, then exit
+    echo   start.bat delta      doc-delta for unclosed SKUs: snapshot + report, then exit
+    echo                        ^(extra args are forwarded, e.g. --days 7 --category X^)
     echo   start.bat help       print this list, then exit
     echo.
     pause
@@ -135,6 +139,17 @@ if /i "!ARG!"=="backup" (
     pushd "%ROOT%backend"
     "%PY%" etl\backup.py
     popd
+    echo.
+    pause
+    exit /b 0
+)
+rem Doc-delta for unclosed SKUs (T10).  Runs offline - no need to start services:
+rem it snapshots the current doc baseline and prints what changed since the last
+rem snapshot.  Extra args (%2..%9) are forwarded to the python script.
+if /i "!ARG!"=="delta" (
+    echo [DELTA] doc-delta for unclosed SKUs: snapshot, then print the report ...
+    echo.
+    "%PY%" "%ROOT%scripts\verify_doc_delta.py" --record %2 %3 %4 %5 %6 %7 %8 %9
     echo.
     pause
     exit /b 0
@@ -269,11 +284,15 @@ rem     2) G506 baseline (the assessment clock starts at data-fetch,
 rem        NOT at proposal - a regression here silently changes grades)
 rem     3) per-category rule sets (mobile-phone cases have no
 rem        data-fetch node: their clock starts at the proposal)
+rem     4) doc-delta model (T10): the per-unclosed-SKU document
+rem        increment.  Pure backend state, but its contracts decide
+rem        whether the increment the business reads is real.
 rem ============================================================
 :offline_checks
 set "PTS_RC=0"
 set "T02_RC=0"
 set "SHL_RC=0"
+set "DD_RC=0"
 
 echo [CHECK] backend test suite ...
 echo.
@@ -298,10 +317,16 @@ echo [CHECK] per-category rules (membrane / case) ...
 set "SHL_RC=!errorlevel!"
 echo.
 
+echo [CHECK] doc-delta model (unclosed SKUs) ...
+"%PY%" "%ROOT%scripts\verify_doc_delta.py"
+set "DD_RC=!errorlevel!"
+echo.
+
 if not "!PTS_RC!"=="0" echo [WARN ] backend tests failed - see the output above.
 if not "!T02_RC!"=="0" echo [WARN ] G506 baseline changed - see the output above.
 if not "!SHL_RC!"=="0" echo [WARN ] per-category rules check failed - see the output above.
-if "!PTS_RC!"=="0" if "!T02_RC!"=="0" if "!SHL_RC!"=="0" echo [DONE ] Offline acceptance chain passed.
+if not "!DD_RC!"=="0" echo [WARN ] doc-delta model check failed - see the output above.
+if "!PTS_RC!"=="0" if "!T02_RC!"=="0" if "!SHL_RC!"=="0" if "!DD_RC!"=="0" echo [DONE ] Offline acceptance chain passed.
 echo.
 exit /b 0
 

@@ -6,10 +6,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .routers import (alerts, anomalies, batches, compare, dataadmin, diag,
-                      fillins, history, inflight, manual, overview, records,
-                      review, routes, rules, scenarios, skus, timeliness,
-                      transport, watch)
+from .routers import (alerts, anomalies, batches, compare, dataadmin, deltas,
+                      diag, fillins, history, inflight, manual, overview,
+                      records, review, routes, rules, scenarios, skus,
+                      timeliness, transport, watch)
 
 
 @asynccontextmanager
@@ -62,6 +62,7 @@ app.include_router(watch.router)
 app.include_router(fillins.router)
 app.include_router(history.router)
 app.include_router(inflight.router)
+app.include_router(deltas.router)
 app.include_router(rules.router)
 app.include_router(dataadmin.router)
 app.include_router(manual.router)

@@ -418,6 +418,157 @@ def assessment_report(items, summary, computed_at="", start_node="取数",
 
 
 # ---------------------------------------------------------------------------
+# T10 · 单据增量导出（未闭环 SKU 的新增单据 / 新动作 / 状态变化）
+# ---------------------------------------------------------------------------
+def doc_delta_report(delta, rows, category="", provisional=False,
+                     targets_source=""):
+    """单据增量 xlsx（bytes）。5 sheet：新增单据 / 新动作 / 状态变化 /
+    未闭环 SKU 汇总 / 口径说明。
+
+    delta：doc_delta_service.doc_delta() 的响应（取汇总与走势）
+    rows ：doc_delta_service.window_rows() 的明细（窗口内全部增量行）
+    """
+    rows = rows or {}
+    win = (delta or {}).get("window") or {}
+    summary = win.get("summary") or {}
+    last = (delta or {}).get("last") or None
+    scope = (delta or {}).get("scope") or ""
+
+    wb = Workbook()
+
+    # ---- sheet 1：新增单据 ----
+    ws1 = wb.active
+    ws1.title = "新增单据"
+    ws1["A1"] = (f"单据增量 · 新增单据（近 {win.get('days')} 天，"
+                 f"自 {win.get('since')} 起）")
+    ws1["A1"].font = TITLE_FONT
+    ws1["A2"] = (f"范围：{scope}；仅统计**未闭环** SKU 的单据 —— "
+                 "已闭环 SKU 不再推进，不纳入追踪。")
+    ws1["A2"].font = Font(size=10, color="616161")
+    if provisional:
+        ws1["A3"] = (f"⚠ {category} 目标口径待校准（{targets_source or '继承名义值'}）；"
+                     "本表只记录「单据有没有新增」，不涉及目标天判定。")
+        ws1["A3"].font = Font(bold=True, size=10, color="EF6C00")
+    _head_row(ws1, 5, ["SKU", "型号", "Part", "审批编号", "审批状态",
+                       "创建时间", "节点数", "首次发现于"],
+              widths=[16, 22, 8, 26, 12, 20, 8, 20])
+    r = 6
+    for x in rows.get("newDocs") or []:
+        _put(ws1, r, 1, x.get("sku"))
+        _put(ws1, r, 2, x.get("model") or "")
+        _put(ws1, r, 3, x.get("part"))
+        _put(ws1, r, 4, x.get("approvalNo") or "")
+        _put(ws1, r, 5, x.get("status") or "—")
+        _put(ws1, r, 6, x.get("createAt") or "")
+        _put(ws1, r, 7, x.get("nodeCount"))
+        _put(ws1, r, 8, x.get("at") or "")
+        r += 1
+    if r == 6:
+        ws1.cell(row=6, column=1, value="（窗口内没有新增单据）").font = CELL_FONT
+
+    # ---- sheet 2：单据新动作 ----
+    ws2 = wb.create_sheet("单据新动作")
+    ws2["A1"] = "单据增量 · 既有单据上的新动作（新单据的动作不在这里重复计）"
+    ws2["A1"].font = TITLE_FONT
+    _head_row(ws2, 3, ["SKU", "Part", "审批编号", "新动作", "动作时间",
+                       "操作人", "首次发现于"],
+              widths=[16, 8, 26, 26, 20, 14, 20])
+    r = 4
+    for x in rows.get("newNodes") or []:
+        _put(ws2, r, 1, x.get("sku"))
+        _put(ws2, r, 2, x.get("part"))
+        _put(ws2, r, 3, x.get("approvalNo") or "")
+        _put(ws2, r, 4, x.get("action") or "")
+        _put(ws2, r, 5, x.get("actionAt") or "")
+        _put(ws2, r, 6, x.get("operator") or "")
+        _put(ws2, r, 7, x.get("at") or "")
+        r += 1
+    if r == 4:
+        ws2.cell(row=4, column=1, value="（窗口内没有新增动作）").font = CELL_FONT
+
+    # ---- sheet 3：状态变化 ----
+    ws3 = wb.create_sheet("状态变化")
+    ws3["A1"] = "单据增量 · 审批状态变化"
+    ws3["A1"].font = TITLE_FONT
+    _head_row(ws3, 3, ["SKU", "Part", "审批编号", "原状态", "新状态", "发现于"],
+              widths=[16, 8, 26, 12, 12, 20])
+    r = 4
+    for x in rows.get("statusChanges") or []:
+        _put(ws3, r, 1, x.get("sku"))
+        _put(ws3, r, 2, x.get("part"))
+        _put(ws3, r, 3, x.get("approvalNo") or "")
+        _put(ws3, r, 4, x.get("from") or "")
+        c = _put(ws3, r, 5, x.get("to") or "")
+        c.font = Font(size=10, color="2E7D32" if x.get("to") == "已结束"
+                      else ("C62828" if x.get("to") == "终止" else "616161"))
+        _put(ws3, r, 6, x.get("at") or "")
+        r += 1
+    if r == 4:
+        ws3.cell(row=4, column=1, value="（窗口内没有状态变化）").font = CELL_FONT
+
+    # ---- sheet 4：未闭环 SKU 汇总 ----
+    ws4 = wb.create_sheet("未闭环SKU汇总")
+    ws4["A1"] = "单据增量 · 未闭环 SKU 增量排行（近 %s 天）" % win.get("days")
+    ws4["A1"].font = TITLE_FONT
+    _head_row(ws4, 3, ["SKU", "型号", "开发类型", "未闭环原因", "当前单据数",
+                       "新增单据", "新增动作", "状态变化", "最近变化"],
+              widths=[16, 22, 12, 40, 12, 10, 10, 10, 20])
+    r = 4
+    for x in win.get("bySku") or []:
+        _put(ws4, r, 1, x.get("sku"))
+        _put(ws4, r, 2, x.get("model") or "")
+        _put(ws4, r, 3, x.get("devType") or "")
+        _put(ws4, r, 4, x.get("reason") or "")
+        _put(ws4, r, 5, x.get("docCount"))
+        _put(ws4, r, 6, x.get("newDocs"))
+        _put(ws4, r, 7, x.get("newNodes"))
+        _put(ws4, r, 8, x.get("statusChanges"))
+        _put(ws4, r, 9, x.get("lastChangeAt") or "")
+        r += 1
+
+    # ---- sheet 5：口径说明 ----
+    ws5 = wb.create_sheet("口径说明")
+    ws5["A1"] = "单据增量追踪 · 口径说明"
+    ws5["A1"].font = TITLE_FONT
+    lines = [
+        f"品类：{category}",
+        f"统计范围：{scope}",
+        f"统计窗口：近 {win.get('days')} 天（自 {win.get('since')} 起）；"
+        f"共 {summary.get('snapshots', 0)} 次快照",
+        f"新增单据 {summary.get('newDocs', 0)} 张 / 新增动作 "
+        f"{summary.get('newNodes', 0)} 个 / 状态变化 "
+        f"{summary.get('statusChanges', 0)} 次 / 新进入未闭环 "
+        f"{summary.get('newSkus', 0)} 个 SKU / 已闭环离开 "
+        f"{summary.get('closedSkus', 0)} 个 SKU",
+        "",
+        "1) 为什么要这个模型：批次目录名固定后「只有一个批次」，批次对比失去意义；"
+        "本表追踪的是同一批未闭环 SKU 身上『又多了哪些单据』。",
+        "2) 基线拍法：数据指纹（批次导入状态 + 规则版本 + 商品资料）变化时才拍一次，"
+        "没变化不产生事件；当天多次同步各自成事件，因此按时间累积即为真实增量。",
+        "3) 单据键 = SKU|Part|审批编号（编号缺失时用创建时间兜底）。"
+        "不能用数据库自增 id —— 重导入会整批重建，id 每次都变。",
+        "4) 单据指纹 = 审批状态 + 节点动作（动作|时间|操作人），"
+        "因此「同一张单新推进一步」也会被抓出来。",
+        "5) 新单据自带的节点**不计入**「新增动作」，避免一张新单被数成 1 单 + N 动作。",
+        "6) 已闭环 SKU 会离开追踪集合（记在「已闭环离开」计数里），不再占基线体积。",
+        "7) 疑似基线重算：某轮新增单据数 > 当前单据总数×0.6 且总数 ≥ 50 时打标，"
+        "提示可能是源单据号段变化，而非真的有这么多新单。",
+    ]
+    if provisional:
+        lines.append(f"8) ⚠ 待校准：{category} 的评级线/目标天仍是名义值"
+                     f"（{targets_source or '继承名义值'}），与本表增量计数无关。")
+    r = 3
+    for ln in lines:
+        c = ws5.cell(row=r, column=1, value=ln)
+        c.font = Font(bold=True, size=11) if ln == "" else CELL_FONT
+        r += 1
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
 # 路由总览用的路线口径说明（前端"口径说明卡"数据源）
 # ---------------------------------------------------------------------------
 def route_limits(ruleset=None):

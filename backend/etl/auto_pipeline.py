@@ -4,7 +4,8 @@
 一次 run_pipeline() = 「钉钉导出到位 → 看板就绪 → 日报落盘 → 邮件出去」的完整闭环：
 
     1. ensure_schema + 按文件指纹增量导入全部品类批次（未变化自动跳过）
-    2. 每个有数据的品类：复盘重算（触发 KPI 快照）→ 在研快照 → 当日事中日报 xlsx
+    2. 每个有数据的品类：复盘重算（触发 KPI 快照）→ 在研快照 → 单据增量基线
+       （T10，未闭环 SKU）→ 当日事中日报 xlsx
     3. 按保留期清理过期日报
     4. mail_enabled 且未 skip_mail 时发送邮件（一天一封，去重）
 
@@ -68,7 +69,13 @@ def _step_import():
 
 
 def _step_snapshots_and_reports():
-    """每品类：复盘重算（含 KPI 快照）→ 在研快照 → 当日日报。返回 {cat: path}。"""
+    """每品类：复盘重算（含 KPI 快照）→ 在研快照 → 单据增量基线 → 当日日报。
+
+    T10 的 `maybe_doc_snapshot` 放在这里而不是日报里：它只依赖复盘数据，
+    且必须**紧跟导入之后**（这时的指纹才是刚导进来的那份）。
+    指纹没变它自己会跳过，所以一天两次管线不会产生假增量。
+    """
+    from app.doc_delta_service import maybe_doc_snapshot
     from app.inflight_service import (generate_daily_report,
                                       maybe_inflight_snapshot)
     from app.routers.review import get_review_data
@@ -80,6 +87,9 @@ def _step_snapshots_and_reports():
             continue
         get_review_data(cat)                    # 复盘重算内部会记 KPI 快照
         maybe_inflight_snapshot(cat)            # 在研节点快照（进度 diff 用）
+        d = maybe_doc_snapshot(cat)             # T10 未闭环 SKU 单据增量基线
+        log_line(f"{'OK' if d.get('recorded') else 'SKIP'} doc-delta {cat}: "
+                 f"{d.get('reason')}")
         r = generate_daily_report(cat)
         reports[cat] = r
         log_line(f"OK report {cat} -> {r.get('path')}")

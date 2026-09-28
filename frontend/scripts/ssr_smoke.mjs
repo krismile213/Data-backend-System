@@ -63,7 +63,7 @@ globalThis.localStorage = {
 
 const PAGES = [
   'Alerts', 'Anomalies', 'Assessment', 'Compare', 'Dashboard', 'DataAdmin',
-  'Fillins', 'Gantt', 'History', 'InflightDaily', 'Manual', 'Records',
+  'Deltas', 'Fillins', 'Gantt', 'History', 'InflightDaily', 'Manual', 'Records',
   'Review', 'Routes', 'Rules', 'Scenarios', 'Skus', 'Transport', 'Watch',
 ];
 

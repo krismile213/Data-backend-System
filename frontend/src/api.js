@@ -368,3 +368,27 @@ export function fetchAssessment() {
 export function buildAssessmentExportUrl() {
   return appendCategory(`${BASE}/review/assessment/export`);
 }
+
+/* ------------------ 单据增量：未闭环 SKU 的新增单据追踪（T10） ------------------ */
+
+/**
+ * 单据增量：基线信息 + 最近一次增量 + 窗口聚合 + 快照流水。
+ * 为什么不是「批次对比」：批次目录名固定后只有一个批次，批次之间没法比了，
+ * 改为追踪同一批未闭环 SKU 身上「又多了哪些单据」。
+ */
+export function fetchDeltas({ days = 30, sku = '' } = {}) {
+  return request('/deltas', { days, sku });
+}
+
+/** 立即拍一张单据增量快照（force=true 同指纹也重拍，排障用） */
+export function triggerDeltaSnapshot(force = false) {
+  return postJson(`/deltas/snapshot?force=${force}`);
+}
+
+/** 单据增量 xlsx 导出（5 sheet：新增单据/新动作/状态变化/未闭环SKU汇总/口径说明） */
+export function buildDeltasExportUrl({ days = 30, sku = '' } = {}) {
+  const qs = new URLSearchParams();
+  if (days) qs.set('days', String(days));
+  if (sku) qs.set('sku', sku);
+  return appendCategory(`${BASE}/deltas/export${qs.toString() ? `?${qs}` : ''}`);
+}

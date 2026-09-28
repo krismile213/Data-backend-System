@@ -31,6 +31,7 @@ import StorageIcon from '@mui/icons-material/Storage';
 import MenuBookIcon from '@mui/icons-material/MenuBook';
 import PendingActionsIcon from '@mui/icons-material/PendingActions';
 import FactCheckIcon from '@mui/icons-material/FactCheck';
+import DifferenceIcon from '@mui/icons-material/Difference';
 import BatchSelector from './components/BatchSelector.jsx';
 import CategorySelector from './components/CategorySelector.jsx';
 import { getCategory, setCategory } from './category';
@@ -55,6 +56,7 @@ const DataAdmin = lazy(() => import('./pages/DataAdmin.jsx'));
 const Manual = lazy(() => import('./pages/Manual.jsx'));
 const InflightDaily = lazy(() => import('./pages/InflightDaily.jsx'));
 const Assessment = lazy(() => import('./pages/Assessment.jsx'));
+const Deltas = lazy(() => import('./pages/Deltas.jsx'));
 
 const DRAWER_WIDTH = 220;
 
@@ -72,6 +74,9 @@ const NAV_ITEMS = [
   { key: 'fillins', label: '手工填报', icon: <EditNoteIcon /> },
   { key: 'history', label: '趋势周报', icon: <InsightsIcon /> },
   { key: 'compare', label: '批次对比', icon: <CompareArrowsIcon /> },
+  // 批次目录名固定后只有一个批次可比，批次对比失去意义 —— 日常「这周动了什么」
+  // 由「单据增量」回答（未闭环 SKU 的新增单据追踪）
+  { key: 'deltas', label: '单据增量', icon: <DifferenceIcon /> },
   { key: 'skus', label: 'SKU 档案', icon: <ManageSearchIcon /> },
   { key: 'records', label: '明细查询', icon: <TableChartIcon /> },
   { key: 'anomalies', label: '异常排查', icon: <WarningAmberIcon /> },
@@ -94,6 +99,7 @@ const PAGES = {
   fillins: Fillins,
   history: History,
   compare: Compare,
+  deltas: Deltas,
   skus: Skus,
   records: Records,
   anomalies: Anomalies,

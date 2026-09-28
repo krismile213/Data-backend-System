@@ -686,3 +686,97 @@ Part1~Part4 / Part6 / Part7（实测 Part2 另有 **8 个 SKU** 是多单据；P
 `PRODUCT_END_NODE` 改回等价旧口径（或直接改 `_build()` 的默认值 `getattr(mod, "PRODUCT_END_NODE", …)`）。
 但**注意**：旧口径「产品部=本地仓到货」与段级 SEGS（终点=素材加工）本就不一致，回退会把总览/预警又拉回与段级不符的状态；
 文档/前端文案由后端 `segDef` 驱动，改真源即可联动，无需逐处回改。
+
+---
+
+## T10 未闭环 SKU 单据增量追踪（2026-09-28）
+
+### 起因：批次对比结构性失效
+
+用户 2026-09-28：**「现在最新的一批有 4027 个单据，对比上周，我得到的感知较弱；
+刚好现在批次对比中，以后只有一个批次了，我需要定义一个模型，追踪未闭环 SKU 新增单据。」**
+
+根因是**批次不再滚动**：现行取数方式是「钉钉每天导出最新全量、批次目录名固定」
+（`PartN_名称-时间戳.xlsx` 反复覆盖，只留最新），批次表里永远只有那一个批次在长。
+`/api/compare` 比的是批次之间的 KPI/partBar/statusPie，**没有第二个批次可比**，
+只剩总量大数，推不出「哪些未闭环 SKU 又动了、动了哪张单」。
+
+**结论**：比较维度从「批次 vs 批次」换成「**同一批未闭环 SKU 的单据集合，今天 vs 上一次同步**」。
+
+### 模型（唯一真源 `backend/app/doc_delta_service.py`）
+
+```
+state[品类] = { at, fingerprint, skuCount, docCount, docs: { 单据键 → 单据指纹 } }
+events[]    = 每次指纹变化产生的一条增量事件（含全部增量明细 + 汇总）
+```
+
+| 要素 | 定义 | 关键理由 |
+|---|---|---|
+| 单据键 | `SKU\|Part\|审批编号`（编号空 → `SKU\|Part\|c:创建时间`） | ⚠️ **不能用 `part_doc.id`**：重导整批删建，自增 id 每次都变 |
+| 单据指纹 | `审批状态 + [动作\|时间\|操作人]` | 既有单据推进一步也能抓到（用户要的「单据内新动作也算」） |
+| 跟踪范围 | 复盘口径 `valid=False`（未闭环） | 与复盘/预警同源；未闭环单据实测仅占全部 ~1/8 |
+
+**五类增量**：`newDocs` / `newNodes` / `statusChanges` / `newSkus` / `closedSkus`。
+
+> ⚠️ **新单据的节点不重复计入 `newNodes`**，否则「一张新单带 5 个节点」会被数成 1 单据 + 5 新动作。
+
+**三条幂等/防噪规则**（都真机验证）：
+
+1. **指纹没变 → 不产生事件**（管线一天 2 次 + 页面补拍，否则一天长 10 条空事件）；
+2. **首次拍只建基线、不产生事件**（否则把当时全部未闭环单据 504 条报成"新增"，是噪声）；
+   判定依据是 **state 条目存在与否**，不是 `docs` 是否为空（全闭环时 docs 正常变空，
+   之后新 SKU 进来的单据是真新增，不能被"首次建基线"吞掉）；
+3. **无活批次 → 跳过拍快照**（否则基线被冲成空表，下轮真数据全部报成新增）。
+
+**suspect 标记**：`新增单据 > 总数 × 0.6 且 总数 ≥ 50` → 打「疑似基线重算」（源换号段/基线被清）。
+**只标记不吞数据** —— 宁可让业务看到"这轮 480 张单都算新增"并起疑，也不静默丢增量。
+
+**为什么不是每日全量快照**：实测 ~100KB/品类/次 × 2 次/天 × 365 ≈ **100MB**；
+改「基线 + 事件流」后稳态 **~200KB**，历史趋势一点没丢（事件即历史，按日聚合）。
+保留 `EVENT_RETENTION_DAYS=400` 天 + `EVENT_MAX=2000` 条。
+
+### 锁纪律（本项目死锁前科）
+
+`review` 重算**绝不在锁内**：锁内只做 load/diff/save，`build_docs()`（会调
+`get_review_data`，几秒）在锁外，并**双重检查**指纹避免并发重复提交。`_lock` 用 `RLock`。
+
+### 交付物
+
+| 层 | 文件 |
+|---|---|
+| 模型 | `backend/app/doc_delta_service.py`（新） |
+| 接口 | `backend/app/routers/deltas.py`（新）：`GET /api/deltas`、`POST /api/deltas/snapshot`、`GET /api/deltas/export` |
+| 导出 | `backend/app/reporting.py` 加 `doc_delta_report()`（5 sheet：新增单据/单据新动作/状态变化/未闭环SKU汇总/口径说明） |
+| 管线 | `backend/etl/auto_pipeline.py` 的 `_step_snapshots_and_reports()` 加 `maybe_doc_snapshot(cat)`（紧跟导入之后） |
+| 注册 | `backend/app/main.py` include deltas 路由 |
+| 前端 | `frontend/src/pages/Deltas.jsx`（新，20 页）、`api.js`（3 个函数）、`App.jsx`（导航 + 路由） |
+| 自检 | `scripts/verify_doc_delta.py`（新，8 项契约断言 + `--record` / `--export`）、`tests/test_doc_delta.py`（新，23 例） |
+| 在线验收 | `scripts/verify_live_isolated.py`（新）—— 隔离端口（8001/5174）跑新代码，**不动用户正在用的 8000/5173**；缺依赖会自动 re-exec 到项目 venv |
+| 入口 | `start.py` / `start.bat` 加 `delta` 子命令；`start.py` 加 `verify-live`（跑上面那个隔离验收）；`offline_checks` 变**离线四件套** |
+| 文档 | `docs/SKU单据增量追踪模型.md`（新）、`docs/单据增量使用说明.md`（新，进手册白名单 key=`delta`）、README §三.13 + 接口表、本档 §T10 |
+
+### 验收基线（T10）
+
+| 项 | T08 基线 | T10 基线 |
+|---|---|---|
+| 后端用例 | 193 passed + 1 skipped | **230 passed + 1 skipped** |
+| 接口全量扫描 | 34/34 = 200 | **36/36 = 200**（+2：`/api/deltas`、`/api/deltas/export`） |
+| 前端渲染 | 19/19 页 OK | **20/20 页 OK** |
+| 前端 SSR | 23 通过 / 0 失败 | **25 通过 / 0 失败**（20 页 + 4 组件 + CategorySelector） |
+
+> ⚠️ **验收前先 `start.bat restart`**：本机常有用户自启的 8000 旧实例，检查脚本会打到它身上
+> （旧代码 → `/api/deltas` 404）。若不能打扰用户正在用的实例，直接跑
+> **`scripts/verify_live_isolated.py`** —— 它另起隔离端口（后端 8001 + 前端 5174；
+> `vite.config.js` 支持 `API_TARGET` 环境变量），跑完拆掉并断言用户的 8000/5173 仍活着；
+> 内部依次做：`/api/deltas` 口径断言（含未知品类回退、sku 过滤）→ 导出 xlsx 魔数 →
+> 快照幂等 → 调既有四个检查脚本（都支持 `--base`）。缺依赖的解释器会自动 re-exec 到项目 venv。
+
+### 如何回退
+
+本模块是**纯新增**（新文件 + 新路由 + 管线一行调用 + 一个导航项）。回退：
+
+1. `backend/app/main.py` 移除 deltas 的 import 与 `include_router`；
+2. `backend/etl/auto_pipeline.py` 移除 `maybe_doc_snapshot(cat)`；
+3. 删除 `<STATE_DIR>/doc_delta_state.json`。
+
+前端页面与 `start.py delta` 留着不影响任何既有功能。
