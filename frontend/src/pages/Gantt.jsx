@@ -1,10 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
+import { LoadingState, ErrorState, EmptyState } from '../components/StateViews.jsx';
+import { SEMANTIC } from '../theme.js';
 import {
-  Alert,
   Box,
   Button,
   Chip,
-  CircularProgress,
   InputAdornment,
   List,
   ListItemButton,
@@ -18,15 +18,16 @@ import DownloadIcon from '@mui/icons-material/Download';
 import * as echarts from 'echarts';
 import EChart from '../components/EChart.jsx';
 import { fetchReviewOverview, fetchReviewSku, buildSkuReportUrl } from '../api.js';
+import useApi from '../hooks/useApi.js';
 
 /** 部门配色（对应 gantt_sheet.py DEPT_FILL） */
 const DEPT_FILL = {
-  产品: '#4472c4',
-  __GAP__: '#a6a6a6',
-  运营: '#70ad47',
-  后勤: '#ed7d31',
-  运输: '#7030a0',
-  '4国': '#bf8f00',
+  产品: SEMANTIC.brand,
+  __GAP__: SEMANTIC.muted,
+  运营: SEMANTIC.success,
+  后勤: SEMANTIC.warning,
+  运输: SEMANTIC.purple,
+  '4国': SEMANTIC.caution,
 };
 const DEPT_LABEL = {
   产品: '产品部',
@@ -36,9 +37,9 @@ const DEPT_LABEL = {
   运输: '运输',
   '4国': '4国单独',
 };
-const RED_FILL = '#ff3b30';     // 超时部分（对应 gantt_sheet RED_FILL）
-const NEUTRAL_FILL = '#a6a6a6'; // 留空段
-const JUDGE_COLOR = { '✓': '#1f7a1f', '✗': '#c00000', '⚠': '#ed6c02' };
+const RED_FILL = SEMANTIC.danger;     // 超时部分（对应 gantt_sheet RED_FILL）
+const NEUTRAL_FILL = SEMANTIC.muted; // 留空段
+const JUDGE_COLOR = { '✓': SEMANTIC.success, '✗': SEMANTIC.danger, '⚠': SEMANTIC.warning };
 
 const DAY_MS = 86400000;
 
@@ -54,7 +55,7 @@ function judgeColor(judge) {
   for (const [k, c] of Object.entries(JUDGE_COLOR)) {
     if (j.startsWith(k)) return c;
   }
-  return '#808080';
+  return SEMANTIC.neutral;
 }
 
 /** 由 SKU 档案构建 ECharts 甘特图 option（模仿 gantt_sheet.py：部门分组/超时红色/条尾判定） */
@@ -166,8 +167,8 @@ function buildGanttOption(detail, publishAt) {
       data,
       markLine: ts(publishAt) == null ? undefined : {
         symbol: 'none',
-        lineStyle: { color: '#5e35b1', type: 'dashed', width: 1.5 },
-        label: { formatter: '官方发布', fontSize: 10, color: '#5e35b1' },
+        lineStyle: { color: SEMANTIC.purple, type: 'dashed', width: 1.5 },
+        label: { formatter: '官方发布', fontSize: 10, color: SEMANTIC.purple },
         data: [{ xAxis: ts(publishAt) }],
       },
     },
@@ -179,14 +180,14 @@ function buildGanttOption(detail, publishAt) {
       type: 'scatter',
       symbol: 'diamond',
       symbolSize: 13,
-      itemStyle: { color: '#7b1fa2', borderColor: '#fff', borderWidth: 1 },
+      itemStyle: { color: SEMANTIC.purple, borderColor: SEMANTIC.onColor, borderWidth: 1 },
       data: milestones.map(([t, ci, name]) => ({ value: [t, ci], name })),
       label: {
         show: true,
         position: 'top',
         formatter: (p) => p.name,
         fontSize: 10,
-        color: '#7b1fa2',
+        color: SEMANTIC.purple,
       },
       z: 5,
     });
@@ -232,7 +233,7 @@ function buildGanttOption(detail, publishAt) {
           dept: {
             fontWeight: 'bold',
             fontSize: 11,
-            color: '#333',
+            color: SEMANTIC.text,
             lineHeight: 16,
           },
         },
@@ -247,28 +248,26 @@ function buildGanttOption(detail, publishAt) {
 }
 
 export default function Gantt() {
-  const [rows, setRows] = useState([]);
   const [kw, setKw] = useState('');
   const [sku, setSku] = useState('');
-  const [detail, setDetail] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
 
-  useEffect(() => {
-    fetchReviewOverview()
-      .then((d) => setRows(d.rows || []))
-      .catch((e) => setError(e.message));
-  }, []);
+  // 统一请求 hook：SKU 行列表 + 选中 SKU 的节点明细
+  const { data: rows } = useApi(
+    () => fetchReviewOverview().then((d) => d.rows || []),
+    [],
+    { initialData: [] },
+  );
+  const {
+    data: detail, loading, error, setData: setDetail,
+  } = useApi(
+    () => fetchReviewSku(sku),
+    [sku],
+    { enabled: !!sku },
+  );
 
   const pick = (code) => {
     setSku(code);
-    setDetail(null);
-    setLoading(true);
-    setError('');
-    fetchReviewSku(code)
-      .then(setDetail)
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
+    setDetail(null); // 切换 SKU 时先清图，避免短暂闪出上一条甘特图
   };
 
   const filtered = useMemo(() => {
@@ -332,11 +331,11 @@ export default function Gantt() {
 
       {/* 右侧甘特图 */}
       <Box sx={{ flexGrow: 1, minWidth: 0, overflow: 'auto' }}>
-        {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+        {error && <ErrorState error={error} sx={{ mb: 2 }} />}
         {!sku && !error && (
-          <Alert severity="info">左侧选择一个 SKU，查看其实际动作映射全流程甘特图</Alert>
+          <EmptyState>左侧选择一个 SKU，查看其实际动作映射全流程甘特图</EmptyState>
         )}
-        {loading && <CircularProgress sx={{ m: 4 }} />}
+        {loading && <LoadingState sx={{ mt: 4 }} />}
         {detail && option && (
           <Paper sx={{ p: 2 }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 1, flexWrap: 'wrap' }}>
@@ -375,7 +374,7 @@ export default function Gantt() {
                 ['4国单独', DEPT_FILL['4国']],
                 ['留空段', NEUTRAL_FILL],
                 ['超时部分', RED_FILL],
-                ['部门终节点', '#7b1fa2'],
+                ['部门终节点', SEMANTIC.purple],
               ].map(([label, color]) => (
                 <Box key={label} sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
                   <Box sx={{ width: 14, height: 10, bgcolor: color, borderRadius: 0.5 }} />

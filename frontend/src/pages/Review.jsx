@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Box,
   Paper,
@@ -14,7 +14,6 @@ import {
   MenuItem,
   Chip,
   CircularProgress,
-  Alert,
   Dialog,
   DialogTitle,
   DialogContent,
@@ -24,7 +23,15 @@ import {
 } from '@mui/material';
 import DownloadIcon from '@mui/icons-material/Download';
 import EChart from '../components/EChart.jsx';
-import { fetchReviewOverview, fetchReviewSku, buildReviewExportUrl } from '../api.js';
+import {
+  fetchReviewOverview, fetchReviewSku, buildReviewExportUrl,
+  buildCheckReportUrl, buildSkuReportUrl,
+} from '../api.js';
+import KpiCard from '../components/KpiCard.jsx';
+import PageHeader from '../components/PageHeader.jsx';
+import { LoadingState, ErrorState } from '../components/StateViews.jsx';
+import { SEMANTIC } from '../theme.js';
+import useApi from '../hooks/useApi.js';
 
 const PART_SHORT = {
   Part1: 'P1 开发', Part2: 'P2 首单', Part3: 'P3 到货', Part4: 'P4 上架',
@@ -32,31 +39,16 @@ const PART_SHORT = {
   Part9: 'P9 检查',
 };
 
-const DEPT_COLOR = { 产品: '#1e5eff', 运营: '#2e7d32', 后勤: '#ed6c02' };
-
-function KpiCard({ label, value, sub, color = '#1a2740' }) {
-  return (
-    <Paper sx={{ p: 2, height: '100%' }}>
-      <Typography variant="caption" color="text.secondary">{label}</Typography>
-      <Typography variant="h5" sx={{ fontWeight: 700, color, mt: 0.5 }}>{value}</Typography>
-      {sub && <Typography variant="caption" color="text.secondary">{sub}</Typography>}
-    </Paper>
-  );
-}
+const DEPT_COLOR = { 产品: SEMANTIC.brand, 运营: SEMANTIC.success, 后勤: SEMANTIC.warning };
 
 export default function Review() {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
+  const { data, error } = useApi(() => fetchReviewOverview(), []);
   const [q, setQ] = useState('');
   const [devFilter, setDevFilter] = useState('');
   const [validFilter, setValidFilter] = useState('');
   const [detailSku, setDetailSku] = useState(null);
   const [detail, setDetail] = useState(null);
   const [personQ, setPersonQ] = useState('');
-
-  useEffect(() => {
-    fetchReviewOverview().then(setData).catch((e) => setError(e.message));
-  }, []);
 
   const openDetail = (sku) => {
     setDetailSku(sku);
@@ -82,8 +74,8 @@ export default function Review() {
     return data.persons.filter((p) => !kw || p.operator.toLowerCase().includes(kw));
   }, [data, personQ]);
 
-  if (error) return <Alert severity="error">复盘总览加载失败：{error}</Alert>;
-  if (!data) return <Box sx={{ display: 'flex', justifyContent: 'center', mt: 8 }}><CircularProgress /></Box>;
+  if (error) return <ErrorState prefix="复盘总览加载失败" error={error} />;
+  if (!data) return <LoadingState />;
 
   const validN = data.rows.filter((r) => r.valid).length;
   const totalN = data.rows.length;
@@ -98,8 +90,8 @@ export default function Review() {
       type: 'pie', radius: ['45%', '70%'],
       label: { formatter: '{b}: {c} ({d}%)' },
       data: [
-        { name: '有效复盘', value: validN, itemStyle: { color: '#2e7d32' } },
-        { name: '未完成三部门', value: totalN - validN, itemStyle: { color: '#b0bec5' } },
+        { name: '有效复盘', value: validN, itemStyle: { color: SEMANTIC.success } },
+        { name: '未完成三部门', value: totalN - validN, itemStyle: { color: SEMANTIC.muted } },
       ],
     }],
   };
@@ -117,7 +109,7 @@ export default function Review() {
     series: [{
       type: 'bar', barWidth: 22,
       data: data.bottleneckTop.map((b) => b.count),
-      itemStyle: { color: '#d84315' },
+      itemStyle: { color: SEMANTIC.deepOrange },
       label: { show: true, position: 'right' },
     }],
   };
@@ -145,7 +137,7 @@ export default function Review() {
       type: 'bar', barWidth: 20,
       data: statRows.map((s) => ({
         value: s.onTimeRate,
-        itemStyle: { color: s.onTimeRate >= 70 ? '#2e7d32' : s.onTimeRate >= 40 ? '#f9a825' : '#c62828' },
+        itemStyle: { color: s.onTimeRate >= 70 ? SEMANTIC.success : s.onTimeRate >= 40 ? SEMANTIC.caution : SEMANTIC.danger },
       })),
       label: { show: true, position: 'right', formatter: '{c}%' },
     }],
@@ -161,7 +153,7 @@ export default function Review() {
     series: [{
       type: 'bar', barWidth: 30,
       data: overDist.map((d) => d.count),
-      itemStyle: { color: '#d84315' },
+      itemStyle: { color: SEMANTIC.deepOrange },
       label: { show: true, position: 'top' },
     }],
   };
@@ -185,13 +177,13 @@ export default function Review() {
     series: [
       {
         name: '达标率', type: 'line', smooth: true, data: trend.map((t) => t.onTimeRate),
-        itemStyle: { color: '#1e5eff' },
+        itemStyle: { color: SEMANTIC.brand },
         label: { show: true, position: 'top', formatter: '{c}%', fontSize: 10 },
       },
       {
         name: '考核段数', type: 'bar', yAxisIndex: 1, barWidth: 16,
         data: trend.map((t) => t.sampleCount),
-        itemStyle: { color: '#cfd8dc' },
+        itemStyle: { color: SEMANTIC.border },
       },
     ],
   };
@@ -212,7 +204,7 @@ export default function Review() {
         </Grid>
         <Grid item xs={6} md={3}>
           <KpiCard label="有效复盘" value={`${validN}（${Math.round(100 * validN / totalN)}%）`}
-            sub="产品/运营/后勤三部门终节点全完成" color="#2e7d32" />
+            sub="产品/运营/后勤三部门终节点全完成" color={SEMANTIC.success} />
         </Grid>
         <Grid item xs={6} md={3}>
           <KpiCard label="提前开发 SKU" value={`${devKpi.total}`}
@@ -221,7 +213,7 @@ export default function Review() {
         <Grid item xs={6} md={3}>
           <KpiCard label="头号卡点环节" value={bottle1 ? bottle1.seg : '—'}
             sub={bottle1 ? `${bottle1.count} 个有效复盘 SKU 的最长段在此环节` : ''}
-            color="#d84315" />
+            color={SEMANTIC.deepOrange} />
         </Grid>
       </Grid>
 
@@ -293,7 +285,7 @@ export default function Review() {
                 <TableCell>SKU</TableCell>
                 <TableCell>型号</TableCell>
                 <TableCell>开发类型</TableCell>
-                <TableCell>产品部·签样</TableCell>
+                <TableCell>产品部·素材交付</TableCell>
                 <TableCell>运营部·上架</TableCell>
                 <TableCell>后勤部·到货</TableCell>
                 <TableCell>状态</TableCell>
@@ -327,7 +319,7 @@ export default function Review() {
                   </TableCell>
                   <TableCell align="right"
                     sx={{ color: r.contributionTotal == null ? 'inherit'
-                      : r.contributionTotal >= 0 ? '#2e7d32' : '#c62828' }}>
+                      : r.contributionTotal >= 0 ? SEMANTIC.success : SEMANTIC.danger }}>
                     {r.contributionTotal == null ? '—' : r.contributionTotal}
                   </TableCell>
                 </TableRow>
@@ -371,7 +363,7 @@ export default function Review() {
                   </TableCell>
                   <TableCell align="right">{p.skuCount}</TableCell>
                   <TableCell align="right"
-                    sx={{ color: p.overCount > 0 ? '#c62828' : 'inherit' }}>
+                    sx={{ color: p.overCount > 0 ? SEMANTIC.danger : 'inherit' }}>
                     {p.overCount}
                   </TableCell>
                   <TableCell sx={{ width: 220 }}>
@@ -382,8 +374,8 @@ export default function Review() {
                           value={p.onTimeRate}
                           sx={{ height: 8, borderRadius: 4,
                             '& .MuiLinearProgress-bar': {
-                              bgcolor: p.onTimeRate >= 70 ? '#2e7d32'
-                                : p.onTimeRate >= 40 ? '#f9a825' : '#c62828',
+                              bgcolor: p.onTimeRate >= 70 ? SEMANTIC.success
+                                : p.onTimeRate >= 40 ? SEMANTIC.caution : SEMANTIC.danger,
                             } }}
                         />
                       </Box>
@@ -409,10 +401,14 @@ export default function Review() {
         </DialogTitle>
         <DialogContent dividers>
           {!detail && <Box sx={{ py: 4, textAlign: 'center' }}><CircularProgress /></Box>}
-          {detail && detail.error && <Alert severity="error">档案加载失败</Alert>}
+          {detail && detail.error && <ErrorState>档案加载失败</ErrorState>}
           {detail && !detail.error && (
             <>
-              <Box sx={{ display: 'flex', gap: 2, mb: 2, flexWrap: 'wrap' }}>
+              {/* 下载按钮放内容区右上角，**不要放 DialogTitle 里**：DialogTitle 的 textContent
+                  就是弹窗的可访问名（aria-labelledby 指向它），按钮文字混进去会让读屏念成
+                  「复盘档案·G598 导出核查报告 复盘报告 md」。
+                  顺带：放在这里还能免掉「弹窗刚开、detail 未回来时按钮短暂禁用」的闪烁。 */}
+              <Box sx={{ display: 'flex', gap: 2, mb: 2, flexWrap: 'wrap', alignItems: 'center' }}>
                 {Object.entries(detail.dept).map(([k, v]) => (
                   <Chip key={k} variant="outlined"
                     label={`${k}：${v.time || v.note}`}
@@ -422,7 +418,55 @@ export default function Review() {
                   <Chip color="warning"
                     label={`卡点：${detail.bottleneck.dept} ${detail.bottleneck.seg}（${detail.bottleneck.days} 天）`} />
                 )}
+                <Box sx={{ flexGrow: 1 }} />
+                <Button size="small" variant="contained" startIcon={<DownloadIcon />}
+                  href={buildCheckReportUrl(detailSku)}
+                  title="甘特（按部门归块）+ 段级明细 + 末尾「人工核对」空白列，供线下核查回填">
+                  导出核查报告
+                </Button>
+                <Button size="small" variant="outlined" startIcon={<DownloadIcon />}
+                  href={buildSkuReportUrl(detailSku)}
+                  title="该 SKU 复盘的文字版（markdown），与流程甘特页「下载复盘报告 .md」是同一个文件">
+                  复盘报告 md
+                </Button>
               </Box>
+              {detail.multiRound?.flag && (
+                <Box sx={{ mb: 2, p: 1.5, borderRadius: 1,
+                  bgcolor: 'warning.light', color: 'warning.contrastText' }}>
+                  <Typography variant="body2">
+                    ⚠ 多轮提交：{detail.multiRound.note
+                      || '该单据存在撤回后重提，段级时间口径以最早一轮为准'}
+                  </Typography>
+                </Box>
+              )}
+              {detail.rootCause && (
+                <Box sx={{ mb: 2, p: 1.5, borderRadius: 1, bgcolor: 'action.hover' }}>
+                  <Typography variant="subtitle2" sx={{ mb: 0.5 }}>核心原因（因果链）</Typography>
+                  <Typography variant="body2">
+                    {[detail.rootCause.dept, detail.rootCause.seg,
+                      detail.rootCause.days != null
+                        ? `${detail.rootCause.days} 天` : '',
+                      detail.rootCause.reason || detail.rootCause.note]
+                      .filter(Boolean).join(' · ') || '—'}
+                  </Typography>
+                </Box>
+              )}
+              {detail.assessment && (
+                <Box sx={{ mb: 2, p: 1.5, borderRadius: 1,
+                  border: '1px dashed', borderColor: 'divider' }}>
+                  <Typography variant="subtitle2" sx={{ mb: 0.5 }}>损益推算</Typography>
+                  <Typography variant="body2">
+                    评级 {detail.assessment.grade || '—'} ·
+                    推迟 {detail.assessment.delayDays ?? '—'} 天 ·
+                    少卖 {detail.assessment.qtyMin ?? '—'}~{detail.assessment.qtyMax ?? '—'} 件 ·
+                    金额 {detail.assessment.amountMin == null
+                      ? '—'
+                      : `¥${detail.assessment.amountMin}~¥${detail.assessment.amountMax}`}
+                    {(detail.assessment.degraded || []).length
+                      ? `（${detail.assessment.degraded.join('；')}）` : ''}
+                  </Typography>
+                </Box>
+              )}
               <Table size="small">
                 <TableHead>
                   <TableRow>
@@ -451,16 +495,16 @@ export default function Review() {
                       <TableCell>
                         <Typography variant="caption" sx={{
                           fontWeight: 600,
-                          color: String(s.judge || '').startsWith('✗') ? '#c62828'
-                            : String(s.judge || '').startsWith('✓') ? '#2e7d32'
-                              : String(s.judge || '').startsWith('⚠') ? '#ed6c02' : 'text.secondary',
+                          color: String(s.judge || '').startsWith('✗') ? SEMANTIC.danger
+                            : String(s.judge || '').startsWith('✓') ? SEMANTIC.success
+                              : String(s.judge || '').startsWith('⚠') ? SEMANTIC.warning : 'text.secondary',
                         }}>
                           {s.judge || '—'}
                         </Typography>
                       </TableCell>
                       <TableCell align="right"
                         sx={{ color: s.contribution == null ? 'inherit'
-                          : s.contribution >= 0 ? '#2e7d32' : '#c62828' }}>
+                          : s.contribution >= 0 ? SEMANTIC.success : SEMANTIC.danger }}>
                         {s.gap ? '—' : (s.contribution == null ? '—' : s.contribution)}
                       </TableCell>
                       <TableCell>{s.executor || '—'}</TableCell>
@@ -488,7 +532,7 @@ export default function Review() {
                     <TableBody>
                       {detail.shipments.map((s, i) => (
                         <TableRow key={`${s.trk}-${s.hub}-${i}`}
-                          sx={{ bgcolor: s.noShip ? '#fdecea' : 'inherit' }}>
+                          sx={{ bgcolor: s.noShip ? SEMANTIC.dangerBg : 'inherit' }}>
                           <TableCell sx={{ fontFamily: 'monospace' }}>{s.trk || '—'}</TableCell>
                           <TableCell>{s.hub || '—'}</TableCell>
                           <TableCell>{s.ship || '—'}</TableCell>
@@ -498,8 +542,8 @@ export default function Review() {
                           <TableCell>
                             <Typography variant="caption" sx={{
                               fontWeight: 600,
-                              color: String(s.judge || '').startsWith('✗') ? '#c62828'
-                                : String(s.judge || '').startsWith('✓') ? '#2e7d32' : 'text.secondary',
+                              color: String(s.judge || '').startsWith('✗') ? SEMANTIC.danger
+                                : String(s.judge || '').startsWith('✓') ? SEMANTIC.success : 'text.secondary',
                             }}>
                               {s.judge}
                             </Typography>

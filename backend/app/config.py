@@ -18,14 +18,36 @@ config.py — 数据后台系统 后端配置中心
 import os
 from pathlib import Path
 
+from .seg_rules_shell import PART_CONFIGS as SHELL_PART_CONFIGS
+
 # ---------------------------------------------------------------------------
 # 路径配置
 # ---------------------------------------------------------------------------
 # 数据根目录：其下每个含 Part*.xlsx 的子目录视为一个"批次"
 # 可通过环境变量 DATA_ROOT 覆盖（企业化部署时无需改代码）
-DATA_ROOT = Path(
+#
+# ⚠️ 2026-09-22 起按**品类**分根（用户决策：手机壳单开一套规则，数据也分开放）：
+#    data\手机膜\  ← DATA_ROOT（环境变量，兼容既有部署）
+#    data\手机壳\  ← DATA_ROOT_SHELL
+#   DATA_ROOT 保持"默认品类（手机膜）的根"，因此既有引用零改动。
+_DEFAULT_ROOT = Path(
     os.environ.get("DATA_ROOT", r"C:\Users\dell\Desktop\work-main\data\手机膜")
 )
+
+#: 品类 → 数据根目录。新增品类：这里加一行 + 在 category_rules 注册规则集。
+DATA_ROOTS = {
+    "手机膜": _DEFAULT_ROOT,
+    "手机壳": Path(os.environ.get(
+        "DATA_ROOT_SHELL",
+        os.environ.get("DATA_ROOT_手机壳",
+                       r"C:\Users\dell\Desktop\work-main\data\手机壳"))),
+}
+
+#: 默认品类（= 所有 category 缺省参数的取值）
+DEFAULT_CATEGORY = "手机膜"
+
+#: 兼容别名：历史代码里的 DATA_ROOT 一律指默认品类的根
+DATA_ROOT = _DEFAULT_ROOT
 
 # 批次内数据文件通配符（按文件名顺序，天然对应 Part1~Part9）
 FILE_GLOB = "Part*.xlsx"
@@ -125,6 +147,24 @@ PART_CONFIGS = {
 }
 
 # ---------------------------------------------------------------------------
+# 品类 → Part 环节定义（用户 2026-09-22 决策：按品类分文件，互不污染）
+#   PART_CONFIGS 保持为手机膜（15 处现存引用全部零改动）；
+#   手机壳的定义在 seg_rules_shell.py（列名/关键动作均按真实导出实测）。
+#   ⚠️ 两个品类的 9 个 Part **键名与 Part 名完全相同**（导出文件名一致），
+#      差异只在 key_actions / biz_time_cols / notes —— 所以 ETL 与 parser 无需改。
+# ---------------------------------------------------------------------------
+PART_CONFIGS_BY_CATEGORY = {
+    "手机膜": PART_CONFIGS,
+    "手机壳": SHELL_PART_CONFIGS,
+}
+
+
+def part_configs_for(category=None):
+    """取品类的 Part 环节定义；None/未知品类 → 手机膜（保持既有行为）。"""
+    return PART_CONFIGS_BY_CATEGORY.get(str(category or "").strip(), PART_CONFIGS)
+
+
+# ---------------------------------------------------------------------------
 # 需要以文本方式处理、禁止精度丢失的列（18 位审批编号等）
 # ---------------------------------------------------------------------------
 TEXT_SAFE_COLS = ["审批编号", "数据id"]
@@ -133,12 +173,19 @@ TEXT_SAFE_COLS = ["审批编号", "数据id"]
 TIME_COLS = ["创建时间", "更新时间", "完成时间"]
 
 
-def list_batches():
-    """扫描数据根目录，返回可用批次列表 [{name, path, fileCount, parts}]"""
-    batches = []
-    if not DATA_ROOT.exists():
-        return batches
-    for d in sorted(DATA_ROOT.iterdir()):
+def data_root(category=None) -> Path:
+    """取品类对应的数据根目录；None/未知品类 → 默认品类（手机膜）的根。"""
+    cat = (category or "").strip() or DEFAULT_CATEGORY
+    return DATA_ROOTS.get(cat, _DEFAULT_ROOT)
+
+
+def _iter_root(root: Path, category: str):
+    """扫描一个数据根，产出批次 dict（内部用）。"""
+    out = []
+    pcfg = part_configs_for(category)
+    if not root.exists():
+        return out
+    for d in sorted(root.iterdir()):
         if not d.is_dir():
             continue
         files = sorted(d.glob(FILE_GLOB))
@@ -147,26 +194,77 @@ def list_batches():
         parts = []
         for f in files:
             pk = f.name.split("_")[0]
-            if pk in PART_CONFIGS:
-                parts.append({"part": pk, "name": PART_CONFIGS[pk]["name"],
+            if pk in pcfg:
+                parts.append({"part": pk, "name": pcfg[pk]["name"],
                               "file": f.name})
-        batches.append({
+        out.append({
             "name": d.name,
             "path": str(d),
             "fileCount": len(files),
             "parts": parts,
+            "category": category,
         })
-    return batches
+    return out
 
 
-def get_batch_dir(batch_name: str) -> Path:
-    """按批次名取目录并校验存在性；无效批次抛 FileNotFoundError"""
-    # 防路径穿越：必须是纯目录名（拦截 ../、分隔符、盘符绝对路径等）
-    if not batch_name or batch_name in (".", "..") \
-            or "/" in batch_name or "\\" in batch_name \
-            or ":" in batch_name or Path(batch_name).name != batch_name:
+def list_batches(category=None, all_categories: bool = False):
+    """扫描数据根目录，返回可用批次列表 [{name, path, fileCount, parts, category}]
+
+    category       指定品类 → 只扫该品类的根（缺省/未知 = 默认品类手机膜）
+    all_categories True      → 扫所有品类的根（ETL 全量导入用；此时忽略 category）
+    """
+    if all_categories:
+        out = []
+        for cat in DATA_ROOTS:
+            out.extend(_iter_root(DATA_ROOTS[cat], cat))
+        # 同一批次名跨品类重名时，后扫到的会覆盖 DB 里的 name 唯一行 —— 用
+        # “品类/批次名”作为展示名兜底，避免用户在界面上分不清。
+        seen = {}
+        for b in out:
+            seen.setdefault(b["name"], []).append(b)
+        for name, group in seen.items():
+            if len(group) > 1:
+                for b in group:
+                    b["displayName"] = f"{b['category']}/{name}"
+        return out
+    return _iter_root(data_root(category), (category or "").strip() or DEFAULT_CATEGORY)
+
+
+def _valid_batch_name(batch_name: str) -> bool:
+    """防路径穿越：必须是纯目录名（拦截 ../、分隔符、盘符绝对路径等）"""
+    return bool(batch_name) and batch_name not in (".", "..") \
+        and "/" not in batch_name and "\\" not in batch_name \
+        and ":" not in batch_name and Path(batch_name).name == batch_name
+
+
+def locate_batch(batch_name: str):
+    """按批次名跨品类查找，返回 (category, Path)；找不到抛 FileNotFoundError。
+
+    查找顺序：默认品类优先 → 其余品类按 DATA_ROOTS 声明顺序。
+    """
+    if not _valid_batch_name(batch_name):
         raise FileNotFoundError(batch_name)
-    d = DATA_ROOT / batch_name
-    if not d.is_dir() or not list(d.glob(FILE_GLOB)):
-        raise FileNotFoundError(batch_name)
-    return d
+    order = [DEFAULT_CATEGORY] + [c for c in DATA_ROOTS if c != DEFAULT_CATEGORY]
+    for cat in order:
+        if cat not in DATA_ROOTS:
+            continue
+        d = DATA_ROOTS[cat] / batch_name
+        if d.is_dir() and list(d.glob(FILE_GLOB)):
+            return cat, d
+    raise FileNotFoundError(batch_name)
+
+
+def get_batch_dir(batch_name: str, category=None) -> Path:
+    """按批次名取目录并校验存在性；无效批次抛 FileNotFoundError
+
+    category 指定时只在该品类的根下找；缺省时跨品类查找（既有调用方零改动）。
+    """
+    if category:
+        cat = category.strip()
+        if not _valid_batch_name(batch_name):
+            raise FileNotFoundError(batch_name)
+        d = data_root(cat) / batch_name
+        if not d.is_dir() or not list(d.glob(FILE_GLOB)):
+            raise FileNotFoundError(batch_name)
+        return d
+    return locate_batch(batch_name)[1]

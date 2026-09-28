@@ -18,7 +18,7 @@ watch.py — 页面内跨环节联动预警（GET /api/watch）
      动作 = 催拍摄交付与素材加工。
 
 责任人取法：有实际执行人（audit > 动作）用实际执行人，
-否则用 seg_rules.NODES 配置的默认责任人。
+否则用该品类规则集（category_rules）配置的默认责任人。
 
 接口：
   GET /api/watch   联动提醒清单 + 按责任人分组文案 + KPI
@@ -28,8 +28,8 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
 
+from ..category_rules import rules_for
 from ..rule_service import get_rules
-from ..seg_rules import NODES
 from .review import _parse_dt, get_review_data
 
 router = APIRouter(prefix="/api/watch", tags=["watch"])
@@ -62,19 +62,20 @@ def _p5_stall_days(det, now):
     return round(max(days), 1) if days else None
 
 
-def _owner_of(det, node):
-    """节点责任人：段级明细中终点为该节点的段执行人 > 默认配置责任人。
+def _owner_of(det, node, rs):
+    """节点责任人：段级明细中终点为该节点的段执行人 > 该品类规则集的默认责任人。
     （skuDetails.nodes 不带操作人，执行人取自 segments 的 executor 字段）"""
     for s in det.get("segments") or []:
         if s.get("to") == node and s.get("executor"):
             return s["executor"]
-    return NODES[node][3] or "未指定"
+    return (rs.node(node)["owner"] if node in rs.nodes else "") or "未指定"
 
 
-def compute_watch():
+def compute_watch(category=None):
+    rs = rules_for(category)
     rules, _ = get_rules()
     threshold = float(rules.get("stuck_days") or 7)
-    data = get_review_data()
+    data = get_review_data(category)
     rows = {r["sku"]: r for r in data["rows"]}
     now = datetime.now()
 
@@ -94,8 +95,8 @@ def compute_watch():
             items.append({
                 "kind": "R1", "kindName": "素材可先行启动",
                 "sku": sku, "model": row.get("model") or "",
-                "owner": _owner_of(det, "寄送") if not sent
-                         else _owner_of(det, "素材加工"),
+                "owner": _owner_of(det, "寄送", rs) if not sent
+                         else _owner_of(det, "素材加工", rs),
                 "action": ("寄送拍摄团队并启动素材制作（不必等发货）"
                            if not sent else
                            "催拍摄交付与素材加工（寄送已完成，素材环节停摆）"),
@@ -112,7 +113,7 @@ def compute_watch():
             items.append({
                 "kind": "R2", "kindName": "签样缺失·素材无法启动",
                 "sku": sku, "model": row.get("model") or "",
-                "owner": _owner_of(det, "签样"),
+                "owner": _owner_of(det, "签样", rs),
                 "action": "先补齐全套样品测试（签样），素材才有启动条件",
                 "stallDays": stall, "threshold": threshold,
                 "hubs": [], "sent": sent,
@@ -179,9 +180,9 @@ def compute_watch():
 
 
 @router.get("")
-def watch():
+def watch(category: str = None):
     """跨环节联动预警（页面内版）：清单 + 按人提醒文案 + KPI。"""
     try:
-        return compute_watch()
+        return compute_watch(category)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"联动预警计算失败: {e}")

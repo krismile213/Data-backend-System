@@ -524,8 +524,14 @@ class BatchData:
                 segment_heat.append({
                     "part": pk, "partName": cfg["name"],
                     "segment": r["流程环节"],
-                    "avg": r["平均耗时h"], "median": r["中位数耗时h"],
-                    "p90": r["P90耗时h"], "count": r["有效单据数"],
+                    # 该分段没有有效单据时 pandas 会算出 NaN，而 NaN 不是合法 JSON：
+                    # Starlette 的 JSONResponse 用 allow_nan=False，一路 NaN 就会让
+                    # 整个接口 500（实测 GET /api/timeliness/手机膜 即因此挂掉）。
+                    # 统一走 jsonable 转成 null，与 anomaly_list 里的处理保持一致。
+                    "avg": jsonable(r["平均耗时h"]),
+                    "median": jsonable(r["中位数耗时h"]),
+                    "p90": jsonable(r["P90耗时h"]),
+                    "count": jsonable(r["有效单据数"]),
                 })
         # 创建时间趋势（跨 Part 合计，按日）
         trend_counter = {}
@@ -679,6 +685,19 @@ class BatchData:
 
 _cache = {}
 _cache_lock = threading.Lock()
+# 按批次的构建锁：同一批次同时只允许一个线程构建。
+# 场景是「启动预热」与「用户请求」撞在同一批次上（都冷），没有它就会各算一遍、
+# 白白翻倍 CPU。注意构建过程在 _cache_lock 之外执行，锁序固定为
+# _cache_lock → _build_locks[name]，不存在反向获取。
+_build_locks = {}
+
+
+def _build_lock(name):
+    with _cache_lock:
+        lock = _build_locks.get(name)
+        if lock is None:
+            lock = _build_locks[name] = threading.Lock()
+        return lock
 
 
 def get_batch_data(batch_name: str) -> BatchData:
@@ -694,7 +713,13 @@ def get_batch_data(batch_name: str) -> BatchData:
         cached = _cache.get(batch_name)
         if cached is not None and cached.fingerprint == fp:
             return cached
-    bd = BatchData(batch_name, d)
-    with _cache_lock:
-        _cache[batch_name] = bd
-    return bd
+    lock = _build_lock(batch_name)
+    with lock:
+        with _cache_lock:                  # 双重检查：可能已被前面的线程构建好
+            cached = _cache.get(batch_name)
+            if cached is not None and cached.fingerprint == fp:
+                return cached
+        bd = BatchData(batch_name, d)
+        with _cache_lock:
+            _cache[batch_name] = bd
+        return bd

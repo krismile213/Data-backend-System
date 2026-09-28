@@ -1,16 +1,16 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
+/*
+ * 全局样式：只保留 React 挂载所需的最小重置。
+ *
+ * 字体、背景色等视觉口径一律由 src/theme.js + CssBaseline 提供，
+ * 这里不再重复定义，避免同一件事有两处来源、改一处忘一处。
+ *
+ * 注：Tailwind 已整体移除（配置、依赖、@tailwind 指令一并删除）。
+ * 项目实际全程使用 MUI 的 sx，Tailwind 只被 9 处工具类用到；
+ * 保留它等于多养一套样式体系，还要承担 preflight 与 MUI 互相覆盖的风险。
+ */
 html,
 body,
 #root {
   height: 100%;
   margin: 0;
-}
-
-body {
-  font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial,
-    sans-serif;
-  background-color: #f4f6f8;
 }

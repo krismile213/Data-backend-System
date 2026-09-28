@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
+import SectionCard from '../components/SectionCard.jsx';
 import {
   Box,
   Paper,
@@ -14,43 +15,32 @@ import {
   TextField,
   MenuItem,
   Chip,
-  CircularProgress,
-  Alert,
   Button,
 } from '@mui/material';
 import DownloadIcon from '@mui/icons-material/Download';
 import EChart from '../components/EChart.jsx';
 import { fetchTransport, buildTransportExportUrl } from '../api.js';
+import KpiCard from '../components/KpiCard.jsx';
+import PageHeader from '../components/PageHeader.jsx';
+import { LoadingState, ErrorState } from '../components/StateViews.jsx';
+import { SEMANTIC } from '../theme.js';
+import useApi from '../hooks/useApi.js';
 
+/** 逐票判定 → 徽标配色（浅底 + 同色系深字） */
 const JUDGE_COLOR = {
-  超时: { bg: '#fcebe9', color: '#c62828' },
-  未到货: { bg: '#fff8e1', color: '#b26a00' },
-  未发货: { bg: '#f4f5f7', color: '#616161' },
-  达标: { bg: '#e8f5e9', color: '#2e7d32' },
+  超时: { bg: SEMANTIC.dangerBg, color: SEMANTIC.danger },
+  未到货: { bg: SEMANTIC.warningBg, color: SEMANTIC.warningDeep },
+  未发货: { bg: SEMANTIC.neutralBg, color: SEMANTIC.neutral },
+  达标: { bg: SEMANTIC.successBg, color: SEMANTIC.success },
 };
 
-function KpiCard({ label, value, sub, color = '#1a2740' }) {
-  return (
-    <Paper sx={{ p: 2, height: '100%' }}>
-      <Typography variant="caption" color="text.secondary">{label}</Typography>
-      <Typography variant="h5" sx={{ fontWeight: 700, color, mt: 0.5 }}>{value}</Typography>
-      {sub && <Typography variant="caption" color="text.secondary">{sub}</Typography>}
-    </Paper>
-  );
-}
-
 export default function Transport() {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
+  const { data, error } = useApi(() => fetchTransport(), []);
   const [q, setQ] = useState('');
   const [judgeF, setJudgeF] = useState('');
   const [clsF, setClsF] = useState('');
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(50);
-
-  useEffect(() => {
-    fetchTransport().then(setData).catch((e) => setError(e.message));
-  }, []);
 
   const rows = useMemo(() => {
     if (!data) return [];
@@ -63,8 +53,8 @@ export default function Transport() {
     });
   }, [data, q, judgeF, clsF]);
 
-  if (error) return <Alert severity="error">货件运输加载失败：{error}</Alert>;
-  if (!data) return <Box sx={{ display: 'flex', justifyContent: 'center', mt: 8 }}><CircularProgress /></Box>;
+  if (error) return <ErrorState prefix="货件运输加载失败" error={error} />;
+  if (!data) return <LoadingState />;
 
   const k = data.kpi;
   const hubs = data.byHub.slice(0, 14);
@@ -83,12 +73,12 @@ export default function Transport() {
       {
         name: '总票数', type: 'bar', barWidth: 10,
         data: hubs.map((h) => h.total),
-        itemStyle: { color: '#90a4ae' },
+        itemStyle: { color: SEMANTIC.muted },
       },
       {
         name: '超时票数', type: 'bar', barWidth: 10,
         data: hubs.map((h) => h.over),
-        itemStyle: { color: '#c62828' },
+        itemStyle: { color: SEMANTIC.danger },
         label: { show: true, position: 'right' },
       },
     ],
@@ -96,17 +86,15 @@ export default function Transport() {
 
   return (
     <Box>
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
-        <Box>
-          <Typography variant="h6" sx={{ fontWeight: 700 }}>货件运输看板</Typography>
-          <Typography variant="caption" color="text.secondary">
-            Part5 发货 × Part8 到货按货件号配对，逐票对照渠道目标（空运15 / 海运35 / 卡航35）· 计算于 {data.computedAt}
-          </Typography>
-        </Box>
-        <Button variant="outlined" startIcon={<DownloadIcon />} href={buildTransportExportUrl()}>
-          导出 xlsx
-        </Button>
-      </Box>
+      <PageHeader
+        title="货件运输看板"
+        subtitle={`Part5 发货 × Part8 到货按货件号配对，逐票对照渠道目标（空运15 / 海运35 / 卡航35）· 计算于 ${data.computedAt}`}
+        actions={
+          <Button variant="outlined" startIcon={<DownloadIcon />} href={buildTransportExportUrl()}>
+            导出 xlsx
+          </Button>
+        }
+      />
 
       <Grid container spacing={2} sx={{ mb: 2 }}>
         <Grid item xs={6} sm={4} md={2}>
@@ -116,44 +104,55 @@ export default function Transport() {
           <KpiCard label="已到货 / 未到货" value={`${k.arrived} / ${k.notArrived}`} sub="未到货含在途" />
         </Grid>
         <Grid item xs={6} sm={4} md={2}>
-          <KpiCard label="超时票数" value={k.over} color="#c62828"
-            sub={`占已到货 ${k.overRate}%`} />
+          <KpiCard
+            label="超时票数"
+            value={k.over}
+            color={SEMANTIC.danger}
+            sub={`占已到货 ${k.overRate}%`}
+          />
         </Grid>
         <Grid item xs={6} sm={4} md={2}>
           <KpiCard label="平均 / 最长运输" value={`${k.avgDays} / ${k.maxDays} 天`} sub="发货 → 到货" />
         </Grid>
         <Grid item xs={6} sm={4} md={2}>
-          <KpiCard label="未发货渠道" value={k.noShip} color="#616161"
-            sub="Part5 有渠道仓但无货件号" />
+          <KpiCard
+            label="未发货渠道"
+            value={k.noShip}
+            color={SEMANTIC.neutral}
+            sub="Part5 有渠道仓但无货件号"
+          />
         </Grid>
         <Grid item xs={6} sm={4} md={2}>
-          <KpiCard label="未发货渠道清单" value={k.noShipHubs.length} color="#616161"
-            sub={k.noShipHubs.slice(0, 3).join('、') + (k.noShipHubs.length > 3 ? '…' : '')} />
+          <KpiCard
+            label="未发货渠道清单"
+            value={k.noShipHubs.length}
+            color={SEMANTIC.neutral}
+            sub={k.noShipHubs.slice(0, 3).join('、') + (k.noShipHubs.length > 3 ? '…' : '')}
+          />
         </Grid>
       </Grid>
 
       <Grid container spacing={2} sx={{ mb: 2 }}>
         <Grid item xs={12} md={4}>
-          <Paper sx={{ p: 2, height: '100%' }}>
-            <Typography variant="subtitle2">按运输方式</Typography>
+          <SectionCard title="按运输方式" sx={{ height: '100%' }}>
             {data.byMode.map((m) => (
               <Box key={m.cls} sx={{ mt: 1 }}>
                 <Typography variant="body2">
-                  <b style={{ color: m.cls === '空运' ? '#0288d1' : '#6a1b9a' }}>{m.cls}</b>
-                  　总 {m.total} 票 · 已到 {m.arrived} · 超时 <b style={{ color: '#c62828' }}>{m.over}</b>
+                  <b style={{ color: m.cls === '空运' ? SEMANTIC.sky : SEMANTIC.purple }}>{m.cls}</b>
+                  　总 {m.total} 票 · 已到 {m.arrived} · 超时{' '}
+                  <b style={{ color: SEMANTIC.danger }}>{m.over}</b>
                 </Typography>
                 <Typography variant="caption" color="text.secondary">
                   平均 {m.avgDays} 天 · 最长 {m.maxDays} 天 · 最长超目标 {m.maxOverDays} 天
                 </Typography>
               </Box>
             ))}
-          </Paper>
+          </SectionCard>
         </Grid>
         <Grid item xs={12} md={8}>
-          <Paper sx={{ p: 2 }}>
-            <Typography variant="subtitle2">各渠道超时票数 TOP（灰=总票数，红=超时）</Typography>
+          <SectionCard title="各渠道超时票数 TOP（灰=总票数，红=超时）">
             <EChart option={hubOption} height={300} />
-          </Paper>
+          </SectionCard>
         </Grid>
       </Grid>
 
@@ -198,7 +197,7 @@ export default function Transport() {
               {rows
                 .slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage)
                 .map((i, idx) => {
-                  const c = JUDGE_COLOR[i.judge] || { bg: '#f5f5f5', color: '#616161' };
+                  const c = JUDGE_COLOR[i.judge] || { bg: SEMANTIC.neutralBg, color: SEMANTIC.neutral };
                   return (
                     <TableRow key={`${i.sku}-${i.trk}-${idx}`} hover>
                       <TableCell><b>{i.sku}</b></TableCell>

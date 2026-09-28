@@ -16,8 +16,8 @@ models.py — MySQL 表结构（SQLAlchemy ORM）
 
 from datetime import datetime
 
-from sqlalchemy import (BIGINT, DATETIME, JSON, VARCHAR, Column, ForeignKey,
-                        Index, Integer, Text)
+from sqlalchemy import (BIGINT, DATETIME, DECIMAL, JSON, VARCHAR, Column,
+                        ForeignKey, Index, Integer, Text)
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
@@ -32,6 +32,8 @@ class Batch(Base):
     fingerprint = Column(VARCHAR(1024))                        # 文件指纹（mtime+size），增量导入判断
     imported_at = Column(DATETIME, default=datetime.now)
     doc_count = Column(Integer, default=0)                     # 单据总数（导入时统计）
+    # 品类（手机膜/手机壳…）。⚠️ 旧库该列为 NULL → 一律视作默认品类（见 review._cat_cond）
+    category = Column(VARCHAR(32), index=True)
 
 
 class PartDoc(Base):
@@ -80,3 +82,27 @@ class ApprovalNode(Base):
         Index("idx_node_doc", "doc_id"),
         Index("idx_node_action", "action"),
     )
+
+
+class ProductCatalog(Base):
+    """商品资料（评级档位 + 单价）——损益推算的输入。
+
+    来源：`资产文件\\商品资料.xlsx` 的 `商品资料` 表（第 2 行表头、A1 为档位说明）。
+    grade→(daily_min, daily_max) 由 `app/product_rules.parse_grade_ranges()` 解析 A1 得出；
+    解析结果偏离内置表 >2% 时保留内置值并记警告（见该模块）。
+
+    ⚠️ 资料表 A1 明确「手机壳产品不参与以上产品评级规则」，故手机壳行 grade 天然为空，
+    损益对手机壳 SKU 会走「评级未命中」降级分支——这是口径正确的表现，不是缺数据。
+    """
+    __tablename__ = "product_catalog"
+
+    sku = Column(VARCHAR(128), primary_key=True)      # 与 part_doc.sku 同文本口径（strip 后精确匹配）
+    model = Column(VARCHAR(128))                      # 型号（宿主手机型号）
+    grade = Column(VARCHAR(32))                       # 评级档位：A~E / XA~XE / X
+    daily_min = Column(DECIMAL(10, 4))                # 日均销量区间下限（XC=1.38）
+    daily_max = Column(DECIMAL(10, 4))                # 区间上限（XC=5.5；A/XA 为空=开放）
+    price = Column(DECIMAL(12, 4))                    # 单价（当前=参考成本价，G506=12.0266）
+    price_type = Column(VARCHAR(32))                  # '参考成本价' | '售价'
+    category = Column(VARCHAR(32))                    # 类型：钢化膜/水凝膜/手机壳…
+    state = Column(VARCHAR(32))                       # 状态：在售/停售/不销售
+    updated_at = Column(DATETIME, default=datetime.now)

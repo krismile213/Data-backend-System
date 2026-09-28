@@ -1,0 +1,37 @@
+rule_config 备份：有 长度=1968
+
+GET /api/rules -> 200
+  rules 缺失新键: 无
+  meta 缺失说明: 无
+  新键当前值：
+    inflight_warn_ratio      = 0.85                         事中预警系数
+    report_retention_days    = 90                           日报保留天数
+    products_xlsx_path       = 'C:\\Users\\dell\\Desktop\\work-main\\资产文件\\商品资料.xlsx' 商品资料路径
+    loss_route_limit         = 60                           损益推迟底线(天)
+    loss_daily_default       = {'min': 1.38, 'max': 5.5}    日均销量兜底区间
+    mail_enabled             = False                        邮件上报开关
+    mail_to                  = '1432640858@qq.com'          上报收件人
+    mail_host                = 'smtp.qq.com'                SMTP 服务器
+    mail_port                = 465                          SMTP 端口
+    mail_user                = ''                           发件邮箱账号
+    mail_auth_code           = ''                           邮箱授权码
+  version = 1
+  pipeline(只读) = {'taskName': 'DataAdmin-AutoPipeline', 'times': ['09:20', '14:50'], 'source': 'scripts/install_auto_etl.ps1', 'updatedAt': '2026-09-23 17:15', 'ok': True}
+  rules 里残留的已删键: 无
+
+PUT 非法值（期望 422）：
+  [OK ] 422  比例 >1
+  [OK ] 422  布尔混入数值
+  [OK ] 422  下限>上限
+  [OK ] 422  非布尔
+  [OK ] 422  未知键
+  [OK ] 422  端口越界
+  [OK ] 422  已删除的死键 daily_pipeline_slots
+
+PUT 合法值（回写当前值）-> 200  status=True
+  回写后不一致的键: 无
+
+rule_config 已还原：是
+
+======================================================================
+RESULT: PASS

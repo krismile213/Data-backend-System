@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Box,
   Paper,
@@ -12,8 +12,6 @@ import {
   TableRow,
   TextField,
   Chip,
-  CircularProgress,
-  Alert,
   Button,
   Tabs,
   Tab,
@@ -22,34 +20,16 @@ import {
 } from '@mui/material';
 import DownloadIcon from '@mui/icons-material/Download';
 import { fetchScenarios, buildScenariosExportUrl } from '../api.js';
-
-function KpiCard({ label, value, sub, color = '#1a2740' }) {
-  return (
-    <Paper sx={{ p: 2, height: '100%' }}>
-      <Typography variant="caption" color="text.secondary">{label}</Typography>
-      <Typography variant="h5" sx={{ fontWeight: 700, color, mt: 0.5 }}>{value}</Typography>
-      {sub && <Typography variant="caption" color="text.secondary">{sub}</Typography>}
-    </Paper>
-  );
-}
-
-/** 停滞天数 → 色标：≥60 红、≥30 橙、其余灰 */
-function stallColor(d) {
-  if (d === null || d === undefined || d === '') return 'default';
-  if (d >= 60) return 'error';
-  if (d >= 30) return 'warning';
-  return 'default';
-}
+import KpiCard from '../components/KpiCard.jsx';
+import PageHeader from '../components/PageHeader.jsx';
+import { LoadingState, ErrorState } from '../components/StateViews.jsx';
+import { SEMANTIC, severityOfDays } from '../theme.js';
+import useApi from '../hooks/useApi.js';
 
 export default function Scenarios() {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
+  const { data, error } = useApi(() => fetchScenarios(), []);
   const [tab, setTab] = useState('ALL');
   const [q, setQ] = useState('');
-
-  useEffect(() => {
-    fetchScenarios().then(setData).catch((e) => setError(e.message));
-  }, []);
 
   const overlapMap = useMemo(() => {
     const m = {};
@@ -72,46 +52,65 @@ export default function Scenarios() {
       }));
   }, [data, tab, q]);
 
-  if (error) return <Alert severity="error">场景诊断加载失败：{error}</Alert>;
-  if (!data) return <Box sx={{ display: 'flex', justifyContent: 'center', mt: 8 }}><CircularProgress /></Box>;
+  if (error) return <ErrorState prefix="场景诊断加载失败" error={error} />;
+  if (!data) return <LoadingState />;
 
   const countOf = (code) => (data.summary.find((s) => s.code === code) || {}).count || 0;
 
   return (
     <Box>
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
-        <Box>
-          <Typography variant="h6" sx={{ fontWeight: 700 }}>
-            跨环节联动诊断 · 场景 A/B/C
-          </Typography>
-          <Typography variant="caption" color="text.secondary">
-            把「coming soon 待去化」的 SKU 直接列出来 —— 数据时间 {data.computedAt}
-          </Typography>
-        </Box>
-        <Button
-          variant="outlined"
-          startIcon={<DownloadIcon />}
-          href={buildScenariosExportUrl(tab === 'ALL' ? '' : tab)}
-        >
-          导出{tab === 'ALL' ? '全部' : `场景${tab}`} xlsx
-        </Button>
-      </Box>
+      <PageHeader
+        title="跨环节联动诊断 · 场景 A/B/C"
+        subtitle={`把「coming soon 待去化」的 SKU 直接列出来 —— 数据时间 ${data.computedAt}`}
+        actions={
+          <Button
+            variant="outlined"
+            startIcon={<DownloadIcon />}
+            href={buildScenariosExportUrl(tab === 'ALL' ? '' : tab)}
+          >
+            导出{tab === 'ALL' ? '全部' : `场景${tab}`} xlsx
+          </Button>
+        }
+      />
 
       <Grid container spacing={2} sx={{ mb: 2 }}>
         <Grid item xs={12} sm={6} md={4}>
-          <KpiCard label="纳入场景的 SKU" value={data.involvedSkus} sub={`其中未闭环 ${data.coveredOpenSkus} 个`} />
+          <KpiCard
+            label="纳入场景的 SKU"
+            value={data.involvedSkus}
+            sub={`其中未闭环 ${data.coveredOpenSkus} 个`}
+          />
         </Grid>
         <Grid item xs={12} sm={6} md={4}>
-          <KpiCard label="未闭环 / 全部 SKU" value={`${data.openSkus} / ${data.totalSkus}`} sub="闭环 = 三部门终节点全完成" />
+          <KpiCard
+            label="未闭环 / 全部 SKU"
+            value={`${data.openSkus} / ${data.totalSkus}`}
+            sub="闭环 = 三部门终节点全完成"
+          />
         </Grid>
         <Grid item xs={12} sm={4} md={4}>
-          <KpiCard label="场景 A · 已首上架·素材未完成" value={countOf('A')} color="#d32f2f" sub="最易 coming soon" />
+          <KpiCard
+            label="场景 A · 已首上架·素材未完成"
+            value={countOf('A')}
+            color={SEMANTIC.danger}
+            sub="最易 coming soon"
+          />
         </Grid>
         <Grid item xs={12} sm={4} md={4}>
-          <KpiCard label="场景 B · 素材完成·最终上架未完成" value={countOf('B')} color="#ed6c02" sub="接近 Ready，只差最后一步" />
+          <KpiCard
+            label="场景 B · 素材完成·最终上架未完成"
+            value={countOf('B')}
+            color={SEMANTIC.warning}
+            sub="接近 Ready，只差最后一步"
+          />
         </Grid>
         <Grid item xs={12} sm={4} md={4}>
-          <KpiCard label="场景 C · Part5 发货未完成" value={countOf('C')} color="#0277bd" sub="上游停滞，连锁拖住素材/上架" />
+          <KpiCard
+            label="场景 C · Part5 发货未完成"
+            value={countOf('C')}
+            color={SEMANTIC.info}
+            sub="上游停滞，连锁拖住素材/上架"
+          />
         </Grid>
       </Grid>
 
@@ -134,7 +133,7 @@ export default function Scenarios() {
       {groups.map((g) => (
         <Paper key={g.code} sx={{ p: 2, mb: 2 }}>
           <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 1.5, flexWrap: 'wrap' }}>
-            <Chip size="small" label={`场景 ${g.code}`} sx={{ bgcolor: g.color, color: '#fff', fontWeight: 700 }} />
+            <Chip size="small" label={`场景 ${g.code}`} sx={{ bgcolor: g.color, color: SEMANTIC.onColor, fontWeight: 700 }} />
             <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>{g.name}</Typography>
             <Typography variant="caption" color="text.secondary">
               {g.items.length} 个 SKU · 最长停滞 {g.items.length ? Math.max(...g.items.map((i) => i.sinceDays || 0)) : 0} 天
@@ -143,7 +142,7 @@ export default function Scenarios() {
           <Typography variant="body2" sx={{ mt: 0.5 }}>
             <b>影响：</b>{g.impact}
           </Typography>
-          <Typography variant="body2" sx={{ color: '#2e7d32' }}>
+          <Typography variant="body2" sx={{ color: SEMANTIC.success }}>
             <b>去化路径：</b>{g.path}　<b>责任方：</b>{g.owner}
           </Typography>
 
@@ -195,7 +194,7 @@ export default function Scenarios() {
                           <Tooltip title={`${it.sinceLabel}：${it.sinceAt || '—'}`}>
                             <Chip
                               size="small"
-                              color={stallColor(it.sinceDays)}
+                              color={severityOfDays(it.sinceDays)}
                               label={it.sinceDays !== null && it.sinceDays !== undefined ? `${it.sinceDays} 天` : '—'}
                             />
                           </Tooltip>

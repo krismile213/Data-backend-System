@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>后台可用性自检 · 17 个页面</title>
+    <style>
+      body {
+        font: 14px/1.6 "Microsoft YaHei", system-ui, sans-serif;
+        margin: 0;
+        padding: 24px;
+        background: #f5f7fa;
+        color: #1a2740;
+      }
+      h1 { font-size: 19px; margin: 0 0 4px; }
+      p.sub { margin: 0 0 18px; color: #5a6b85; font-size: 13px; }
+      #summary {
+        padding: 14px 18px;
+        border-radius: 8px;
+        background: #fff;
+        border-left: 5px solid #8c98a8;
+        margin-bottom: 18px;
+        font-size: 15px;
+      }
+      #summary.pass { border-left-color: #2e7d32; background: #eef7ef; }
+      #summary.fail { border-left-color: #c62828; background: #fdeeee; }
+      #summary.run  { border-left-color: #ed6c02; background: #fff6ec; }
+      table { border-collapse: collapse; width: 100%; background: #fff; border-radius: 8px; overflow: hidden; }
+      th, td { padding: 7px 12px; text-align: left; border-bottom: 1px solid #e6ebf2; font-size: 13px; }
+      th { background: #eef2f7; font-weight: 600; }
+      td.ok   { color: #2e7d32; font-weight: 600; }
+      td.bad  { color: #c62828; font-weight: 700; }
+      td.warn { color: #ed6c02; font-weight: 600; }
+      code { background: #eef2f7; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+      .note { margin-top: 16px; font-size: 12px; color: #5a6b85; line-height: 1.8; }
+      .frames { position: absolute; left: -10000px; top: 0; width: 1400px; height: 900px; }
+    </style>
+  </head>
+  <body>
+    <h1>后台可用性自检</h1>
+    <p class="sub">
+      依次在隐藏 iframe 里打开 17 个页面，检查 React 是否真的渲染出内容 ——
+      回答「到底能不能进后台」。curl 只能证明模块能下载，证明不了页面能渲染。
+    </p>
+    <div id="summary" class="run">准备开始…</div>
+    <table>
+      <thead>
+        <tr><th style="width:150px">页面</th><th style="width:100px">结果</th><th style="width:90px">耗时</th><th>说明</th></tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="note">
+      判定标准：<code>#root</code> 有子节点、渲染 HTML 超过 300 字节、且能看到应用外壳（AppBar）。<br />
+      每测完一页就即时上报一次，中途关掉也能留下已完成的结果。
+    </div>
+    <div class="frames" id="frames"></div>
+
+    <script>
+      /* ---- 与 App.jsx 的 NAV_ITEMS 保持一致 ---- */
+      var PAGES = [
+        ['dashboard', '时效看板'],
+        ['review', '复盘总览'],
+        ['gantt', '流程甘特'],
+        ['scenarios', '场景诊断'],
+        ['routes', '路线达标'],
+        ['transport', '货件运输'],
+        ['alerts', '加急预警'],
+        ['watch', '联动提醒'],
+        ['fillins', '手工填报'],
+        ['history', '趋势周报'],
+        ['compare', '批次对比'],
+        ['skus', 'SKU 档案'],
+        ['records', '明细查询'],
+        ['anomalies', '异常排查'],
+        ['rules', '规则配置'],
+        ['manual', '操作手册'],
+        ['dataadmin', '数据管理'],
+      ];
+
+      var BATCH = new URLSearchParams(location.search).get('batch') || '';
+      var SETTLE_MS = 6000; /* 等 React 挂载 + 拉数据 + 画图 */
+      var rowsEl = document.getElementById('rows');
+      var sumEl = document.getElementById('summary');
+      var framesEl = document.getElementById('frames');
+
+      function report(payload) {
+        /* 优先 fetch + keepalive。
+           实测 navigator.sendBeacon 在被内嵌预览的浏览器里会**静默丢弃**请求
+           （返回 false 而不抛错），巡检结果因此全部丢失 —— 而后端日志显示
+           页面本身是正常跑的。fetch 失败时才退回 sendBeacon。 */
+        try {
+          var body = JSON.stringify(payload);
+          fetch('/api/diag/report', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: body,
+            keepalive: true,
+          }).catch(function () {
+            try {
+              if (navigator.sendBeacon) {
+                navigator.sendBeacon('/api/diag/report',
+                  new Blob([body], { type: 'application/json' }));
+              }
+            } catch (e) { /* 放弃上报 */ }
+          });
+        } catch (e) { /* 上报失败不影响巡检本身 */ }
+      }
+
+      function addRow(res) {
+        var tr = document.createElement('tr');
+        var cls = res.blank ? 'bad' : (res.loading ? 'warn' : 'ok');
+        var txt = res.blank ? '白屏 ✗' : (res.loading ? '可用（加载中）' : '可用 ✓');
+        tr.innerHTML = '<td>' + res.label + ' <code>' + res.key + '</code></td>' +
+                       '<td class="' + cls + '">' + txt + '</td>' +
+                       '<td>' + (res.ms / 1000).toFixed(1) + 's</td>' +
+                       '<td>' + res.note + '</td>';
+        rowsEl.appendChild(tr);
+      }
+
+      function checkOne(key, label) {
+        return new Promise(function (resolve) {
+          var t0 = Date.now();
+          var settled = false;
+          var frame = document.createElement('iframe');
+          frame.style.cssText = 'width:1400px;height:900px;border:0';
+          function finish(res) {
+            if (settled) return;
+            settled = true;
+            res.ms = Date.now() - t0;
+            try { framesEl.removeChild(frame); } catch (e) { /* 已移除 */ }
+            resolve(res);
+          }
+          frame.onload = function () {
+            setTimeout(function () {
+              var res = { key: key, label: label, blank: true, len: 0, loading: false, note: '' };
+              try {
+                var doc = frame.contentDocument;
+                var root = doc && doc.getElementById('root');
+                var html = root ? root.innerHTML : '';
+                res.len = html.length;
+                res.loading = html.indexOf('MuiCircularProgress') !== -1;
+                if (!root || root.childElementCount === 0) {
+                  res.note = '#root 为空 —— 白屏';
+                } else if (html.length < 300) {
+                  res.note = '渲染内容过少（' + html.length + ' 字节）';
+                } else if (html.indexOf('MuiAppBar') === -1) {
+                  res.note = '应用外壳（AppBar）未渲染';
+                } else {
+                  res.blank = false;
+                  res.note = res.loading ? '渲染成功（仍在加载数据）' : '渲染成功';
+                }
+              } catch (e) {
+                res.note = '无法读取 iframe：' + e;
+              }
+              finish(res);
+            }, SETTLE_MS);
+          };
+          frame.onerror = function () {
+            finish({ key: key, label: label, blank: true, len: 0, loading: false,
+                     note: 'iframe 加载失败' });
+          };
+          /* 兜底：万一 onload 不触发（端口在听但没有响应），也不能把整轮卡死 */
+          setTimeout(function () {
+            finish({ key: key, label: label, blank: true, len: 0, loading: false,
+                     note: '超时未加载（' + (SETTLE_MS * 2 / 1000) + 's）' });
+          }, SETTLE_MS * 2);
+          frame.src = '/?page=' + encodeURIComponent(key) +
+                      (BATCH ? '&batch=' + encodeURIComponent(BATCH) : '');
+          framesEl.appendChild(frame);
+        });
+      }
+
+      (async function run() {
+        report({ type: 'selfcheck-start', batch: BATCH || '(默认)', total: PAGES.length });
+        var results = [];
+        for (var i = 0; i < PAGES.length; i++) {
+          sumEl.className = 'run';
+          sumEl.textContent = '进行中 ' + (i + 1) + '/' + PAGES.length + ' — ' + PAGES[i][1] + ' …';
+          var res = await checkOne(PAGES[i][0], PAGES[i][1]);
+          results.push(res);
+          addRow(res);
+          /* 每页即时上报：即使中途被打断，也留下已完成的部分 */
+          report({ type: 'selfcheck-item', index: i + 1, total: PAGES.length, batch: BATCH || '(默认)', result: res });
+        }
+        var bad = results.filter(function (r) { return r.blank; });
+        var warn = results.filter(function (r) { return !r.blank && r.loading; });
+        sumEl.className = bad.length ? 'fail' : 'pass';
+        sumEl.textContent = bad.length
+          ? '✗ ' + bad.length + ' 个页面白屏：' + bad.map(function (r) { return r.label; }).join('、') +
+            '（可用 ' + (results.length - bad.length) + ' / ' + results.length + '）'
+          : '✓ 全部 ' + results.length + ' 个页面都能正常打开' +
+            (warn.length ? '（其中 ' + warn.length + ' 个仍在加载数据）' : '');
+        report({ type: 'selfcheck-done', batch: BATCH || '(默认)', total: results.length,
+                 blank: bad.length, results: results });
+      })();
+    </script>
+  </body>
+</html>

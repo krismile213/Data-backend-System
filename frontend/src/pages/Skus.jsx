@@ -1,9 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { LoadingState, ErrorState, EmptyState } from '../components/StateViews.jsx';
+import { SEMANTIC } from '../theme.js';
 import {
-  Alert,
   Box,
   Chip,
-  CircularProgress,
   Collapse,
   InputAdornment,
   List,
@@ -22,6 +22,7 @@ import {
 import ManageSearchIcon from '@mui/icons-material/ManageSearch';
 import SearchIcon from '@mui/icons-material/Search';
 import { fetchSkus, fetchSkuDetail } from '../api.js';
+import useApi from '../hooks/useApi.js';
 
 /** 审批状态 → Chip 颜色 */
 const STATUS_COLOR = {
@@ -33,7 +34,7 @@ const STATUS_COLOR = {
 /** Part 汇总徽标 */
 function PartChips({ partSummary }) {
   return (
-    <Box className="flex flex-wrap gap-1.5">
+    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
       {partSummary.map((p) => (
         <Chip
           key={p.part}
@@ -78,33 +79,37 @@ function NodeTimeline({ nodes }) {
 }
 
 export default function Skus() {
-  const [list, setList] = useState(null);
   const [keyword, setKeyword] = useState('');
   const [selected, setSelected] = useState(null);
-  const [detail, setDetail] = useState(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [error, setError] = useState('');
   const [expanded, setExpanded] = useState({});
 
-  useEffect(() => {
-    fetchSkus()
-      .then((d) => {
-        setList(d.items);
-        if (d.items.length > 0) setSelected(d.items[0].sku);
-      })
-      .catch((e) => setError(e.message || '加载失败'));
-  }, []);
+  // 统一请求 hook：SKU 列表 + 选中 SKU 的档案明细
+  const { data: list, error: listErr } = useApi(
+    () => fetchSkus().then((d) => d.items),
+    [],
+    {
+      // 默认选中第一个 SKU
+      onSuccess: (items) => {
+        if (items.length > 0) setSelected(items[0].sku);
+      },
+    },
+  );
 
+  const {
+    data: detail, loading: detailLoading, error: detailErr, setData: setDetail,
+  } = useApi(
+    () => fetchSkuDetail(selected),
+    [selected],
+    { enabled: !!selected },
+  );
+
+  const error = listErr || detailErr;
+
+  // 切换 SKU 时清掉上一条明细与展开态
   useEffect(() => {
-    if (!selected) return;
-    setDetailLoading(true);
     setDetail(null);
     setExpanded({});
-    fetchSkuDetail(selected)
-      .then(setDetail)
-      .catch((e) => setError(e.message || '加载失败'))
-      .finally(() => setDetailLoading(false));
-  }, [selected]);
+  }, [selected, setDetail]);
 
   const filtered = useMemo(() => {
     if (!list) return [];
@@ -117,22 +122,14 @@ export default function Skus() {
     );
   }, [list, keyword]);
 
-  if (error) {
-    return <Alert severity="error">加载失败：{error}</Alert>;
-  }
-  if (!list) {
-    return (
-      <Box sx={{ display: 'flex', justifyContent: 'center', mt: 8 }}>
-        <CircularProgress />
-      </Box>
-    );
-  }
+  if (error) return <ErrorState prefix="加载失败" error={error} />;
+  if (!list) return<LoadingState />;
 
   return (
     <Box sx={{ display: 'flex', gap: 2, alignItems: 'flex-start' }}>
       {/* 左：SKU 检索列表 */}
       <Paper sx={{ width: 320, flexShrink: 0, overflow: 'hidden' }}>
-        <Box sx={{ p: 1.5, borderBottom: '1px solid #e0e0e0' }}>
+        <Box sx={{ p: 1.5, borderBottom: `1px solid ${SEMANTIC.border}` }}>
           <TextField
             size="small"
             fullWidth
@@ -148,7 +145,7 @@ export default function Skus() {
             }}
           />
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-            共 {list.length} 个 SKU ｜ 命中 {filtered.length} 个
+            共 {list.length} 个 SKU ｜ 命中 {filtered.length} 个 ｜ 按立项时间从新到久
           </Typography>
         </Box>
         <List dense sx={{ maxHeight: 'calc(100vh - 220px)', overflow: 'auto' }}>
@@ -169,8 +166,17 @@ export default function Skus() {
                     </Box>
                   </Box>
                 }
-                secondary={s.models[0] || '—'}
-                secondaryTypographyProps={{ noWrap: true }}
+                secondary={
+                  <Box component="span">
+                    {s.models[0] || '—'}
+                    {s.firstProposalAt && (
+                      <Box component="span" sx={{ color: 'text.secondary', fontSize: 11 }}>
+                        {' · 立项 '}{s.firstProposalAt.slice(0, 10)}
+                      </Box>
+                    )}
+                  </Box>
+                }
+                secondaryTypographyProps={{ noWrap: true, component: 'div' }}
               />
             </ListItemButton>
           ))}
@@ -184,17 +190,13 @@ export default function Skus() {
 
       {/* 右：SKU 档案详情 */}
       <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-        {!selected && <Alert severity="info">请选择左侧 SKU 查看档案</Alert>}
-        {detailLoading && (
-          <Box sx={{ display: 'flex', justifyContent: 'center', mt: 6 }}>
-            <CircularProgress />
-          </Box>
-        )}
+        {!selected && <EmptyState>请选择左侧 SKU 查看档案</EmptyState>}
+        {detailLoading && <LoadingState sx={{ mt: 6 }} />}
         {detail && (
           <>
             {/* 头部信息 */}
             <Paper sx={{ p: 2, mb: 2 }}>
-              <Box className="flex items-center gap-3 flex-wrap">
+              <Box sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 1.5 }}>
                 <ManageSearchIcon color="primary" />
                 <Typography variant="h6" sx={{ fontFamily: 'monospace' }}>
                   {detail.sku}

@@ -1,7 +1,13 @@
 /**
  * api.js — 后端接口 fetch 封装
  * 所有请求走 /api 前缀（dev 模式由 vite 代理到 127.0.0.1:8000）
+ *
+ * 品类（手机膜/手机壳）：自 2026-09-22 起后端按品类分发规则与批次，
+ * 这里**统一注入** `category`，页面就不用各自记着带（漏一个就是一份错口径）。
+ * 后端对不认识的参数会忽略，因此对「与品类无关」的接口（如文件目录类）无副作用。
  */
+
+import { appendCategory, getCategory } from './category';
 
 const BASE = '/api';
 
@@ -10,6 +16,7 @@ async function request(path, params = {}) {
   Object.entries(params).forEach(([k, v]) => {
     if (v !== undefined && v !== null && v !== '') qs.set(k, v);
   });
+  if (!qs.has('category')) qs.set('category', getCategory());
   const url = `${BASE}${path}${qs.toString() ? `?${qs.toString()}` : ''}`;
   const res = await fetch(url);
   if (!res.ok) {
@@ -98,7 +105,7 @@ export function fetchScenarios() {
 /** 导出跨环节场景诊断 xlsx（可选场景 A/B/C，默认全量） */
 export function buildScenariosExportUrl(code) {
   const qs = code ? `?code=${encodeURIComponent(code)}` : '';
-  return `${BASE}/scenarios/export${qs}`;
+  return appendCategory(`${BASE}/scenarios/export${qs}`);
 }
 
 /** 路线达标看板：运营/空运/海运三条路线的 SKU 级评级 + 分布 */
@@ -108,7 +115,7 @@ export function fetchRoutes() {
 
 /** 导出路线达标 xlsx */
 export function buildRoutesExportUrl() {
-  return `${BASE}/routes/export`;
+  return appendCategory(`${BASE}/routes/export`);
 }
 
 /** 货件运输看板：逐票判定 + 渠道/运输方式聚合 */
@@ -118,7 +125,7 @@ export function fetchTransport() {
 
 /** 导出货件运输明细 xlsx */
 export function buildTransportExportUrl() {
-  return `${BASE}/transport/export`;
+  return appendCategory(`${BASE}/transport/export`);
 }
 
 /** 加急预警（P0/P1/P2 明细 + 盯数清单 + 数据新鲜度，route_check_sys 口径） */
@@ -159,12 +166,17 @@ export async function resetRules() {
 /** 导出加急预警清单 xlsx（可按优先级过滤） */
 export function buildAlertsExportUrl(priority) {
   const qs = priority ? `?priority=${encodeURIComponent(priority)}` : '';
-  return `${BASE}/alerts/export${qs}`;
+  return appendCategory(`${BASE}/alerts/export${qs}`);
 }
 
 /** 导出大流程复盘总览 xlsx */
 export function buildReviewExportUrl() {
-  return `${BASE}/review/overview/export`;
+  return appendCategory(`${BASE}/review/overview/export`);
+}
+
+/** 单 SKU 核查报告 xlsx：甘特（按部门归块）+ 段级明细 + 末尾「人工核对」空白列（P0-6） */
+export function buildCheckReportUrl(code) {
+  return appendCategory(`${BASE}/review/sku/${encodeURIComponent(code)}/checkreport`);
 }
 
 /** 手工填报：元数据（节点清单 + 未闭环 SKU + 全部记录） */
@@ -204,7 +216,7 @@ export async function deleteFillin(id) {
 
 /** 导出手工填报记录 xlsx（含双口径对比列） */
 export function buildFillinsExportUrl() {
-  return `${BASE}/fillins/export`;
+  return appendCategory(`${BASE}/fillins/export`);
 }
 
 /** 跨环节联动预警（页面内版）：清单 + 按责任人提醒文案 */
@@ -226,12 +238,12 @@ export async function triggerSnapshot(force = false) {
 
 /** 生成/下载周报 markdown（days=统计区间天数） */
 export function buildHistoryReportUrl(days = 7) {
-  return `${BASE}/history/report?days=${days}`;
+  return appendCategory(`${BASE}/history/report?days=${days}`);
 }
 
 /** 单 SKU 复盘报告 markdown 下载 */
 export function buildSkuReportUrl(code) {
-  return `${BASE}/review/sku/${encodeURIComponent(code)}/report`;
+  return appendCategory(`${BASE}/review/sku/${encodeURIComponent(code)}/report`);
 }
 
 /** SKU 档案：跨批次单据 + 审批节点时间线 */
@@ -247,4 +259,112 @@ export function buildExportUrl(batch, part, opts = {}) {
     if (v) qs.set(k, v);
   });
   return `${BASE}/records/${encodeURIComponent(batch)}/${encodeURIComponent(part)}/export${qs.toString() ? `?${qs.toString()}` : ''}`;
+}
+
+/* ------------------ 数据管理：批次扫描 / 导入 / 备份 ------------------ */
+
+async function postJson(path, body) {
+  const res = await fetch(appendCategory(`${BASE}${path}`), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const resBody = await res.json();
+      if (resBody && resBody.detail) detail = resBody.detail;
+    } catch (e) { /* ignore */ }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+/** 扫描数据根目录，对照数据库返回各批次的导入状态 */
+export function fetchEtlScan() {
+  return request('/etl/scan');
+}
+
+/** 触发导入：batch 为空则处理全部批次（文件未变化的会自动跳过） */
+export function runEtlImport(batch, force = false) {
+  return postJson('/etl/import', { batch: batch || null, force });
+}
+
+/** 已有备份列表 */
+export function fetchBackups() {
+  return request('/etl/backup');
+}
+
+/** 立即备份（state 目录 + 数据库导出） */
+export function runBackup() {
+  return postJson('/etl/backup');
+}
+
+/* ---------------------------- 操作手册 ---------------------------- */
+
+/** 已收录的手册文档列表 */
+export function fetchManuals() {
+  return request('/manual');
+}
+
+/** 取某份手册的 markdown 原文 */
+export function fetchManual(key) {
+  return request(`/manual/${encodeURIComponent(key)}`);
+}
+
+/* ------------------ 事中管理：在研总览 / 预警 / 日报 ------------------ */
+
+/** 事中总览：在研 SKU 清单 + KPI（T03） */
+export function fetchInflightOverview() {
+  return request('/inflight');
+}
+
+/** 单 SKU 事中档案：段级时间轴 / 因果链 / 预警明细 */
+export function fetchInflightSku(code) {
+  return request(`/inflight/sku/${encodeURIComponent(code)}`);
+}
+
+/** 风险预警：当日新超期 / 持续超期 / 临近超期（85%） */
+export function fetchInflightAlerts() {
+  return request('/inflight/alerts');
+}
+
+/** 7 天进度变化（快照 diff） */
+export function fetchInflightProgress(sku = null, days = 7) {
+  const qs = new URLSearchParams({ days: String(days) });
+  if (sku) qs.set('sku', sku);
+  return request(`/inflight/progress?${qs.toString()}`);
+}
+
+/** 生成当日事中日报 xlsx（同日重跑覆盖） */
+export function runDailyReport(date = null) {
+  return postJson('/inflight/daily-report', date ? { date } : {});
+}
+
+/** 已生成的事中日报列表 */
+export function fetchDailyReports() {
+  return request('/inflight/daily-report');
+}
+
+/** 事中日报 xlsx 下载（浏览器直接下载） */
+export function buildDailyReportUrl(date) {
+  return appendCategory(
+    `${BASE}/inflight/daily-report/download?date=${encodeURIComponent(date)}`);
+}
+
+/** 手动触发自动管线（导入→快照→日报→邮件，T05） */
+export function runPipeline(skipMail = true) {
+  return postJson('/inflight/pipeline/run', { skipMail });
+}
+
+/* ------------------ 事后评估：损益三指标（P1-3/P1-4） ------------------ */
+
+/** 事后评估：时效 / 销量 / 金额三指标 + 汇总 */
+export function fetchAssessment() {
+  return request('/review/assessment');
+}
+
+/** 事后评估三指标 xlsx 下载（时效 / 销量 / 毛利 三 sheet） */
+export function buildAssessmentExportUrl() {
+  return appendCategory(`${BASE}/review/assessment/export`);
 }

@@ -1,4 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import PageHeader from '../components/PageHeader.jsx';
+import { LoadingState, ErrorState, EmptyState } from '../components/StateViews.jsx';
 import {
   Box,
   Paper,
@@ -12,7 +14,6 @@ import {
   TableRow,
   TextField,
   Chip,
-  CircularProgress,
   Alert,
   Button,
   IconButton,
@@ -30,6 +31,7 @@ import {
   deleteFillin,
   buildFillinsExportUrl,
 } from '../api.js';
+import useApi from '../hooks/useApi.js';
 
 const OPERATOR_KEY = 'fillins-operator';
 
@@ -45,34 +47,41 @@ function diffChip(d) {
 }
 
 export default function Fillins() {
-  const [meta, setMeta] = useState(null);
-  const [error, setError] = useState('');
   const [sku, setSku] = useState('');
-  const [detail, setDetail] = useState(null);
   const [drafts, setDrafts] = useState({});     // node -> {actualAt, note}
   const [operator, setOperator] = useState(() => localStorage.getItem(OPERATOR_KEY) || '');
   const [saving, setSaving] = useState('');
   const [msg, setMsg] = useState('');
 
-  const loadMeta = useCallback(() => {
-    fetchFillins().then(setMeta).catch((e) => setError(e.message));
-  }, []);
+  // 统一请求 hook：总览 + 选中 SKU 的节点档案（两个请求的错误合并展示）
+  const {
+    data: meta, error: metaErr, refetch: loadMeta, setData: setMeta,
+  } = useApi(() => fetchFillins(), []);
 
-  useEffect(() => { loadMeta(); }, [loadMeta]);
+  const {
+    data: detail, error: detailErr, setData: setDetail,
+  } = useApi(
+    () => fetchFillinsSku(sku),
+    [sku],
+    {
+      enabled: !!sku,
+      // 拉到档案后据此初始化填报草稿
+      onSuccess: (d) => {
+        const init = {};
+        (d.nodes || []).forEach((n) => {
+          init[n.node] = { actualAt: n.entry?.actualAt || '', note: n.entry?.note || '' };
+        });
+        setDrafts(init);
+      },
+    },
+  );
 
-  // 选中 SKU 后拉取节点档案
+  const error = metaErr || detailErr;
+
+  // 清空 SKU 选择时同步清掉档案详情
   useEffect(() => {
-    if (!sku) { setDetail(null); return; }
-    setDetail(null);
-    fetchFillinsSku(sku).then((d) => {
-      setDetail(d);
-      const init = {};
-      (d.nodes || []).forEach((n) => {
-        init[n.node] = { actualAt: n.entry?.actualAt || '', note: n.entry?.note || '' };
-      });
-      setDrafts(init);
-    }).catch((e) => setError(e.message));
-  }, [sku]);
+    if (!sku) setDetail(null);
+  }, [sku, setDetail]);
 
   const skuOptions = useMemo(() => {
     if (!meta) return [];
@@ -113,24 +122,20 @@ export default function Fillins() {
     }
   };
 
-  if (error) return <Alert severity="error">手工填报加载失败：{error}</Alert>;
-  if (!meta) return <Box sx={{ display: 'flex', justifyContent: 'center', mt: 8 }}><CircularProgress /></Box>;
+  if (error) return <ErrorState prefix="手工填报加载失败" error={error} />;
+  if (!meta) return <LoadingState />;
 
   return (
     <Box>
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
-        <Box>
-          <Typography variant="h6" sx={{ fontWeight: 700 }}>
-            实际时间手工填报（免登录单机版）
-          </Typography>
-          <Typography variant="caption" color="text.secondary">
-            审批导出缺失/失真的节点时间在这里人工补录，与审批口径自动对比；数据存本机 backend/state/
-          </Typography>
-        </Box>
-        <Button variant="outlined" startIcon={<DownloadIcon />} href={buildFillinsExportUrl()}>
-          导出填报 xlsx
-        </Button>
-      </Box>
+      <PageHeader
+        title="实际时间手工填报（免登录单机版）"
+        subtitle="审批导出缺失/失真的节点时间在这里人工补录，与审批口径自动对比；数据存本机 backend/state/"
+        actions={
+          <Button variant="outlined" startIcon={<DownloadIcon />} href={buildFillinsExportUrl()}>
+            导出填报 xlsx
+          </Button>
+        }
+      />
 
       {msg && <Alert severity={msg.startsWith('已保存') ? 'success' : 'warning'} sx={{ mb: 2 }} onClose={() => setMsg('')}>{msg}</Alert>}
 
@@ -175,7 +180,7 @@ export default function Fillins() {
                 ← 先选择一个 SKU，然后逐节点补录实际时间
               </Typography>
             ) : !detail ? (
-              <Box sx={{ display: 'flex', justifyContent: 'center', py: 6 }}><CircularProgress size={28} /></Box>
+              <LoadingState size={28} sx={{ py: 6 }} />
             ) : (
               <>
                 <Typography variant="caption" color="text.secondary">

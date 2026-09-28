@@ -1,4 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useState } from 'react';
+import { LoadingState, ErrorState, EmptyState } from '../components/StateViews.jsx';
+import useApi from '../hooks/useApi.js';
+import PageHeader from '../components/PageHeader.jsx';
+import { SEMANTIC } from '../theme.js';
 import {
   Box,
   Paper,
@@ -10,7 +14,6 @@ import {
   TableContainer,
   TableHead,
   TableRow,
-  CircularProgress,
   Alert,
   Button,
   ToggleButtonGroup,
@@ -36,15 +39,11 @@ const KPI_ROWS = [
 ];
 
 export default function History() {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [days, setDays] = useState(7);
 
-  const load = useCallback(() => {
-    fetchHistory().then(setData).catch((e) => setError(e.message));
-  }, []);
-  useEffect(() => { load(); }, [load]);
+  // refetch 即原先的 load()：补拍快照后重新拉取列表
+  const { data, error, refetch: load, setError } = useApi(() => fetchHistory(), []);
 
   const doSnapshot = async () => {
     setBusy(true);
@@ -78,15 +77,15 @@ export default function History() {
         { type: 'value', name: '个', splitLine: { show: false } },
       ],
       series: [
-        mk('onTimeRate', '总体达标率(%)', '#2e7d32', 0),
-        mk('transportOverRate', '货件超时率(%)', '#c62828', 0),
-        mk('openSkus', '未闭环 SKU', '#0277bd', 1),
+        mk('onTimeRate', '总体达标率(%)', SEMANTIC.success, 0),
+        mk('transportOverRate', '货件超时率(%)', SEMANTIC.danger, 0),
+        mk('openSkus', '未闭环 SKU', SEMANTIC.info, 1),
       ],
     };
   })();
 
-  if (error && !data) return <Alert severity="error">趋势周报加载失败：{error}</Alert>;
-  if (!data) return <Box sx={{ display: 'flex', justifyContent: 'center', mt: 8 }}><CircularProgress /></Box>;
+  if (error && !data) return <ErrorState prefix="趋势周报加载失败" error={error} />;
+  if (!data) return <LoadingState />;
 
   const snaps = data.snapshots || [];
   const first = snaps[0]?.kpi || {};
@@ -94,16 +93,11 @@ export default function History() {
 
   return (
     <Box>
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2, flexWrap: 'wrap', gap: 1 }}>
-        <Box>
-          <Typography variant="h6" sx={{ fontWeight: 700 }}>
-            KPI 快照与自动周报
-          </Typography>
-          <Typography variant="caption" color="text.secondary">
-            数据指纹变化后的首次访问自动记录快照；快照积累后一键生成周报 —— 当前 {data.count} 张
-          </Typography>
-        </Box>
-        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+      <PageHeader
+        title="KPI 快照与自动周报"
+        subtitle={`数据指纹变化后的首次访问自动记录快照；快照积累后一键生成周报 —— 当前 ${data.count} 张`}
+        actions={
+          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
           <ToggleButtonGroup size="small" value={days} exclusive onChange={(e, v) => v && setDays(v)}>
             <ToggleButton value={7}>周报 7 天</ToggleButton>
             <ToggleButton value={30}>月报 30 天</ToggleButton>
@@ -118,13 +112,14 @@ export default function History() {
           <Button variant="contained" startIcon={<DownloadIcon />} href={buildHistoryReportUrl(days)}>
             生成{days === 7 ? '周' : '月'}报 md
           </Button>
-        </Box>
-      </Box>
+          </Box>
+        }
+      />
 
       {error && <Alert severity="warning" sx={{ mb: 2 }} onClose={() => setError('')}>{error}</Alert>}
 
       {snaps.length === 0 ? (
-        <Alert severity="info">还没有快照，点击「立即快照」记录第一张。</Alert>
+        <EmptyState>还没有快照，点击「立即快照」记录第一张。</EmptyState>
       ) : (
         <Grid container spacing={2}>
           <Grid item xs={12}>

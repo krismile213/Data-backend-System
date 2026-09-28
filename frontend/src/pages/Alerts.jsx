@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Box,
   Paper,
@@ -13,8 +13,6 @@ import {
   TextField,
   MenuItem,
   Chip,
-  CircularProgress,
-  Alert,
   Tooltip,
   Collapse,
   IconButton,
@@ -24,39 +22,42 @@ import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
 import DownloadIcon from '@mui/icons-material/Download';
 import Button from '@mui/material/Button';
 import { fetchAlerts, buildAlertsExportUrl } from '../api.js';
+import KpiCard from '../components/KpiCard.jsx';
+import PageHeader from '../components/PageHeader.jsx';
+import { LoadingState, ErrorState } from '../components/StateViews.jsx';
+import { SEMANTIC } from '../theme.js';
+import useApi from '../hooks/useApi.js';
 
 const PRIO_COLOR = {
-  P0: { bgcolor: '#c62828', label: 'P0 立即处理' },
-  P1: { bgcolor: '#ef6c00', label: 'P1 重点跟进' },
-  P2: { bgcolor: '#546e7a', label: 'P2 推进中' },
+  P0: { bgcolor: SEMANTIC.danger, label: 'P0 立即处理' },
+  P1: { bgcolor: SEMANTIC.warning, label: 'P1 重点跟进' },
+  P2: { bgcolor: SEMANTIC.slate, label: 'P2 推进中' },
 };
 
 function fmtDays(d) {
   return d === null || d === undefined ? '—' : `${Math.round(d)}天`;
 }
 
+/** 判定符号 → 颜色（✗/差 红、⚠/良 橙、✓/优 绿） */
 function judgeColor(judge) {
   if (!judge) return 'text.secondary';
-  if (judge.startsWith('✗') || judge === '差') return '#c62828';
-  if (judge.startsWith('⚠') || judge === '良') return '#ef6c00';
-  if (judge.startsWith('✓') || judge === '优') return '#2e7d32';
+  if (judge.startsWith('✗') || judge === '差') return SEMANTIC.danger;
+  if (judge.startsWith('⚠') || judge === '良') return SEMANTIC.warning;
+  if (judge.startsWith('✓') || judge === '优') return SEMANTIC.success;
   return 'text.secondary';
-}
-
-function KpiCard({ label, value, sub, color = '#1a2740' }) {
-  return (
-    <Paper sx={{ p: 2, height: '100%' }}>
-      <Typography variant="caption" color="text.secondary">{label}</Typography>
-      <Typography variant="h5" sx={{ fontWeight: 700, color, mt: 0.5 }}>{value}</Typography>
-      {sub && <Typography variant="caption" color="text.secondary">{sub}</Typography>}
-    </Paper>
-  );
 }
 
 function worstLoc(detail) {
   if (!detail || !detail.length || !detail[0].arr) return null;
   const w = detail[0];
   return `${w.hub} · 货件${w.trk}（${(w.arr || '').slice(0, 10)}到货，取数起${w.fetchDays === null ? '—' : Math.round(w.fetchDays)}天）`;
+}
+
+/** 逐票判定 → 颜色（未到货/未发货按橙处理） */
+function rowJudgeColor(judge) {
+  if (judge === '差') return SEMANTIC.danger;
+  if (judge === '优') return SEMANTIC.success;
+  return SEMANTIC.warning;
 }
 
 function AlertRow({ r }) {
@@ -71,7 +72,7 @@ function AlertRow({ r }) {
           </IconButton>
         </TableCell>
         <TableCell>
-          <Chip size="small" label={r.priority} sx={{ bgcolor: pc.bgcolor, color: '#fff', fontWeight: 700 }} />
+          <Chip size="small" label={r.priority} sx={{ bgcolor: pc.bgcolor, color: SEMANTIC.onColor, fontWeight: 700 }} />
         </TableCell>
         <TableCell sx={{ fontWeight: 600 }}>{r.sku}</TableCell>
         <TableCell>{r.model || '—'}</TableCell>
@@ -83,7 +84,7 @@ function AlertRow({ r }) {
           ) : '—'}
         </TableCell>
         <TableCell align="right"
-          sx={{ color: (r.stuckDays || 0) > 7 ? '#c62828' : 'inherit', fontWeight: 600 }}>
+          sx={{ color: (r.stuckDays || 0) > 7 ? SEMANTIC.danger : 'inherit', fontWeight: 600 }}>
           {r.stuckDays === null || r.stuckDays === undefined ? '—' : r.stuckDays}
         </TableCell>
         <TableCell>
@@ -94,9 +95,11 @@ function AlertRow({ r }) {
           </Tooltip>
         </TableCell>
         <TableCell>
-          <span style={{ color: judgeColor(r.opsSeg.judge) }}>
-            {r.opsSeg.days === null ? '—' : `${Math.round(r.opsSeg.days)}/${r.opsSeg.target}`} {r.opsSeg.judge}
-          </span>
+          <Tooltip title={r.opsSeg.seg}>
+            <span style={{ color: judgeColor(r.opsSeg.judge) }}>
+              {r.opsSeg.days === null ? '—' : `${Math.round(r.opsSeg.days)}/${r.opsSeg.target}`} {r.opsSeg.judge}
+            </span>
+          </Tooltip>
         </TableCell>
         <TableCell>
           <Tooltip title={worstLoc(r.air.detail) || '无空运货件'}>
@@ -113,11 +116,11 @@ function AlertRow({ r }) {
           </Tooltip>
         </TableCell>
         <TableCell align="right"
-          sx={{ color: r.proposal.stale ? '#c62828' : 'inherit' }}>
+          sx={{ color: r.proposal.stale ? SEMANTIC.danger : 'inherit' }}>
           {r.proposal.days === null ? '—' : Math.round(r.proposal.days)}
         </TableCell>
         <TableCell align="right"
-          sx={{ color: r.countries < r.countryMin ? '#ef6c00' : '#2e7d32' }}>
+          sx={{ color: r.countries < r.countryMin ? SEMANTIC.warning : SEMANTIC.success }}>
           {r.countries}/{r.countryMin}
         </TableCell>
         <TableCell>
@@ -128,14 +131,14 @@ function AlertRow({ r }) {
         </TableCell>
       </TableRow>
       <TableRow>
-        <TableCell colSpan={13} sx={{ py: 0, bgcolor: '#fafafa' }}>
+        <TableCell colSpan={13} sx={{ py: 0, bgcolor: SEMANTIC.neutralBg }}>
           <Collapse in={open} unmountOnExit>
             <Box sx={{ p: 2 }}>
               <Grid container spacing={2}>
                 <Grid item xs={12} md={6}>
                   <Typography variant="subtitle2" gutterBottom>加急原因</Typography>
                   {r.reasons.map((x, i) => (
-                    <Typography key={i} variant="body2" sx={{ color: '#c62828' }}>• {x}</Typography>
+                    <Typography key={i} variant="body2" sx={{ color: SEMANTIC.danger }}>• {x}</Typography>
                   ))}
                 </Grid>
                 <Grid item xs={12} md={6}>
@@ -171,7 +174,7 @@ function AlertRow({ r }) {
                         .sort((a, b) => (b.arr || '').localeCompare(a.arr || ''))
                         .map((s, i) => (
                         <TableRow key={`${s.trk}-${i}`}
-                          sx={{ bgcolor: s.judge === '差' ? '#fdecea' : 'inherit' }}>
+                          sx={{ bgcolor: s.judge === '差' ? SEMANTIC.dangerBg : 'inherit' }}>
                           <TableCell sx={{ fontFamily: 'monospace' }}>{s.trk}</TableCell>
                           <TableCell>{s.hub || '—'}</TableCell>
                           <TableCell>{s.mode}</TableCell>
@@ -184,9 +187,7 @@ function AlertRow({ r }) {
                           </TableCell>
                           <TableCell>
                             <span style={{
-                              color: s.judge === '差' ? '#c62828'
-                                : s.judge === '良' ? '#ef6c00'
-                                : s.judge === '优' ? '#2e7d32' : '#ef6c00',
+                              color: rowJudgeColor(s.judge),
                               fontWeight: s.judge === '差' ? 700 : 400,
                             }}>
                               {s.judge === '未到货' || s.judge === '未发货'
@@ -211,14 +212,9 @@ function AlertRow({ r }) {
 }
 
 export default function Alerts() {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
+  const { data, error } = useApi(() => fetchAlerts(), []);
   const [q, setQ] = useState('');
   const [prio, setPrio] = useState('');
-
-  useEffect(() => {
-    fetchAlerts().then(setData).catch((e) => setError(e.message));
-  }, []);
 
   const rows = useMemo(() => {
     if (!data) return [];
@@ -230,17 +226,18 @@ export default function Alerts() {
     });
   }, [data, q, prio]);
 
-  if (error) return <Alert severity="error">加急预警加载失败：{error}</Alert>;
-  if (!data) return <Box sx={{ display: 'flex', justifyContent: 'center', mt: 8 }}><CircularProgress /></Box>;
+  if (error) return <ErrorState prefix="加急预警加载失败" error={error} />;
+  if (!data) return <LoadingState />;
+
+  // 口径元信息来自后端（不硬编码）：产品段/运营段的边界串。缺失时退化为不追加。
+  const segDef = data.segDef;
 
   return (
     <Box>
-      <Typography variant="h6" gutterBottom>
-        加急预警与盯数清单
-        <Typography variant="caption" color="text.secondary" sx={{ ml: 2 }}>
-          口径：route_check_sys 系统口径 · 只列未闭环 SKU，停滞越久越靠前 · 计算于 {data.computedAt}
-        </Typography>
-      </Typography>
+      <PageHeader
+        title="加急预警与盯数清单"
+        subtitle={`口径：route_check_sys 系统口径 · 只列未闭环 SKU，停滞越久越靠前 · 计算于 ${data.computedAt}${segDef ? ` · 产品段 ${segDef.prodSeg} · 运营段 ${segDef.opsSeg}` : ''}`}
+      />
 
       <Grid container spacing={2} sx={{ mb: 2 }}>
         <Grid item xs={6} md={2.4}>
@@ -248,20 +245,20 @@ export default function Alerts() {
         </Grid>
         <Grid item xs={6} md={2.4}>
           <KpiCard label="未闭环（预警中）" value={data.alertCount}
-            sub="已闭环 SKU 不列入" color="#ef6c00" />
+            sub="已闭环 SKU 不列入" color={SEMANTIC.warning} />
         </Grid>
         <Grid item xs={4} md={2.4}>
           <KpiCard label="P0 立即处理" value={data.p0}
-            sub="空/海超底线 · 提案超期 · Part7停滞>7天" color="#c62828" />
+            sub="空/海超底线 · 提案超期 · Part7停滞>7天" color={SEMANTIC.danger} />
         </Grid>
         <Grid item xs={4} md={2.4}>
           <KpiCard label="P1 重点跟进" value={data.p1}
-            sub="产品段超时 · 停滞>7天 · 渠道缺口" color="#ef6c00" />
+            sub="产品段超时 · 停滞>7天 · 渠道缺口" color={SEMANTIC.warning} />
         </Grid>
         <Grid item xs={4} md={2.4}>
           <KpiCard label="数据新鲜度" value={data.dataLagDays === null ? '—' : `滞后 ${data.dataLagDays} 天`}
             sub={`全库最新动态 ${data.latestDynamic || '—'}`}
-            color={data.dataLagDays >= 3 ? '#c62828' : '#2e7d32'} />
+            color={data.dataLagDays >= 3 ? SEMANTIC.danger : SEMANTIC.success} />
         </Grid>
       </Grid>
 
@@ -293,8 +290,16 @@ export default function Alerts() {
                 <TableCell>型号</TableCell>
                 <TableCell>卡点环节</TableCell>
                 <TableCell align="right">停滞(天)</TableCell>
-                <TableCell>产品段</TableCell>
-                <TableCell>运营段</TableCell>
+                <TableCell>
+                  <Tooltip title={`产品段 = ${segDef?.prodSeg || ''}（素材交付 = Part6 产品营销素材加工，audit 时间）`}>
+                    <span>产品段</span>
+                  </Tooltip>
+                </TableCell>
+                <TableCell>
+                  <Tooltip title={`运营段 = ${segDef?.opsSeg || ''}`}>
+                    <span>运营段</span>
+                  </Tooltip>
+                </TableCell>
                 <TableCell>空运</TableCell>
                 <TableCell>海运</TableCell>
                 <TableCell align="right">提案(天)</TableCell>

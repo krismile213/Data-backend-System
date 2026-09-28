@@ -1,9 +1,9 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
+import { LoadingState, ErrorState, EmptyState } from '../components/StateViews.jsx';
+import useApi from '../hooks/useApi.js';
 import {
   Card,
   CardContent,
-  Alert,
-  CircularProgress,
   Box,
   Chip,
   TextField,
@@ -39,21 +39,15 @@ const TYPE_COLORS = {
 };
 
 export default function Anomalies({ batch }) {
-  const [data, setData] = useState(null);
   const [type, setType] = useState('');
   const [part, setPart] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
 
-  useEffect(() => {
-    if (!batch) return;
-    setLoading(true);
-    setError('');
-    fetchAnomalies(batch, { type: type || undefined, part: part || undefined })
-      .then(setData)
-      .catch((e) => setError(e.message || '加载失败'))
-      .finally(() => setLoading(false));
-  }, [batch, type, part]);
+  // 统一请求 hook：loading / error / 竞态防护（切筛选时旧请求不会覆盖新结果）
+  const { data, error, loading } = useApi(
+    () => fetchAnomalies(batch, { type: type || undefined, part: part || undefined }),
+    [batch, type, part],
+    { enabled: !!batch },
+  );
 
   const partOptions = useMemo(() => {
     if (!data) return [];
@@ -61,29 +55,21 @@ export default function Anomalies({ batch }) {
   }, [data]);
 
   if (!batch) {
-    return <Alert severity="info">请先在右上角选择数据批次</Alert>;
+    return <EmptyState>请先在右上角选择数据批次</EmptyState>;
   }
-  if (loading) {
-    return (
-      <Box sx={{ display: 'flex', justifyContent: 'center', mt: 8 }}>
-        <CircularProgress />
-      </Box>
-    );
-  }
-  if (error) {
-    return <Alert severity="error">加载失败：{error}</Alert>;
-  }
+  if (loading) return<LoadingState />;
+  if (error) return <ErrorState prefix="加载失败" error={error} />;
   if (!data) return null;
 
   return (
-    <div className="space-y-4">
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
       {/* 异常类型汇总卡片 */}
       <Card>
         <CardContent>
           <Typography variant="subtitle1" gutterBottom>
             异常类型汇总（当前批次共 {data.total} 条记录）
           </Typography>
-          <Box className="flex flex-wrap gap-1.5">
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
             <Chip
               label={`全部（${data.typeSummary.reduce((a, b) => a + b.count, 0)}）`}
               color={type === '' ? 'primary' : 'default'}
@@ -105,7 +91,7 @@ export default function Anomalies({ batch }) {
       {/* 筛选 + 列表 */}
       <Card>
         <CardContent>
-          <Box className="flex items-center gap-2 mb-3">
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
             <TextField
               select
               size="small"
@@ -192,6 +178,6 @@ export default function Anomalies({ batch }) {
           </TableContainer>
         </CardContent>
       </Card>
-    </div>
+    </Box>
   );
 }

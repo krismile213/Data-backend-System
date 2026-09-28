@@ -11,8 +11,8 @@ alerts.py — SKU 加急预警引擎（GET /api/alerts）
 
   关键段：
     提案→取数  = Part1 提案确认 → 取得手机数据（>75 天 ⚠，P0）
-    产品段     = 取数 → 拍摄交付（素材通用≤23 / 不通用≤38，✗ 计 P1）
-    运营段     = 拍摄交付 → max(上架, 广告设置)（≤7 天）
+    产品段     = 起点(膜=取数/壳=提案) → 素材交付（=Part6「产品营销素材加工」，素材通用≤23 / 不通用≤38，✗ 计 P1）
+    运营段     = 素材交付 → max(上架, 广告设置)（≤7 天）
     空运/海运  = 取数 → 该方式末批到货（Part5×Part8 按货件号关联；渠道映射：
                  东南亚=海运35 / 欧洲=空运15 / 美国=35 / 加墨美客多=海运35 / 默认空运15）
     到货国数   = Part8 到货渠道仓去重数（≥14 国达标口径）
@@ -28,11 +28,12 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
+from ..category_rules import DEFAULT_CATEGORY, rules_for
 from ..db import SessionLocal
-from ..models import ApprovalNode, PartDoc
+from ..models import ApprovalNode, Batch, PartDoc
 from ..review_rules import PART_ACTIONS, PART_LIST, PART_NAMES
 from ..rule_service import get_rules
-from .review import _db_fingerprint, _fmt, _parse_dt
+from .review import _cat_cond, _db_fingerprint, _fmt, _live_batch_ids, _parse_dt
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
 
@@ -49,12 +50,17 @@ NEXT_BY_PART = {
     "Part8": "催李晓影确认末批到货/查物流",
 }
 
-# 节点系统时间列兜底（route_check_sys.NODES 的系统列口径）
-_SYS_COLS = {
-    "fetch": ("Part1", "手机数据取得日期"),
-    "deliver": ("Part6", "拍摄团队素材交付日期"),
-    "up": ("Part7", "最终上架完成时间"),
-    "ad": ("Part7", "广告上架完成时间"),
+# 预警页需要的四个关键时点 → 规则集里的节点名（系统时间列兜底口径）
+#   fetch  = 考核时钟起点：手机膜=取数 / 手机壳=提案（壳无取数节点）
+#   deliver= 产品部终节点「素材交付」= rs.product_end_node（节点「素材加工」）
+#   up = 上架 / ad = 广告
+_ALERT_NODES = {"fetch": None, "deliver": None, "up": "上架", "ad": "广告"}
+
+# 手机膜的「提案」在预警页历史上用动作名 **提案确认** 取时间（不是 NODES 里的
+# 提交申请 —— 两者时间不同）。为保持改造前行为逐字节一致，这里按品类显式给出。
+_PROP_ACTION = {
+    "手机膜": "提案确认",
+    "手机壳": "提交申请",
 }
 
 
@@ -109,18 +115,29 @@ def _seg_judge(d, target):
 # ---------------------------------------------------------------------------
 # 数据装载：全部单据（不限状态）+ 节点
 # ---------------------------------------------------------------------------
-def _load_all_docs():
+def _load_all_docs(category=None):
+    """加载该品类全部单据（不限状态）+ 节点。按品类隔离，绝不跨品类混算。
+
+    ⚠️ 只算「活批次」（目录仍存在）——与 review._live_batch_ids 同口径：
+    钉钉每天导出最新全量后，旧批次目录被移走即退役，DB 残留记录不再参与预警。
+    """
+    cond = _cat_cond(category)
+    live = _live_batch_ids(category)
+    if not live:
+        return {}
     with SessionLocal() as session:
         docs = session.execute(
             select(PartDoc.id, PartDoc.part, PartDoc.sku, PartDoc.model,
                    PartDoc.status, PartDoc.create_time, PartDoc.update_time,
                    PartDoc.finish_time, PartDoc.raw)
-            .where(PartDoc.sku.isnot(None))
+            .join(Batch, PartDoc.batch_id == Batch.id)
+            .where(PartDoc.sku.isnot(None), cond, PartDoc.batch_id.in_(live))
         ).all()
         nodes = session.execute(
             select(ApprovalNode.doc_id, ApprovalNode.action, ApprovalNode.action_time)
             .join(PartDoc, ApprovalNode.doc_id == PartDoc.id)
-            .where(PartDoc.sku.isnot(None))
+            .join(Batch, PartDoc.batch_id == Batch.id)
+            .where(PartDoc.sku.isnot(None), cond, PartDoc.batch_id.in_(live))
             .order_by(ApprovalNode.doc_id, ApprovalNode.seq)
         ).all()
 
@@ -143,7 +160,13 @@ def _load_all_docs():
 
 
 def _pick_doc(docs):
-    """同 Part 多张单据时，取关键动作覆盖最多、其次最新完成的一张。"""
+    """同 Part 多张单据时，取关键动作覆盖最多、其次最新完成的一张。
+
+    ⚠️ 已知遗留：`_part_of(d)` 取 `doc["part"]`，但上游 `_load_all_docs` 分组时
+    并没有把这个键写进 doc（分组用外部循环变量）→ `hit` 恒为 0，实际按
+    「最新完成」选主单据。此处**故意不修**：修正会改变手机膜既有预警输出，
+    属于独立的行为变更，需要单独的验收。
+    """
     def score(d):
         acts = PART_ACTIONS.get(_part_of(d), ())
         hit = sum(1 for a in acts if a in d["times"])
@@ -157,19 +180,35 @@ def _part_of(doc):
     return doc.get("part", "")
 
 
-def _node_time(sku_data, part, action, sys_key=None):
+def _alert_specs(rs):
+    """按品类给出预警页的节点规格：key -> (Part, 动作名, 系统列候选链)。
+
+    系统列候选链直接取自规则集（`NODES` 的候选元组），因此某品类某列被停填时
+    仍能按序回退 —— 与复盘页共用同一套列口径，避免两页算法不一致。
+    """
+    specs = {}
+    for key, node in _ALERT_NODES.items():
+        node = node or (rs.start_node if key == "fetch" else rs.product_end_node)
+        part = rs.node_part(node)
+        if part is None:                 # 该品类没有这个节点（如壳无「取数」）
+            continue
+        specs[key] = (part, rs.node(node)["act"], rs.sys_candidates(node))
+    return specs
+
+
+def _node_time(sku_data, part, action, sys_cols=None):
     """节点时间：优先该 Part 主单据的审批动作时间，兜底系统时间列（任一单据有值即用最新）。"""
     parts = sku_data["parts"]
     docs = parts.get(part) or []
     t = None
-    if docs:
+    if docs and action:
         t = _pick_doc(docs)["times"].get(action)
-    if t is None and sys_key:
-        _, col = _SYS_COLS[sys_key]
+    if t is None and sys_cols:
         for d in docs:
-            v = _parse_dt(_clean(d["raw"].get(col)))
-            if v and (t is None or v > t):
-                t = v
+            for col in sys_cols:
+                v = _parse_dt(_clean(d["raw"].get(col)))
+                if v and (t is None or v > t):
+                    t = v
     return t
 
 
@@ -193,9 +232,15 @@ def _generic_material(sku_data):
     return False, "未标注拍摄/参考(默认按需拍摄)"
 
 
-def _shipments(sku_data):
+def _shipments(sku_data, rs=None):
     """Part5×Part8 按货件号关联的逐货件列表（route_check_sys 兜底路径）。
-    含渠道未发货占位条目（无货件号/时间，仅渠道仓，noShip=True）。"""
+    含渠道未发货占位条目（无货件号/时间，仅渠道仓，noShip=True）。
+
+    rs：品类规则集。运输方式/目标天与"空运|海运"归类都从规则集取，
+        避免两个品类共用一份硬编码口径（缺省仍用本模块的旧函数）。
+    """
+    mode_fn = rs.transport_mode if rs is not None else transport_mode
+    cls_fn = rs.ship_class if rs is not None else _ship_cls
     p5, p8 = {}, {}
     no_trk_hubs, hubs_with_trk = [], set()
     for d in sku_data["parts"].get("Part5") or []:
@@ -219,17 +264,17 @@ def _shipments(sku_data):
     items = []
     for trk, (hub, sd) in p5.items():
         arr = p8.get(trk)
-        mode, tgt = transport_mode(hub)
+        mode, tgt = mode_fn(hub)
         items.append({"trk": trk, "hub": hub, "ship": sd, "arr": arr,
                       "days": _days(sd, arr), "mode": mode, "target": tgt,
-                      "cls": _ship_cls(mode), "noShip": False})
+                      "cls": cls_fn(mode), "noShip": False})
     for hub in no_trk_hubs:
         if hub in hubs_with_trk:
             continue
-        mode, tgt = transport_mode(hub)
+        mode, tgt = mode_fn(hub)
         items.append({"trk": "", "hub": hub, "ship": None, "arr": None,
                       "days": None, "mode": mode, "target": tgt,
-                      "cls": _ship_cls(mode), "noShip": True})
+                      "cls": cls_fn(mode), "noShip": True})
     return items
 
 
@@ -249,8 +294,16 @@ def _pending_part(sku_data, today):
 # ---------------------------------------------------------------------------
 # 计算
 # ---------------------------------------------------------------------------
-def compute_alerts():
+def compute_alerts(category=None):
+    """加急预警计算。category 缺省 = 默认品类（手机膜），行为与改造前一致。
+
+    品类隔离发生在两处：`_load_all_docs` 只取本品类批次；`_alert_specs` 给出
+    本品类的节点/动作/系统列（手机壳没有「取数」，起点节点即「提案」）。
+    """
     today = datetime.now()
+    rs = rules_for(category)
+    specs = _alert_specs(rs)
+    prop_action = _PROP_ACTION.get(rs.key, "提案确认")
     rules, _ = get_rules()
     prod_gen = rules["product_target_generic"]
     prod_non = rules["product_target_non_generic"]
@@ -260,11 +313,16 @@ def compute_alerts():
     sea_good, sea_lim = rules["sea_good"], rules["sea_limit"]
     country_min = rules["country_min"]
     stuck_t = rules["stuck_days"]
-    by_sku = _load_all_docs()
+    by_sku = _load_all_docs(rs.key)
+
+    def _nt(data, key):
+        """按品类规格取节点时间；该品类没有这个节点 → None（绝不跨节点兜底）。"""
+        spec = specs.get(key)
+        return _node_time(data, spec[0], spec[1], spec[2]) if spec else None
 
     # 复盘引擎的有效性结果（已结束单据口径）
     from .review import get_review_data
-    review = get_review_data()
+    review = get_review_data(rs.key)
     valid_map = {sku: d["valid"] for sku, d in review["skuDetails"].items()}
 
     rows = []
@@ -272,22 +330,23 @@ def compute_alerts():
         if valid_map.get(sku, False):
             continue                       # 已闭环不列入（route_check_sys 口径）
 
-        t_prop = _node_time(data, "Part1", "提案确认")
-        t_fetch = _node_time(data, "Part1", "取得手机数据", sys_key="fetch")
-        t_deliver = _node_time(data, "Part6", "素材接收", sys_key="deliver")
-        t_up = _node_time(data, "Part7", "上架", sys_key="up")
-        t_ad = _node_time(data, "Part7", "广告设置", sys_key="ad")
+        t_prop = _node_time(data, "Part1", prop_action)
+        t_fetch = _nt(data, "fetch")
+        # t_prod_end = 素材交付（Part6 产品营销素材加工，audit 优先）
+        t_prod_end = _nt(data, "deliver")
+        t_up = _nt(data, "up")
+        t_ad = _nt(data, "ad")
 
         generic, g_basis = _generic_material(data)
         prod_target = prod_gen if generic else prod_non
-        d_prod = _days(t_fetch, t_deliver)
+        d_prod = _days(t_fetch, t_prod_end)
         prod_judge = _seg_judge(d_prod, prod_target)
-        d_ops = _days(t_deliver, max([x for x in (t_up, t_ad) if x], default=None))
+        d_ops = _days(t_prod_end, max([x for x in (t_up, t_ad) if x], default=None))
         ops_judge = _seg_judge(d_ops, ops_t)
         d_prop = _days(t_prop, t_fetch)
         prop_stale = d_prop is not None and d_prop > prop_days
 
-        items = _shipments(data)
+        items = _shipments(data, rs)
         air_last = max([it["arr"] for it in items
                         if it["cls"] == "空运" and it["arr"]], default=None)
         sea_last = max([it["arr"] for it in items
@@ -367,7 +426,7 @@ def compute_alerts():
         todo = []
         if pP and pP != "Part7" and pP in NEXT_BY_PART:
             todo.append(NEXT_BY_PART[pP])
-        if t_deliver is not None:          # 运营阶段已到才催上架/广告
+        if t_prod_end is not None:          # 运营阶段已到才催上架/广告
             if t_up is None:
                 todo.append("催郭晋盈完成最终上架")
             if t_ad is None:
@@ -392,8 +451,10 @@ def compute_alerts():
             "stuckDays": stuck, "lastDynamic": last_dyn,
             "prodSeg": {"days": d_prod, "target": prod_target,
                         "judge": prod_judge,
+                        "seg": f"{rs.start_node}→素材交付",
                         "basis": ("素材通用·" if generic else "素材不通用·") + g_basis},
-            "opsSeg": {"days": d_ops, "target": ops_t, "judge": ops_judge},
+            "opsSeg": {"days": d_ops, "target": ops_t, "judge": ops_judge,
+                       "seg": "素材交付→max(上架,广告设置)"},
             "proposal": {"days": d_prop, "stale": prop_stale,
                          "target": prop_days},
             "air": {"days": d_air, "judge": air_judge,
@@ -431,6 +492,10 @@ def compute_alerts():
 
     return {
         "computedAt": today.strftime("%Y-%m-%d %H:%M"),
+        "segDef": {"productEnd": rs.product_end_node,
+                   "productEndLabel": "素材交付",
+                   "prodSeg": f"{rs.start_node}→素材交付",
+                   "opsSeg": "素材交付→max(上架,广告设置)"},
         "totalSkus": len(by_sku),
         "alertCount": len(rows),
         "p0": sum(1 for r in rows if r["priority"] == "P0"),
@@ -448,36 +513,49 @@ def compute_alerts():
 # ---------------------------------------------------------------------------
 import threading
 
-_cache = {"fp": None, "data": None}
+_cache = {"fp": None, "data": None}          # 兼容旧引用：镜像"最近一次计算"
+_cache_by_cat_alerts = {}                    # 品类 key -> {"fp", "data"}（真正的缓存）
 _cache_lock = threading.Lock()
 
 
 @router.get("")
 @router.get("/")
-def alerts():
+def alerts(category: str = None):
     """加急预警总览：P0/P1/P2 明细 + 盯数清单 + 数据新鲜度。"""
     try:
-        return _get_alerts_cached()
+        return _get_alerts_cached(category)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"预警计算失败: {e}")
 
 
-def _get_alerts_cached():
-    """带锁缓存：指纹一致直接返回；否则持锁重算后原子提交（同 review 口径）。"""
-    fp = f"{_db_fingerprint()}|{get_rules()[1]}"
+def _get_alerts_cached(category=None):
+    """带锁缓存：指纹一致直接返回；否则重算后原子提交（同 review 口径）。
+
+    缓存**按品类分槽**（同 review）：不同品类规则集与批次都不同，共用一个槽位
+    会让交替请求永远不命中，还会把另一品类的数据算进去。
+
+    ⚠️ 计算必须在**锁外**（双检锁）：compute_alerts → get_review_data →
+    record_snapshot → _build_kpi → _get_alerts_cached 会在同一个线程绕回来，
+    若把计算放在锁内，这把非重入锁会被本线程自己撞死（整个后端挂死）。
+    并发下最坏只是多算一次，可以接受。
+    """
+    cat = rules_for(category).key
+    fp = f"{cat}|{_db_fingerprint(cat)}|{get_rules()[1]}"
     with _cache_lock:
-        if _cache["fp"] == fp and _cache["data"] is not None:
-            return _cache["data"]
-        data = compute_alerts()
-        _cache["fp"] = fp
-        _cache["data"] = data
-        return data
+        slot = _cache_by_cat_alerts.get(cat)
+        if slot is not None and slot["fp"] == fp:
+            return slot["data"]
+    data = compute_alerts(cat)
+    with _cache_lock:
+        _cache_by_cat_alerts[cat] = {"fp": fp, "data": data}
+        _cache["fp"], _cache["data"] = fp, data    # 兼容旧引用的镜像槽
+    return data
 
 
 @router.get("/export")
-def export_alerts(priority: str = None):
+def export_alerts(priority: str = None, category: str = None):
     """导出加急预警清单 xlsx（可按优先级过滤），下一步建议合并为一列。"""
     import io
     import urllib.parse
@@ -486,7 +564,7 @@ def export_alerts(priority: str = None):
     from fastapi.responses import StreamingResponse
 
     try:
-        data = _get_alerts_cached()
+        data = _get_alerts_cached(category)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"导出失败: {e}")
     rows = data["rows"]

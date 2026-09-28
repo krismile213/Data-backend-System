@@ -1,9 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { LoadingState, ErrorState, EmptyState } from '../components/StateViews.jsx';
 import {
   Card,
   CardContent,
-  Alert,
-  CircularProgress,
   Box,
   Tabs,
   Tab,
@@ -29,6 +28,7 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import SearchIcon from '@mui/icons-material/Search';
 import { fetchBatches, fetchRecords, buildExportUrl } from '../api.js';
+import useApi from '../hooks/useApi.js';
 
 /** 可排序列（时间与编号等） */
 const SORTABLE = ['审批编号', '创建时间', '完成时间', '更新时间', '审批状态', '创建人'];
@@ -94,7 +94,6 @@ function RecordRow({ row, columns }) {
 }
 
 export default function Records({ batch }) {
-  const [parts, setParts] = useState([]);
   const [part, setPart] = useState('');
   const [tab, setTab] = useState(0);
 
@@ -106,52 +105,55 @@ export default function Records({ batch }) {
   });
   const [applied, setApplied] = useState({}); // 已提交的筛选条件
 
-  const [data, setData] = useState(null);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(20);
   const [sortField, setSortField] = useState('');
   const [sortOrder, setSortOrder] = useState('asc');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
 
-  // 批次变化：重拉 Part 列表，默认选第一个 Part，重置筛选
-  useEffect(() => {
-    if (!batch) return;
-    fetchBatches()
-      .then((res) => {
-        const b = (res.batches || []).find((x) => x.name === batch);
-        const list = b ? b.parts : [];
-        setParts(list);
+  // 统一请求 hook：当前批次的 Part 列表
+  const { data: parts } = useApi(
+    async () => {
+      const res = await fetchBatches();
+      const b = (res.batches || []).find((x) => x.name === batch);
+      return b ? b.parts : [];
+    },
+    [batch],
+    {
+      enabled: !!batch,
+      initialData: [],
+      // 批次切换后默认选中第一个 Part
+      onSuccess: (list) => {
         if (list.length) {
           setPart(list[0].part);
           setTab(0);
         } else {
           setPart('');
         }
-      })
-      .catch(() => setParts([]));
+      },
+    },
+  );
+
+  // 批次变化：重置筛选与分页
+  useEffect(() => {
+    if (!batch) return;
     setFilters({ approvalNo: '', creator: '', status: '', keyword: '' });
     setApplied({});
     setPage(0);
     setSortField('');
   }, [batch]);
 
-  // 查询（批次/Part/分页/排序/筛选变化均触发）
-  useEffect(() => {
-    if (!batch || !part) return;
-    setLoading(true);
-    setError('');
-    fetchRecords(batch, part, {
+  // 统一请求 hook：单据查询（批次/Part/分页/排序/筛选变化均触发）
+  const { data, error, loading } = useApi(
+    () => fetchRecords(batch, part, {
       page: page + 1,
       pageSize,
       sortField: sortField || undefined,
       sortOrder,
       ...applied,
-    })
-      .then(setData)
-      .catch((e) => setError(e.message || '查询失败'))
-      .finally(() => setLoading(false));
-  }, [batch, part, page, pageSize, sortField, sortOrder, applied]);
+    }),
+    [batch, part, page, pageSize, sortField, sortOrder, applied],
+    { enabled: !!batch && !!part },
+  );
 
   const handleSearch = () => {
     setApplied({ ...filters });
@@ -183,7 +185,7 @@ export default function Records({ batch }) {
   const columns = useMemo(() => (data ? data.columns : []), [data]);
 
   if (!batch) {
-    return <Alert severity="info">请先在右上角选择数据批次</Alert>;
+    return <EmptyState>请先在右上角选择数据批次</EmptyState>;
   }
 
   return (
@@ -207,7 +209,7 @@ export default function Records({ batch }) {
         </Tabs>
 
         {/* 筛选区 */}
-        <Box className="flex flex-wrap items-center gap-2 mb-3">
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 1, mb: 1.5 }}>
           <TextField
             size="small"
             label="审批编号"
@@ -258,14 +260,10 @@ export default function Records({ batch }) {
           </Tooltip>
         </Box>
 
-        {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
-        {!part && !error && <Alert severity="info">该批次无数据文件</Alert>}
+        {error && <ErrorState error={error} sx={{ mb: 2 }} />}
+        {!part && !error && <EmptyState>该批次无数据文件</EmptyState>}
 
-        {loading && (
-          <Box sx={{ display: 'flex', justifyContent: 'center', my: 4 }}>
-            <CircularProgress size={28} />
-          </Box>
-        )}
+        {loading && <LoadingState size={28} sx={{ my: 4 }} />}
 
         {data && !loading && (
           <>

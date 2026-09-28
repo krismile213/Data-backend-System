@@ -23,7 +23,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
 
-from ..seg_rules import ROUTE_TARGETS
+from ..category_rules import rules_for
 from .review import _parse_dt, get_review_data
 
 router = APIRouter(prefix="/api/routes", tags=["routes"])
@@ -60,8 +60,9 @@ def _latest_arr(shipments, cls):
     return max(arrs) if arrs else None
 
 
-def _route_row(name, t0, t1, extra=None):
-    cfg = ROUTE_TARGETS[name]
+def _route_row(name, t0, t1, targets, extra=None):
+    """targets：该品类的路线评级线（ruleset.route_targets），不再读全局常量。"""
+    cfg = targets[name]
     d = _days(t0, t1)
     row = {
         "route": name,
@@ -77,9 +78,15 @@ def _route_row(name, t0, t1, extra=None):
     return row
 
 
-def compute_routes():
-    """全量计算 SKU 路线评级。"""
-    data = get_review_data()
+def compute_routes(category=None):
+    """全量计算 SKU 路线评级（category 缺省 = 默认品类手机膜）。
+
+    时钟起点取**该品类的起点节点**（膜=取数 / 壳=提案），评级线取该品类的
+    route_targets —— 手机壳没有取数节点，硬编码 "取数" 会让整页空掉。
+    """
+    rs = rules_for(category)
+    targets = rs.route_targets
+    data = get_review_data(category)
     row_by_sku = {r["sku"]: r for r in data["rows"]}
 
     out_rows = []
@@ -88,9 +95,9 @@ def compute_routes():
 
     for sku, det in data["skuDetails"].items():
         nodes = det.get("nodes") or {}
-        t0 = _parse_dt((nodes.get("取数") or {}).get("iso"))
+        t0 = _parse_dt((nodes.get(rs.start_node) or {}).get("iso"))
         if t0 is None:
-            continue                       # 无取数时间无法评级
+            continue                       # 无起点时间（膜=取数 / 壳=提案）无法评级
 
         shipments = det.get("shipments") or []
         dept = det.get("dept") or {}
@@ -101,9 +108,9 @@ def compute_routes():
         t_sea = _latest_arr(shipments, "海运")
 
         routes = [
-            _route_row("运营", t0, t_ops),
-            _route_row("空运", t0, t_air),
-            _route_row("海运", t0, t_sea),
+            _route_row("运营", t0, t_ops, targets),
+            _route_row("空运", t0, t_air, targets),
+            _route_row("海运", t0, t_sea, targets),
         ]
         for r in routes:
             grade_dist[r["route"]][r["grade"]] += 1
@@ -164,7 +171,8 @@ def compute_routes():
     return {
         "computedAt": data["computedAt"],
         "skuCount": n,
-        "targets": {k: dict(v) for k, v in ROUTE_TARGETS.items()},
+        "targets": {k: dict(v) for k, v in targets.items()},
+        "startNode": rs.start_node,
         "routeSummary": route_summary,
         "focusCounts": {
             "运营>60天底线": sum(1 for r in out_rows if r["focus"] == "运营>60天底线"),
@@ -177,16 +185,16 @@ def compute_routes():
 
 
 @router.get("")
-def routes():
+def routes(category: str = None):
     """路线达标看板：运营/空运/海运三条路线的 SKU 级评级 + 分布。"""
     try:
-        return compute_routes()
+        return compute_routes(category)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"路线评级失败: {e}")
 
 
 @router.get("/export")
-def export_routes():
+def export_routes(category: str = None):
     """导出路线达标 xlsx（每 SKU 三行路线）。"""
     import io
     import urllib.parse
@@ -195,11 +203,11 @@ def export_routes():
     from fastapi.responses import StreamingResponse
 
     try:
-        data = compute_routes()
+        data = compute_routes(category)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"导出失败: {e}")
 
-    cols = ["SKU", "型号", "开发类型", "是否已闭环", "路线", "起点(取数)",
+    cols = ["SKU", "型号", "开发类型", "是否已闭环", "路线", "起点",
             "终点", "耗时(天)", "优线(天)", "良线/底线(天)", "评级",
             "重点复盘", "头号卡点"]
     out = []

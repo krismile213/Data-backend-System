@@ -42,9 +42,9 @@ def _agg(items):
     }
 
 
-def compute_transport():
-    """全量汇总货件运输。"""
-    data = get_review_data()
+def compute_transport(category=None):
+    """全量汇总货件运输（category 缺省 = 默认品类手机膜）。"""
+    data = get_review_data(category)
     row_by_sku = {r["sku"]: r for r in data["rows"]}
 
     items = []
@@ -131,16 +131,16 @@ def compute_transport():
 
 
 @router.get("")
-def transport():
+def transport(category: str = None):
     """货件运输看板：逐票判定 + 渠道/方式聚合。"""
     try:
-        return compute_transport()
+        return compute_transport(category)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"货件运输汇总失败: {e}")
 
 
 @router.get("/export")
-def export_transport():
+def export_transport(category: str = None):
     """导出逐票货件明细 xlsx。"""
     import io
     import urllib.parse
@@ -149,7 +149,7 @@ def export_transport():
     from fastapi.responses import StreamingResponse
 
     try:
-        data = compute_transport()
+        data = compute_transport(category)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"导出失败: {e}")
 

@@ -1,4 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
+import { LoadingState, ErrorState, EmptyState } from '../components/StateViews.jsx';
+import useApi from '../hooks/useApi.js';
 import {
   Box,
   Paper,
@@ -14,7 +16,6 @@ import {
   Switch,
   FormControlLabel,
   Button,
-  CircularProgress,
   Alert,
   Tooltip,
   Stack,
@@ -36,6 +37,17 @@ const SIMPLE_ORDER = [
   'country_min', 'stuck_days',
 ];
 
+// 事中预警 / 上报 / 损益口径 的数值项（P1-2 / P1-3 / P0-7）
+const INFLIGHT_NUM = [
+  'inflight_warn_ratio', 'report_retention_days', 'loss_route_limit', 'mail_port',
+];
+// 文本项（原样提交；空串表示未配置）
+const TEXT_KEYS = [
+  'products_xlsx_path', 'mail_to', 'mail_host', 'mail_user', 'mail_auth_code',
+];
+// 敏感字段渲染成密码框
+const SECRET_KEYS = new Set(['mail_auth_code']);
+
 function NumField({ label, desc, value, onChange, error }) {
   return (
     <Tooltip title={desc} placement="top">
@@ -54,24 +66,18 @@ function NumField({ label, desc, value, onChange, error }) {
 }
 
 export default function Rules() {
-  const [data, setData] = useState(null);
   const [draft, setDraft] = useState(null);
-  const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState(null); // {severity, text}
 
-  useEffect(() => {
-    fetchRules()
-      .then((d) => {
-        setData(d);
-        setDraft(JSON.parse(JSON.stringify(d.rules)));
-      })
-      .catch((e) => setError(e.message));
-  }, []);
+  const { data, setData, error } = useApi(() => fetchRules(), [], {
+    // 拉到配置后同时初始化一份可编辑副本（data 存原值，draft 存改动）
+    onSuccess: (d) => setDraft(JSON.parse(JSON.stringify(d.rules))),
+  });
 
-  if (error) return <Alert severity="error">规则配置加载失败：{error}</Alert>;
+  if (error) return <ErrorState prefix="规则配置加载失败" error={error} />;
   if (!data || !draft) {
-    return <Box sx={{ display: 'flex', justifyContent: 'center', mt: 8 }}><CircularProgress /></Box>;
+    return <LoadingState />;
   }
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(data.rules);
@@ -79,6 +85,25 @@ export default function Rules() {
   const setSimple = (k, v) => {
     setDraft((d) => ({ ...d, [k]: v === '' ? '' : Number(v) }));
   };
+
+  /** 通用赋值（文本/布尔/数组均原样存） */
+  const setVal = (k, v) => setDraft((d) => ({ ...d, [k]: v }));
+
+  /** 日均兜底区间 {min,max} 子字段 */
+  const setDaily = (field, v) => {
+    setDraft((d) => ({
+      ...d,
+      loss_daily_default: {
+        ...(d.loss_daily_default || {}),
+        [field]: v === '' ? '' : Number(v),
+      },
+    }));
+  };
+
+  const meta = (k) => data.meta[k] || { label: k, desc: '' };
+
+  // 只读调度信息（自动管线实际触发时刻，真源 scripts/install_auto_etl.ps1）
+  const pipeline = data.pipeline;
 
   const setSegCfg = (name, field, value) => {
     setDraft((d) => {
@@ -95,10 +120,12 @@ export default function Rules() {
     setSaving(true);
     setMsg(null);
     try {
-      // 只提交有变化的键
+      // 只提交有变化的键（part_targets 是旧口径存档，不回传；seg_targets 单独处理）
       const patch = {};
-      for (const k of SIMPLE_ORDER) {
-        if (draft[k] !== data.rules[k]) patch[k] = draft[k];
+      const skip = new Set(['seg_targets', 'part_targets']);
+      for (const k of Object.keys(draft)) {
+        if (skip.has(k)) continue;
+        if (JSON.stringify(draft[k]) !== JSON.stringify(data.rules[k])) patch[k] = draft[k];
       }
       const st = {};
       for (const name of Object.keys(draft.seg_targets)) {
@@ -137,6 +164,14 @@ export default function Rules() {
     const v = draft[k];
     if (v === '' || v === null || v === undefined) return '不能为空';
     if (!Number.isFinite(Number(v)) || Number(v) < 0 || Number(v) > 3650) return '需为 0~3650';
+    return '';
+  };
+
+  /** 预警系数是比例（0~1]，与天数类字段的 0~3650 校验不同 */
+  const ratioErr = (k) => {
+    const v = draft[k];
+    if (v === '' || v === null || v === undefined) return '不能为空';
+    if (!Number.isFinite(Number(v)) || Number(v) <= 0 || Number(v) > 1) return '需为 0~1 的比例';
     return '';
   };
 
@@ -182,6 +217,93 @@ export default function Rules() {
             </Grid>
           ))}
         </Grid>
+      </Paper>
+
+      {/* 事中预警 / 上报 / 损益口径 */}
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <Typography variant="subtitle2" gutterBottom>事中预警 / 上报 / 损益口径</Typography>
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
+          预警系数=环节工期的百分比（段已进行天数 &gt; 目标×系数 且未完成 → 即将超期）；
+          损益推迟天数按空运到货口径（到达即可开卖）计算；评级日均区间与单价来自商品资料表
+          （A1 为档位说明，导入入口在数据管理页）。邮件默认关闭，开启后仅发下列收件人。
+        </Typography>
+        <Grid container spacing={2}>
+          {INFLIGHT_NUM.map((k) => (
+            <Grid item xs={12} sm={6} md={3} key={k}>
+              <NumField
+                label={meta(k).label}
+                desc={meta(k).desc}
+                value={draft[k]}
+                onChange={(v) => setVal(k, v === '' ? '' : Number(v))}
+                error={k === 'inflight_warn_ratio' ? ratioErr(k) : simpleErr(k)}
+              />
+            </Grid>
+          ))}
+          {TEXT_KEYS.map((k) => (
+            <Grid item xs={12} sm={6} md={4} key={k}>
+              <Tooltip title={meta(k).desc} placement="top">
+                <TextField
+                  size="small"
+                  fullWidth
+                  type={SECRET_KEYS.has(k) ? 'password' : 'text'}
+                  label={meta(k).label}
+                  value={draft[k] ?? ''}
+                  onChange={(e) => setVal(k, e.target.value)}
+                />
+              </Tooltip>
+            </Grid>
+          ))}
+          <Grid item xs={12} sm={6} md={3}>
+            <Tooltip title={meta('loss_daily_default').desc} placement="top">
+              <TextField size="small" type="number" label="日均兜底·下限"
+                value={draft.loss_daily_default?.min ?? ''}
+                onChange={(e) => setDaily('min', e.target.value)}
+                sx={{ width: '100%' }} />
+            </Tooltip>
+          </Grid>
+          <Grid item xs={12} sm={6} md={3}>
+            <Tooltip title={meta('loss_daily_default').desc} placement="top">
+              <TextField size="small" type="number" label="日均兜底·上限"
+                value={draft.loss_daily_default?.max ?? ''}
+                onChange={(e) => setDaily('max', e.target.value)}
+                sx={{ width: '100%' }} />
+            </Tooltip>
+          </Grid>
+          <Grid item xs={12} sm={6} md={3}>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={!!draft.mail_enabled}
+                  onChange={(e) => setVal('mail_enabled', e.target.checked)}
+                />
+              }
+              label={meta('mail_enabled').label}
+            />
+          </Grid>
+        </Grid>
+
+        {/* 调度类信息：只读。这里曾是一个可编辑的「自动管线时刻」字段，
+            但它不驱动任何调度（真源是 Windows 计划任务），改成如实展示。 */}
+        <Alert
+          severity={pipeline?.ok ? 'info' : 'warning'}
+          sx={{ mt: 2 }}
+          icon={false}
+        >
+          <Typography variant="body2" component="div">
+            <strong>自动管线触发时刻（只读）：</strong>
+            {pipeline?.ok
+              ? `${(pipeline.times || []).join(' / ')}`
+              : '读不到脚本中的时刻'}
+            {`　·　计划任务 ${pipeline?.taskName || 'DataAdmin-AutoPipeline'}`}
+          </Typography>
+          <Typography variant="caption" color="text.secondary" component="div">
+            真源 <code>{pipeline?.source || 'scripts/install_auto_etl.ps1'}</code>
+            {pipeline?.updatedAt ? `（更新于 ${pipeline.updatedAt}）` : ''}
+            —— 时刻由 Windows 计划任务决定，在页面上无法修改；要改请改脚本后重新注册
+            （<code>powershell -NoProfile -ExecutionPolicy Bypass -File
+            scripts\install_auto_etl.ps1</code>），并同步确认上游钉钉同步时间。
+          </Typography>
+        </Alert>
       </Paper>
 
       {/* 段级动作映射规则 */}

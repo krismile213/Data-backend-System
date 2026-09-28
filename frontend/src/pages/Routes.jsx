@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
+import SectionCard from '../components/SectionCard.jsx';
 import {
   Box,
   Paper,
@@ -13,8 +14,6 @@ import {
   TextField,
   MenuItem,
   Chip,
-  CircularProgress,
-  Alert,
   Button,
   Collapse,
   Tooltip,
@@ -23,23 +22,18 @@ import DownloadIcon from '@mui/icons-material/Download';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import EChart from '../components/EChart.jsx';
 import { fetchRoutes, buildRoutesExportUrl, fetchReviewSku } from '../api.js';
+import KpiCard from '../components/KpiCard.jsx';
+import PageHeader from '../components/PageHeader.jsx';
+import { LoadingState, ErrorState } from '../components/StateViews.jsx';
+import { SEMANTIC } from '../theme.js';
+import useApi from '../hooks/useApi.js';
 
-const ROUTE_COLOR = { 运营: '#1e5eff', 空运: '#0288d1', 海运: '#6a1b9a' };
-const GRADE_COLOR = { 优: '#2e7d32', 良: '#f9a825', 差: '#c62828', '-': '#9e9e9e' };
-
-function KpiCard({ label, value, sub, color = '#1a2740' }) {
-  return (
-    <Paper sx={{ p: 2, height: '100%' }}>
-      <Typography variant="caption" color="text.secondary">{label}</Typography>
-      <Typography variant="h5" sx={{ fontWeight: 700, color, mt: 0.5 }}>{value}</Typography>
-      {sub && <Typography variant="caption" color="text.secondary">{sub}</Typography>}
-    </Paper>
-  );
-}
+const ROUTE_COLOR = { 运营: SEMANTIC.brand, 空运: SEMANTIC.sky, 海运: SEMANTIC.purple };
+const GRADE_COLOR = { 优: SEMANTIC.success, 良: SEMANTIC.caution, 差: SEMANTIC.danger, '-': SEMANTIC.muted };
 
 /** 路线小徽标：名字 + 天数 + 评级色点 */
 function RouteChip({ rt }) {
-  const color = GRADE_COLOR[rt.grade] || '#9e9e9e';
+  const color = GRADE_COLOR[rt.grade] || SEMANTIC.muted;
   const label = rt.days === null || rt.days === undefined
     ? `${rt.route} —` : `${rt.route} ${rt.days}天`;
   return (
@@ -52,13 +46,13 @@ function RouteChip({ rt }) {
 
 /** 展开行：该 SKU 的段级明细（复用复盘档案接口） */
 function SegDetail({ sku }) {
-  const [detail, setDetail] = useState(null);
-  const [err, setErr] = useState('');
-  useEffect(() => {
-    fetchReviewSku(sku).then(setDetail).catch((e) => setErr(e.message));
-  }, [sku]);
-  if (err) return <Alert severity="error" sx={{ m: 1 }}>加载失败：{err}</Alert>;
-  if (!detail) return <Box sx={{ display: 'flex', justifyContent: 'center', p: 2 }}><CircularProgress size={20} /></Box>;
+  const { data: detail, error: err } = useApi(
+    () => fetchReviewSku(sku),
+    [sku],
+    { enabled: !!sku }
+  );
+  if (err) return <ErrorState prefix="加载失败" error={err} sx={{ m: 1 }} />;
+  if (!detail) return <LoadingState size={20} sx={{ mt: 0, p: 2 }} />;
   return (
     <TableContainer sx={{ maxHeight: 340 }}>
       <Table size="small" stickyHeader>
@@ -83,7 +77,7 @@ function SegDetail({ sku }) {
               <TableCell>{s.end || '—'}</TableCell>
               <TableCell>{s.days ?? '—'}</TableCell>
               <TableCell>{s.target ?? '—'}</TableCell>
-              <TableCell sx={{ color: String(s.judge || '').startsWith('✗') ? '#c62828' : 'inherit' }}>{s.judge}</TableCell>
+              <TableCell sx={{ color: String(s.judge || '').startsWith('✗') ? SEMANTIC.danger : 'inherit' }}>{s.judge}</TableCell>
               <TableCell>{s.executor || '—'}</TableCell>
             </TableRow>
           ))}
@@ -94,16 +88,11 @@ function SegDetail({ sku }) {
 }
 
 export default function Routes() {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
+  const { data, error } = useApi(() => fetchRoutes(), []);
   const [q, setQ] = useState('');
   const [routeFilter, setRouteFilter] = useState('');
   const [gradeFilter, setGradeFilter] = useState('');
   const [expanded, setExpanded] = useState(null);
-
-  useEffect(() => {
-    fetchRoutes().then(setData).catch((e) => setError(e.message));
-  }, []);
 
   const rows = useMemo(() => {
     if (!data) return [];
@@ -120,8 +109,8 @@ export default function Routes() {
     });
   }, [data, q, routeFilter, gradeFilter]);
 
-  if (error) return <Alert severity="error">路线达标加载失败：{error}</Alert>;
-  if (!data) return <Box sx={{ display: 'flex', justifyContent: 'center', mt: 8 }}><CircularProgress /></Box>;
+  if (error) return <ErrorState prefix="路线达标加载失败" error={error} />;
+  if (!data) return <LoadingState />;
 
   const distOption = {
     tooltip: { trigger: 'axis' },
@@ -140,26 +129,25 @@ export default function Routes() {
 
   return (
     <Box>
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
-        <Box>
-          <Typography variant="h6" sx={{ fontWeight: 700 }}>路线达标看板</Typography>
-          <Typography variant="caption" color="text.secondary">
-            口径：运营 = 取数 → 上架/广告（≤{t['运营'].good}优 / ≤{t['运营'].limit}良）·
-            空运 = 取数 → 最晚空运到货（≤{t['空运'].good}优 / ≤{t['空运'].limit}良）·
-            海运 = 取数 → 最晚海运到货（≤{t['海运'].good}优 / 不列良）· 计算于 {data.computedAt}
-          </Typography>
-        </Box>
-        <Button variant="outlined" startIcon={<DownloadIcon />} href={buildRoutesExportUrl()}>
-          导出 xlsx
-        </Button>
-      </Box>
+      <PageHeader
+        title="路线达标看板"
+        subtitle={
+          `口径：运营 = 取数 → 上架/广告（≤${t['运营'].good}优 / ≤${t['运营'].limit}良）·` +
+          ` 空运 = 取数 → 最晚空运到货（≤${t['空运'].good}优 / ≤${t['空运'].limit}良）·` +
+          ` 海运 = 取数 → 最晚海运到货（≤${t['海运'].good}优 / 不列良）· 计算于 ${data.computedAt}`
+        }
+        actions={
+          <Button variant="outlined" startIcon={<DownloadIcon />} href={buildRoutesExportUrl()}>
+            导出 xlsx
+          </Button>
+        }
+      />
 
       <Grid container spacing={2} sx={{ mb: 2 }}>
         <Grid item xs={12} md={6}>
-          <Paper sx={{ p: 2 }}>
-            <Typography variant="subtitle2">三条路线评级分布（按 SKU）</Typography>
+          <SectionCard title="三条路线评级分布（按 SKU）">
             <EChart option={distOption} height={260} />
-          </Paper>
+          </SectionCard>
         </Grid>
         <Grid item xs={12} md={6}>
           <Grid container spacing={2}>
@@ -177,15 +165,15 @@ export default function Routes() {
               );
             })}
             <Grid item xs={12} sm={4}>
-              <KpiCard label="运营 > 60 天底线" value={data.focusCounts['运营>60天底线']} color="#c62828"
+              <KpiCard label="运营 > 60 天底线" value={data.focusCounts['运营>60天底线']} color={SEMANTIC.danger}
                 sub="直接影响上架销售" />
             </Grid>
             <Grid item xs={12} sm={4}>
-              <KpiCard label="后勤 > 60 天底线" value={data.focusCounts['后勤>60天底线']} color="#c62828"
+              <KpiCard label="后勤 > 60 天底线" value={data.focusCounts['后勤>60天底线']} color={SEMANTIC.danger}
                 sub="取数 → 最晚渠道仓到货" />
             </Grid>
             <Grid item xs={12} sm={4}>
-              <KpiCard label="重点: 后勤 < 运营" value={data.focusCounts['重点:后勤<运营']} color="#f9a825"
+              <KpiCard label="重点: 后勤 < 运营" value={data.focusCounts['重点:后勤<运营']} color={SEMANTIC.caution}
                 sub="两条均在 60 天内但后勤更快 → 运营环节拖后腿" />
             </Grid>
           </Grid>
@@ -255,7 +243,7 @@ export default function Routes() {
                       </TableCell>
                       <TableCell>
                         {r.focus
-                          ? <Typography variant="caption" sx={{ color: r.focus.startsWith('重点') ? '#f9a825' : '#c62828' }}>{r.focus}</Typography>
+                          ? <Typography variant="caption" sx={{ color: r.focus.startsWith('重点') ? SEMANTIC.caution : SEMANTIC.danger }}>{r.focus}</Typography>
                           : '—'}
                       </TableCell>
                       <TableCell>

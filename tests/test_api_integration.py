@@ -12,11 +12,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.config import list_batches
 
-BATCH = "手机膜8.28"
-ALL_BATCHES = ["手机膜", "手机膜8.28", "手机膜8.31", "手机膜9.7"]
-PARTS = [f"Part{i}" for i in range(1, 10)]
+# 动态发现批次：目录里有哪个手机膜批次就测哪个（新模式：钉钉每天导出最新全量，
+# 批次名会变、旧批次目录会被移走）——测试不再硬编码批次名；没有任何批次时整体 skip。
+_MEM = list_batches("手机膜")
+BATCH = _MEM[0]["name"] if _MEM else None
+OTHER_BATCHES = [b["name"] for b in _MEM[1:]]
 ID_RE = re.compile(r"^\d{15,25}$")
+
+pytestmark = pytest.mark.skipif(
+    BATCH is None, reason="数据目录无手机膜批次（集成测试需要真实批次数据）")
 
 
 @pytest.fixture(scope="module")
@@ -42,16 +48,15 @@ class TestBasics:
         assert r.status_code == 200
         assert r.json() == {"status": "ok"}
 
-    def test_batches_returns_4(self, client):
+    def test_batches_listing(self, client):
         r = client.get("/api/batches")
         assert r.status_code == 200
         names = [b["name"] for b in r.json()["batches"]]
-        assert names == ALL_BATCHES
+        assert BATCH in names, f"目录扫描批次 {names} 里必须包含动态选中的 {BATCH}"
         for b in r.json()["batches"]:
-            # 批次「手机膜」真实数据只有 Part1~Part8，其余批次 9 个 Part
             assert 1 <= b["fileCount"] <= 9
             got = [p["part"] for p in b["parts"]]
-            assert got == PARTS[:len(got)]  # Part 文件按序为 PARTS 前缀
+            assert got == [f"Part{i}" for i in range(1, len(got) + 1)]
             assert all(p["name"] for p in b["parts"])
 
 
@@ -75,7 +80,7 @@ class TestOverview:
         # 各 Part 合计 = 总数
         part_total = sum(p["total"] for p in data["partOverview"])
         assert part_total == kpi["total"]
-        assert len(data["partOverview"]) == 9
+        assert 1 <= len(data["partOverview"]) <= 9
         # 状态饼图合计 = 总数
         pie_sum = sum(s["value"] for s in data["statusPie"])
         assert pie_sum == kpi["total"]
@@ -83,15 +88,6 @@ class TestOverview:
         assert kpi["anomalyDocCount"] <= kpi["anomalyCount"]
         assert kpi["anomalyTypeSummary"] == sorted(
             kpi["anomalyTypeSummary"], key=lambda x: -x["count"])
-
-    def test_overview_batch_8_28_engineer_claim(self, client):
-        """校验工程师自检数字：1983 张（已结束1123/审批中829/终止31）——独立复核"""
-        r = client.get(f"/api/overview/{BATCH}")
-        kpi = r.json()["kpi"]
-        assert kpi["total"] == 1983
-        assert kpi["finished"] == 1123
-        assert kpi["running"] == 829
-        assert kpi["terminated"] == 31
 
     def test_overview_per_part_consistency(self, client):
         data = client.get(f"/api/overview/{BATCH}").json()
@@ -101,7 +97,7 @@ class TestOverview:
             if p["total"] > 0:
                 assert abs(p["finishRate"] - p["finished"] / p["total"]) <= 0.0005 + 1e-9
 
-    @pytest.mark.parametrize("batch", ["手机膜", "手机膜8.31", "手机膜9.7"])
+    @pytest.mark.parametrize("batch", OTHER_BATCHES)
     def test_overview_other_batches(self, client, batch):
         r = client.get(f"/api/overview/{batch}")
         assert r.status_code == 200
@@ -126,8 +122,8 @@ class TestTimeliness:
         assert_no_nan_inf(r.text, "timeliness")
         data = r.json()
         assert data["batch"] == BATCH
-        assert len(data["partBar"]) == 9
-        assert len(data["boxData"]) == 9
+        assert 1 <= len(data["partBar"]) <= 9
+        assert 1 <= len(data["boxData"]) <= 9
         # 箱线图数值自洽：min <= q1 <= median <= q3 <= max
         for b in data["boxData"]:
             if b["count"] > 0:
@@ -167,7 +163,7 @@ class TestAnomalies:
         assert sum(t["count"] for t in data["typeSummary"]) == data["total"]
         for item in data["items"]:
             assert set(item) >= {"Part", "环节名称", "审批编号", "异常类型", "说明"}
-            assert item["Part"] in PARTS
+            assert re.match(r"^Part\d+$", item["Part"])
 
     def test_anomalies_match_overview_count(self, client):
         ov = client.get(f"/api/overview/{BATCH}").json()
@@ -219,9 +215,10 @@ class TestRecords:
     def test_records_total_matches_overview(self, client):
         ov = client.get(f"/api/overview/{BATCH}").json()
         total_by_part = {p["part"]: p["total"] for p in ov["partOverview"]}
-        for part in PARTS:
+        for part, expect in total_by_part.items():
             r = client.get(f"/api/records/{BATCH}/{part}", params={"pageSize": 1})
-            assert r.json()["total"] == total_by_part[part], (
+            assert r.status_code == 200
+            assert r.json()["total"] == expect, (
                 f"{part} 明细 total 与总览 KPI 不一致")
 
     def test_pagination_consistency(self, client):
@@ -315,11 +312,15 @@ class TestRecords:
     def test_records_404_bad_batch(self, client):
         assert client.get("/api/records/不存在XYZ/Part1").status_code == 404
 
-    @pytest.mark.parametrize("part", PARTS)
-    def test_all_parts_200(self, client, part):
-        r = client.get(f"/api/records/{BATCH}/{part}", params={"pageSize": 1})
-        assert r.status_code == 200
-        assert_no_nan_inf(r.text, f"records:{part}")
+    def test_all_parts_200(self, client):
+        """该批次实际拥有的每个 Part 明细接口都必须 200（Part 集合动态取自总览）。"""
+        parts = [p["part"] for p
+                 in client.get(f"/api/overview/{BATCH}").json()["partOverview"]]
+        assert parts
+        for part in parts:
+            r = client.get(f"/api/records/{BATCH}/{part}", params={"pageSize": 1})
+            assert r.status_code == 200, part
+            assert_no_nan_inf(r.text, f"records:{part}")
 
 
 # ---------------------------------------------------------------------------

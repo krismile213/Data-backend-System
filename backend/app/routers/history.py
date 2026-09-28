@@ -30,7 +30,11 @@ from ..config import STATE_DIR
 router = APIRouter(prefix="/api/history", tags=["history"])
 
 _STATE_FILE = STATE_DIR / "kpi_snapshots.json"
-_lock = threading.Lock()
+# RLock（而非 Lock）：record_snapshot 与 get_review_data 互为调用方，
+# 同线程会重入，非重入锁会让整个后端永久挂死。
+_lock = threading.RLock()
+# 同线程重入标记：命中时直接返回，避免嵌套再次 _build_kpi（无限套娃）。
+_reentry = threading.local()
 
 
 def _load():
@@ -54,8 +58,12 @@ def _save(data):
     os.replace(tmp, _STATE_FILE)
 
 
-def _build_kpi(review_data) -> dict:
-    """从各看板汇聚一张快照的关键 KPI（全部走各自的缓存，开销可控）。"""
+def _build_kpi(review_data, category=None) -> dict:
+    """从各看板汇聚一张快照的关键 KPI（全部走各自的缓存，开销可控）。
+
+    category 必须与 review_data 同品类 —— 否则快照里的 KPI 会串味
+    （典型现象：手机壳指纹配手机膜的运输/P0/场景计数）。
+    """
     from .alerts import _get_alerts_cached
     from .scenarios import compute_scenarios
     from .transport import compute_transport
@@ -65,9 +73,9 @@ def _build_kpi(review_data) -> dict:
     sample = sum(s["sampleCount"] for s in seg_stats)
     over = sum(s["overCount"] for s in seg_stats)
 
-    tk = compute_transport()["kpi"]
-    al = _get_alerts_cached()
-    sc = compute_scenarios()
+    tk = compute_transport(category)["kpi"]
+    al = _get_alerts_cached(category)
+    sc = compute_scenarios(category)
 
     top_over = sorted(seg_stats, key=lambda s: -s["overCount"])[:3]
     return {
@@ -87,48 +95,89 @@ def _build_kpi(review_data) -> dict:
     }
 
 
-def record_snapshot(fp: str, review_data=None, force: bool = False) -> dict:
-    """按指纹记一张快照；指纹相同默认跳过（force 可强制）。"""
+# 快照品类作用域：2026-09-22 起**已放开到全部品类**。
+# 原先只给默认品类打快照，是因为 _build_kpi 里的运输/预警/场景看板尚未按品类
+# 分发（永远返回手机膜的数字 → 给壳打快照 = 静默串味）。现在这三个看板都接受
+# category 并做批次隔离，_build_kpi 也透传品类，因此可以安全放开。
+
+
+def record_snapshot(fp: str, review_data=None, force: bool = False,
+                    category=None) -> dict:
+    """按指纹记一张快照；指纹相同默认跳过（force 可强制）。
+
+    同线程重入保护（必须保留）：调用链
+        get_review_data → record_snapshot → _build_kpi
+          → compute_transport / _get_alerts_cached / compute_scenarios
+          → get_review_data
+    在嵌套的 get_review_data 未命中缓存时，会在**同一线程**再次进入本函数。
+    此时直接返回：外层那次已经覆盖当前状态，跳过的快照会在下一次
+    `_current_fingerprint()` 变化时由 /api/history 补拍（自愈），
+    但**绝不能在锁内套娃**，否则会把整个后端永久卡住。
+    """
     from .review import get_review_data
 
-    with _lock:
-        store = _load()
-        snaps = store["snapshots"]
-        if snaps and not force and snaps[-1].get("fingerprint") == fp:
-            return snaps[-1]
-        if review_data is None:
-            review_data = get_review_data()
-        snap = {
-            "fingerprint": fp,
-            "at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "kpi": _build_kpi(review_data),
-        }
-        snaps.append(snap)
-        _save(store)
-    return snap
+    if getattr(_reentry, "active", False) and not force:
+        return {"fingerprint": fp, "at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "skipped": "reentrant"}
+
+    _reentry.active = True
+    try:
+        with _lock:
+            store = _load()
+            snaps = store["snapshots"]
+            # 按**指纹**去重（而非只比最后一张）：品类交替访问时，
+            # "最后一张"总是另一品类，会把同一个状态反复追加成多张快照。
+            if not force:
+                for s in reversed(snaps):
+                    if s.get("fingerprint") == fp:
+                        return s
+            if review_data is None:
+                review_data = get_review_data(category)
+            snap = {
+                "fingerprint": fp,
+                "at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "kpi": _build_kpi(review_data, category),
+            }
+            if category is not None:
+                snap["category"] = category
+            snaps.append(snap)
+            _save(store)
+        return snap
+    finally:
+        _reentry.active = False
 
 
-def _current_fingerprint() -> str:
-    from .review import _cache
-    return _cache.get("fp") or ""
+def _current_fingerprint(category=None) -> str:
+    """指定品类的复盘指纹。
+
+    ⚠️ 不要读 review._cache 的"最近一次计算"镜像：那是**全进程共享的最后一格**，
+    算过手机壳之后再取快照，会把手机膜的 KPI 挂到手机壳的指纹上（跨品类串味）。
+    """
+    from .review import fingerprint_for
+    return fingerprint_for(category)
 
 
-def maybe_snapshot():
-    """确保当前指纹已有快照（页面访问/定时任务均可调用）。"""
+def maybe_snapshot(category=None):
+    """确保**指定品类**当前指纹已有快照（页面访问/定时任务均可调用）。
+
+    指纹与数据必须取自同一品类，否则快照会串味。
+    """
+    from ..category_rules import rules_for
     from .review import get_review_data
-    fp = _current_fingerprint()
-    if not fp:
-        get_review_data()             # 触发一次复盘计算与指纹生成
-        fp = _current_fingerprint()
-    data = get_review_data()
-    return record_snapshot(fp, data)
+    cat = rules_for(category).key
+    data = get_review_data(cat)              # 先确保该品类已算好（并可能触发补拍）
+    fp = _current_fingerprint(cat)            # 与刚拿到的数据同品类
+    return record_snapshot(fp, data, category=cat)
 
 
 @router.get("")
-def history():
-    """快照列表（访问即补拍，保证最新状态总有一张）。"""
+def history(category: str = None):
+    """快照列表（访问即补拍，保证最新状态总有一张）。
+
+    category: 品类（手机膜/手机壳），缺省 = 默认品类（手机膜）。
+    """
     try:
-        snap = maybe_snapshot()
+        snap = maybe_snapshot(category)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"快照生成失败: {e}")
     with _lock:
@@ -141,23 +190,24 @@ def history():
 
 
 @router.post("/snapshot")
-def snapshot(force: bool = False):
+def snapshot(force: bool = False, category: str = None):
     """立即补拍快照（force=True 时同指纹也强制记录，供定时任务/手动打点）。"""
+    from ..category_rules import rules_for
     try:
-        snap = maybe_snapshot()
+        snap = maybe_snapshot(category)
         if force:
             snap = record_snapshot(snap["fingerprint"] + f"|manual-{datetime.now():%H%M%S}",
-                                   force=True)
+                                   force=True, category=rules_for(category).key)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"快照生成失败: {e}")
     return {"ok": True, "snapshot": snap}
 
 
 @router.get("/report")
-def report(days: int = 7):
+def report(days: int = 7, category: str = None):
     """生成周报 markdown 下载（对比区间首末快照 + 当前看板要点）。"""
     try:
-        snap = maybe_snapshot()
+        snap = maybe_snapshot(category)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"快照生成失败: {e}")
     with _lock:

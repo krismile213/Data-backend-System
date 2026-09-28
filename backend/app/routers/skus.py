@@ -76,6 +76,7 @@ def list_skus():
             "docCount": 0,
             "parts": {},          # part -> {finished, running, terminated, other}
             "lastUpdate": None,
+            "firstProposalAt": None,   # 立项时间 = 最早单据创建时间（P0-1 排序键）
         })
         for r in kept:
             if r["model"]:
@@ -89,14 +90,20 @@ def list_skus():
                 filter(None, (r["update_time"], r["create_time"])), default=None)
             if lu is not None and (s["lastUpdate"] is None or lu > s["lastUpdate"]):
                 s["lastUpdate"] = lu
+            ct = r["create_time"]
+            if ct is not None and (s["firstProposalAt"] is None
+                                   or ct < s["firstProposalAt"]):
+                s["firstProposalAt"] = ct
 
     out = []
     for s in skus.values():
         s["models"] = sorted(s["models"])
         s["batches"] = sorted(s["batches"])
         s["lastUpdate"] = _fmt(s["lastUpdate"])
+        s["firstProposalAt"] = _fmt(s["firstProposalAt"])
         out.append(s)
-    out.sort(key=lambda x: x["sku"])
+    # P0-1：默认从新到久（立项时间倒序；缺时间的排最后）
+    out.sort(key=lambda x: (x["firstProposalAt"] or "", x["sku"]), reverse=True)
     return {"total": len(out), "items": out}
 
 

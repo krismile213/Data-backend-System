@@ -1,0 +1,119 @@
+classDiagram
+    direction LR
+
+    class ProductCatalogService {
+        <<backend/etl/products_loader.py + dataadmin 接口>>
+        +load_from_xlsx(path) dict
+        +get(sku) ProductRow
+        +status() dict
+    }
+    class ProductRow {
+        +sku: str
+        +grade: str
+        +dailyMin: float
+        +dailyMax: float
+        +price: float
+        +priceType: str
+    }
+
+    class RoundResolver {
+        <<review.py 内部>>
+        +resolve(parts_docs) RoundInfo
+    }
+    class RoundInfo {
+        +canonical: int
+        +rounds: list~Doc~
+        +multiRound: bool
+        +gapDays: int
+    }
+
+    class ReviewEngine {
+        <<review.py 复盘引擎(扩展)>>
+        +extract_node_times(parts_docs, roundInfo) dict
+        +review_sku_segments(sku, parts_docs, rules) tuple
+        +compute_review() dict
+        +get_review_data() dict
+    }
+
+    class CausalLocator {
+        <<causal.py 新增>>
+        +locate(nodes, seg_rows, items, roundInfo) RootCause
+    }
+    class RootCause {
+        +type: str
+        +seg: str
+        +dept: str
+        +owner: str
+        +waitDays: float
+        +chain: list~ChainStep~
+        +suspect: bool
+        +evidence: str
+    }
+
+    class LossAssessor {
+        <<review.py 内新增>>
+        +assess(nodes, items, product, rules) Assessment
+    }
+    class Assessment {
+        +delayDays: float
+        +direction: str
+        +qtyMin: float
+        +qtyMax: float
+        +amountMin: float
+        +amountMax: float
+        +basis: str
+        +degraded: str
+    }
+
+    class InflightService {
+        <<inflight_service.py 新增>>
+        +compute_overview() dict
+        +sku_status(code) dict
+        +alerts() dict
+        +warnings() dict
+        +diff_progress(code, days) list
+        +record_snapshot() dict
+    }
+
+    class ReportingService {
+        <<reporting.py 新增>>
+        +daily_report(date) Path
+        +sku_check_report(code) Path
+        +assessment_export() BytesIO
+    }
+
+    class Mailer {
+        <<mailer.py 新增>>
+        +send_daily(recipient, summary) bool
+        +last_sent_date() str
+    }
+
+    class AutoPipeline {
+        <<etl/auto_pipeline.py 新增>>
+        +run(slot) dict
+        +retry_scan() dict
+    }
+
+    class InflightRouter {
+        <<routers/inflight.py /api/inflight>>
+    }
+    class ReviewRouter {
+        <<routers/review.py /api/review>>
+    }
+    class DataAdminRouter {
+        <<routers/dataadmin.py /api/etl>>
+    }
+
+    ReviewRouter --> ReviewEngine : 扩展
+    ReviewEngine --> RoundResolver : 多轮配对
+    ReviewEngine --> CausalLocator : 根因
+    ReviewEngine --> LossAssessor : 损益
+    LossAssessor --> ProductCatalogService : 评级/单价
+    InflightRouter --> InflightService
+    InflightService --> ReviewEngine : 复用 get_review_data/_load_sku_docs
+    InflightService --> CausalLocator
+    DataAdminRouter --> ProductCatalogService : POST/GET /api/etl/products
+    AutoPipeline --> ReportingService : 日报生成
+    AutoPipeline --> Mailer : 试验邮件
+    AutoPipeline --> InflightService : 记快照
+    ReportingService --> ReviewEngine : 取评估数据

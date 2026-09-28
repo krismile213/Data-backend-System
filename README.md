@@ -10,9 +10,34 @@
 1. 检查/安装前端依赖（仅首次）；
 2. 启动后端 FastAPI（端口 8000）；
 3. 启动前端 Vite dev（端口 5173，`/api` 自动代理到后端）；
-4. 自动打开浏览器访问 http://127.0.0.1:5173
+4. **轮询确认前后端真正响应之后**，再自动打开浏览器访问 http://127.0.0.1:5173
 
 关闭：直接关闭弹出的 `backend-8000` 和 `frontend-5173` 两个命令行窗口。
+
+### 可选参数
+
+在 cmd 中带参数执行（例如 `start.bat restart`）：
+
+| 参数 | 作用 |
+|------|------|
+| （无） | 常规启动。若 8000 / 5173 已在监听，则**复用**已有服务，不会重复启动 |
+| `restart` | 先结束占用 8000 / 5173 的残留进程，再启动（页面空白时的首选手段） |
+| `stop` | 结束两个服务并退出（关闭系统不用再手工找窗口） |
+| `status` | 只检查当前状态：端口是否监听 + HTTP 是否响应，不启动任何东西 |
+| `clean` | 删除 Vite 依赖缓存 `node_modules\.vite` 后再启动（极端情况兜底） |
+| `backup` | 备份 `backend/state/` 与数据库导出后退出（不启动服务） |
+| `help` | 打印参数列表后退出 |
+
+> `stop` / `status` 判断服务是否真的停了，靠的是**端口**：从 `netstat` 取占用
+> LISTENING 套接字的 PID 再结束它。只结束外层命令行窗口是不够的——子进程仍会
+> 占着端口、握着数据库连接，看起来"关了"其实没关。
+
+> **排查前端打不开**：先关掉 `backend-8000` 与 `frontend-5173` 两个窗口，再运行
+> `start.bat restart`。前端固定占用 5173（`strictPort: true`），端口被别的东西占用时
+> 会明确报错，而不是静默切换到 5174 导致浏览器打开错地址。
+>
+> 启动过程中**不会**每次删除 Vite 依赖缓存——缓存只在 `clean` 参数或依赖本身变化时才重建，
+> 这样冷启动更快、首屏白屏时间更短。
 
 > 说明：`start.bat` 内的提示文字为英文，这是刻意的——Windows cmd 默认按 GBK
 > 解析批处理文件，bat 中包含中文会被解析成乱码并报错（「不是内部或外部命令」）。
@@ -38,15 +63,23 @@ C:\Users\dell\.workbuddy\binaries\python\envs\default\Scripts\python.exe run.py
 
 ### 前端（Vite + React）
 
-使用托管版 Node（22.22.2）：
+使用平台托管版 Node。**版本目录会随平台更新而变化**（实测已从 `22.22.2-2` 变为
+`22.22.2-3`，旧目录被直接删除），所以不要写死版本号 —— 平台把当前版本写在
+`versions\current` 里：
 
 ```bat
 cd frontend
-C:\Users\dell\.workbuddy\binaries\node\versions\22.22.2-2\npm.cmd install
-C:\Users\dell\.workbuddy\binaries\node\versions\22.22.2-2\npm.cmd run dev
+set /p NODE_VER=<%USERPROFILE%\.workbuddy\binaries\node\versions\current
+set "NPM=%USERPROFILE%\.workbuddy\binaries\node\versions\%NODE_VER%\npm.cmd"
+
+"%NPM%" install
+"%NPM%" run dev
 ```
 
 访问 http://127.0.0.1:5173
+
+> 更省事的做法：直接双击 `start.bat`——它会在运行时自动定位 node 运行时，
+> 并在前后端真正就绪后才打开浏览器。
 
 ## 三、功能说明
 
@@ -124,15 +157,86 @@ C:\Users\dell\.workbuddy\binaries\node\versions\22.22.2-2\npm.cmd run dev
 - 核心指标走势图（总体达标率 / 货件超时率 / 未闭环 SKU）+ 期初 vs 最新对比表；
 - 一键生成**周报/月报 markdown**（7/30 天区间：KPI 变化 + 当前看板要点 + 自动解读），周会前可「立即快照」打点。
 
+### 11. 数据管理（批次导入 + 备份）
+把原先只能在命令行完成的 ETL 搬进界面，让「更新数据」不再需要离开浏览器：
+
+**批次扫描** —— 对照数据库给出每个批次的导入状态：
+- `待首次导入`：磁盘上有、库里还没有；
+- `文件已变更`：Excel 更新过，需要重新导入；
+- `已是最新`：文件指纹与上次导入一致；
+- `数据源缺失`：库里记录过，但磁盘上已找不到该批次目录。
+
+**一键导入** —— 支持单批次导入、`强制重导`（忽略文件指纹，用于内容改了但修改时间没变的场景）
+以及「导入全部变更」；未变化的批次自动跳过，结果按批次列出单据数与节点数。
+
+**数据备份** —— 一键备份 `backend/state/`（手工填报 + KPI 快照，**无法从 Excel 重建**）
+与数据库导出，落盘到 `backups\时间戳\`（含 `manifest.txt` 记录本次内容），并列出历史备份与大小。
+
+> 命令行等价入口：`start.bat backup`。
+
+### 12. 操作手册（SOP / 交接 / 事中事后）
+把新人培训与交接文档放进系统，避免"文档在某人电脑里、人一走就找不到"：
+- **新品售前流程 SOP 操作手册**：9 个环节的业务目标、动作链、必填字段、时效标准与常见卡点，
+  含新人 30 天上手路径与日常工作节奏建议；
+- **岗位职责与交接说明书**：岗位×环节职责矩阵、已离职人员影响面盘点、单点风险清单，
+  含可直接复用的交接检查表与招聘 JD 参考；
+- **流程事中与事后评估 使用说明**：事中日报页与事后评估页怎么读——段状态机、85% 预警线、
+  日报 5 个 sheet、损益三指标口径、手机壳「目标待校准」提示与常见问题。
+
+文档源文件在仓库 `docs/` 目录，**直接编辑 `.md` 文件即可更新**，刷新页面生效；
+新增文档只需在 `backend/app/routers/manual.py` 的白名单里登记一行。
+
 ## 四、技术栈与结构
 
 - 后端：Python FastAPI + uvicorn + pandas + openpyxl（`backend/`）
   - `app/config.py`：数据目录扫描、Part 环节定义（移植自现有分析程序，口径一致）
   - `app/parser.py`：审批记录解析（操作人|动作|时间|备注，多种异常格式兼容）
   - `app/analysis.py`：分段耗时计算、时效统计（P90/箱线 IQR）、异常识别、批次缓存
-  - `app/routers/`：batches / overview / timeliness / anomalies / records 五组接口
-- 前端：Vite + React + MUI + Tailwind CSS + ECharts（`frontend/`）
-- 数据根目录：`C:\Users\dell\Desktop\work-main\data\手机膜\`（修改 `backend/app/config.py` 的 `DATA_ROOT` 可切换）
+  - `app/prewarm.py`：**空闲预热**。全后端只有三处进程内缓存（`analysis._cache` 按批次目录
+    指纹、`review._cache` 与 `alerts._cache` 按 DB 指纹 + 规则版本），冷启动代价为
+    overview 2.4s / alerts 2.5s，热缓存 0.03s。预热在后台线程里把这三处提前算好，
+    但**只在连续 5s 无人访问时才动手**（启动后另等 10s，覆盖「浏览器已开、前端仍在加载
+    模块」这段后端看不到请求的空窗）。`PREWARM=0` 关闭，`PREWARM_DELAY` 调等待秒数。
+
+    > ⚠️ **别改回「启动后立刻预热」**——实测那样会把首个访问从 **2.4s 拖到 5.4s**：
+    > 单进程 pandas 预热与用户的首次请求抢 CPU（GIL），而 `get_batch_data` 的按批次锁
+    > 让用户请求只能排队等预热算完同一批次。礼让式预热不可能比不做更差，立即预热会。
+    > 收益落在「用户没打开过的批次」上：切换批次合计 **3.43s → 0.11s**。
+  - `app/routers/`：18 组接口 —— batches / overview / timeliness / anomalies / records /
+    compare / skus / review / scenarios / routes / transport / alerts / watch /
+    fillins / history / rules / dataadmin / manual
+- 前端：Vite + React + MUI + ECharts（`frontend/`）
+  - 页面按需懒加载（`React.lazy`），首屏只加载当前页面，不必为 17 个页面（含 2.6MB ECharts）买单；
+  - 页面与批次同步到 URL（`?page=transport&batch=手机膜9.7`）：刷新保持、链接可分享、支持浏览器前进后退；
+  - **视觉单一来源** `src/theme.js`：所有颜色先定义语义名再被引用
+    （`SEMANTIC.danger` 超时/未达标、`warning` 进行中、`success` 达标、`info`、`neutral` 终止，
+    另有 `STATUS_COLORS` / `PIE_PALETTE` / `HEAT_RANGE` 图表色板与 `severityOfDays()` 停滞分级）。
+    改一处颜色即全站生效，也是后续做深色模式的前提；
+  - **公共组件** `src/components/`：`KpiCard`（指标数字卡）、`PageHeader`（页面标题栏）、
+    `StateViews`（`LoadingState` / `ErrorState` / `EmptyState` 三态）、`SectionCard`（带标题卡片容器）；
+  - **数据请求** `src/hooks/useApi.js`：统一 `data / error / loading / refetch`，
+    内置**请求序号防竞态**——切换批次或筛选时，先发出的旧请求不会覆盖新结果；
+    **17 个页面全部接入**，页内仅剩"选中项变化后清空详情"这类本地状态同步的 `useEffect`。
+  - 样式统一走 MUI 的 `sx`：**Tailwind 已整体移除**（配置、依赖、`@tailwind` 指令）。
+    它原先只被 9 处工具类用到，却要多养一套样式体系并承担 preflight 与 MUI 互相覆盖的风险；
+    页面内已无 `className`，`index.css` 只保留挂载所需的最小重置，字体与背景由
+    `theme.js` + `CssBaseline` 提供。
+  - **页面冒烟脚本** `frontend/scripts/ssr_smoke.mjs`：用 Vite 的 SSR 能力把 19 个页面
+    逐个真实渲染一遍，专抓"能编译、但一跑就报错"的残留（例如重构后仍引用已删除的
+    state/setter）——esbuild 不做未定义变量检查，dev server 显示"编译通过"并不代表页面
+    跑得起来。在 `frontend/` 目录下执行 `node scripts/ssr_smoke.mjs` 即可（只渲染初始态，
+    不依赖后端是否在跑）。另附 4 个公共组件 + `CategorySelector` 的**收起态标记**断言
+    （顶栏组件不在页面清单里，且手机壳的「目标待校准」标记原先只在展开的菜单项中可见）。
+
+    > 脚本会在 `transform` 阶段把 `@mui/icons-material/<X>` 的 import 就地换成占位组件。
+    > 原因：这些图标是 CJS 包，SSR 走 Node 原生 ESM/CJS 互操作时 `import X from '<cjs>'`
+    > 拿到的是整个 `module.exports` 对象，React 报 `Element type is invalid` —— 那是 harness
+    > 的假阳性（浏览器端 Vite 会生成 `__esModule ? .default : mod` 正确解包），会让含图标的
+    > 页面**永久误报**，反而掩盖页面里真正的错误。必须用 `transform` 而非 `resolveId`：
+    > SSR 下 Vite 把 node_modules 依赖标为 external，会绕过 `resolveId`/`load`。
+- 数据根目录：`C:\Users\dell\Desktop\work-main\data\手机膜\`
+  （优先级：环境变量 / `.env` 的 `DATA_ROOT` > `backend/app/config.py` 内置默认值）
+- 文档：`docs/` —— SOP 操作手册、岗位职责与交接说明书（系统「操作手册」页直接读取）
 
 ## 五、接口一览
 
@@ -171,17 +275,33 @@ C:\Users\dell\.workbuddy\binaries\node\versions\22.22.2-2\npm.cmd run dev
 | GET /api/rules | 时效规则配置（当前值 + 默认值 + 说明） |
 | PUT /api/rules | 合并保存规则（合法键/范围校验），保存后复盘与预警立即重算 |
 | POST /api/rules/reset | 恢复代码内置默认规则 |
+| GET /api/etl/scan | 扫描数据目录，对照数据库返回各批次导入状态（待导入 / 已变更 / 已是最新 / 数据源缺失） |
+| POST /api/etl/import | 触发导入（batch 为空则处理全部，未变化的自动跳过；force=true 强制重导） |
+| GET /api/etl/backup | 列出已有备份（按时间倒序，含大小与文件清单） |
+| POST /api/etl/backup | 立即备份：`backend/state/` + 数据库导出 → `backups/时间戳/` |
+| GET /api/manual | 列出已收录的操作手册文档（标题 / 说明 / 更新时间） |
+| GET /api/manual/{key} | 取指定手册的 markdown 原文（白名单校验，未收录返回 404） |
 
 批次不存在返回 404；空数据返回空结构而非 500。
 
-## 六、MySQL 数据层（企业化）
+## 六、MySQL 数据层
 
-生产部署目录：`D:\apps\data-admin\`（C 盘外）：独立 venv + `.env` 配置 + 启动脚本。
+数据库：本机 MySQL 8.0，库 `data_admin`（utf8mb4），四张表：
+`batch`（批次与文件指纹）/ `part_doc`（单据，含 raw JSON 原始列）/
+`approval_node`（审批节点）/ `rule_config`（时效规则）。
 
-- 数据库：本机 MySQL 8.0，库 `data_admin`（utf8mb4），三张表：
-  `batch`（批次）/ `part_doc`（单据，含 raw JSON 原始列）/ `approval_node`（审批节点）；
-- ETL 导入（复用文件解析口径，覆盖式 + 文件指纹增量跳过）：
-  `D:\apps\data-admin\venv\Scripts\python.exe backend\etl\import_excel.py [--batch 手机膜9.7] [--force]`
-- 生产启动：双击 `D:\apps\data-admin\start-backend.bat`（读取 `.env` 的 MYSQL_*/DATA_ROOT）；
-- SKU 维度接口：`GET /api/skus`（119 个 SKU 跨批次聚合）、`GET /api/skus/{code}`（档案+时间线）；
-- 连接参数也可用环境变量 `DATA_ADMIN_ENV_FILE` 指向其他 .env。
+### 连接配置：两套环境
+
+| 环境 | Python 解释器 | 配置文件 | 启动方式 |
+| --- | --- | --- | --- |
+| 开发（当前仓库） | `C:\Users\dell\.workbuddy\binaries\python\envs\default` | `<仓库根>\.env`（可选，缺省用内置默认值） | `start.bat` |
+| 生产部署 | `D:\apps\data-admin\venv` | `D:\apps\data-admin\.env` ← **当前生效的一份** | `D:\apps\data-admin\start-backend.bat` |
+
+`backend/app/db.py` 按 `DATA_ADMIN_ENV_FILE` → `D:\apps\data-admin\.env` → `<仓库根>\.env`
+→ `<仓库>\backend\.env` 的顺序加载，**先命中者生效**。复制 `.env.example` 即可得到模板。
+
+- ETL 导入（覆盖式 + 文件指纹增量跳过）—— 界面入口见「功能说明 11. 数据管理」，命令行入口：
+  `python backend\etl\import_excel.py [--batch 手机膜9.7] [--force]`
+- 备份：`start.bat backup`，或界面「数据管理 → 立即备份」；输出到 `backups\时间戳\`
+  （含 `manifest.txt`，记录本次包含的文件与数据库导出状态）；
+- SKU 维度接口：`GET /api/skus`（跨批次聚合）、`GET /api/skus/{code}`（档案 + 时间线）。

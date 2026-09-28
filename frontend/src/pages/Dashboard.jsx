@@ -1,11 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
+import { LoadingState, ErrorState, EmptyState } from '../components/StateViews.jsx';
+import { SEMANTIC, HEAT_RANGE, STATUS_COLORS, PIE_PALETTE } from '../theme.js';
 import {
   Grid,
   Card,
   CardContent,
   Typography,
-  Alert,
-  CircularProgress,
   Box,
 } from '@mui/material';
 import Inventory2Icon from '@mui/icons-material/Inventory2';
@@ -14,6 +14,8 @@ import ScheduleIcon from '@mui/icons-material/Schedule';
 import BugReportIcon from '@mui/icons-material/BugReport';
 import { fetchOverview, fetchTimeliness } from '../api.js';
 import EChart from '../components/EChart.jsx';
+import KpiCard from '../components/KpiCard.jsx';
+import useApi from '../hooks/useApi.js';
 
 /** 小时数格式化 */
 function fmtHours(h) {
@@ -24,37 +26,18 @@ function fmtHours(h) {
 
 const KPI_CARDS = [
   { key: 'total', label: '总单据数', icon: <Inventory2Icon color="primary" /> },
-  { key: 'finished', label: '已完成单据', icon: <CheckCircleIcon sx={{ color: '#2e7d32' }} /> },
-  { key: 'running', label: '审批中（进行中）', icon: <ScheduleIcon sx={{ color: '#ef6c00' }} /> },
-  { key: 'anomalyDocCount', label: '异常单据数', icon: <BugReportIcon sx={{ color: '#c62828' }} /> },
+  { key: 'finished', label: '已完成单据', icon: <CheckCircleIcon sx={{ color: SEMANTIC.success }} /> },
+  { key: 'running', label: '审批中（进行中）', icon: <ScheduleIcon sx={{ color: SEMANTIC.warning }} /> },
+  { key: 'anomalyDocCount', label: '异常单据数', icon: <BugReportIcon sx={{ color: SEMANTIC.danger }} /> },
 ];
 
-/** 状态饼图配色（中国市场习惯：完成/正向偏红，进行中橙，终止灰） */
-const STATUS_COLORS = {
-  已结束: '#c62828',
-  审批中: '#ef6c00',
-  终止: '#9e9e9e',
-};
-const PIE_PALETTE = ['#c62828', '#ef6c00', '#9e9e9e', '#1e5eff', '#2e7d32', '#6a1b9a'];
-
 export default function Dashboard({ batch }) {
-  const [overview, setOverview] = useState(null);
-  const [timeliness, setTimeliness] = useState(null);
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    if (!batch) return;
-    setLoading(true);
-    setError('');
-    Promise.all([fetchOverview(batch), fetchTimeliness(batch)])
-      .then(([ov, tl]) => {
-        setOverview(ov);
-        setTimeliness(tl);
-      })
-      .catch((e) => setError(e.message || '加载失败'))
-      .finally(() => setLoading(false));
-  }, [batch]);
+  const { data, error, loading } = useApi(
+    () => Promise.all([fetchOverview(batch), fetchTimeliness(batch)]),
+    [batch],
+    { enabled: !!batch },
+  );
+  const [overview, timeliness] = data || [null, null];
 
   // ---- 图表配置 ----
   const partBarOption = useMemo(() => {
@@ -72,19 +55,19 @@ export default function Dashboard({ batch }) {
           name: '平均耗时',
           type: 'bar',
           data: timeliness.partBar.map((p) => p.avg),
-          itemStyle: { color: '#c62828' },
+          itemStyle: { color: SEMANTIC.danger },
         },
         {
           name: '中位数',
           type: 'bar',
           data: timeliness.partBar.map((p) => p.median),
-          itemStyle: { color: '#ef6c00' },
+          itemStyle: { color: SEMANTIC.warning },
         },
         {
           name: 'P90',
           type: 'bar',
           data: timeliness.partBar.map((p) => p.p90),
-          itemStyle: { color: '#1e5eff' },
+          itemStyle: { color: SEMANTIC.brand },
         },
       ],
     };
@@ -149,7 +132,7 @@ export default function Dashboard({ batch }) {
         orient: 'horizontal',
         left: 'center',
         bottom: 0,
-        inRange: { color: ['#e3f2fd', '#ffcc80', '#c62828'] },
+        inRange: { color: HEAT_RANGE },
       },
       series: [
         {
@@ -181,7 +164,7 @@ export default function Dashboard({ batch }) {
           type: 'line',
           smooth: true,
           data: timeliness.trend.map((t) => t.count),
-          itemStyle: { color: '#c62828' },
+          itemStyle: { color: SEMANTIC.danger },
           areaStyle: { color: 'rgba(198,40,40,0.12)' },
         },
       ],
@@ -189,24 +172,16 @@ export default function Dashboard({ batch }) {
   }, [timeliness]);
 
   if (!batch) {
-    return <Alert severity="info">请先在右上角选择数据批次</Alert>;
+    return <EmptyState>请先在右上角选择数据批次</EmptyState>;
   }
-  if (loading) {
-    return (
-      <Box sx={{ display: 'flex', justifyContent: 'center', mt: 8 }}>
-        <CircularProgress />
-      </Box>
-    );
-  }
-  if (error) {
-    return <Alert severity="error">加载失败：{error}</Alert>;
-  }
+  if (loading) return<LoadingState />;
+  if (error) return <ErrorState prefix="加载失败" error={error} />;
   if (!overview || !timeliness) return null;
 
   const kpi = overview.kpi;
 
   return (
-    <div className="space-y-4">
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
       {/* 数据基准时间 */}
       <Typography variant="body2" color="text.secondary">
         批次：{overview.batch} ｜ 数据基准时间（模拟当前）：{overview.baseTime || '—'}
@@ -216,29 +191,19 @@ export default function Dashboard({ batch }) {
       <Grid container spacing={2}>
         {KPI_CARDS.map((c) => (
           <Grid item xs={12} sm={6} md={3} key={c.key}>
-            <Card sx={{ borderTop: '3px solid #1e5eff' }}>
-              <CardContent className="flex items-center justify-between">
-                <Box>
-                  <Typography variant="body2" color="text.secondary">
-                    {c.label}
-                  </Typography>
-                  <Typography variant="h4" fontWeight={700}>
-                    {c.key === 'finished' ? `${kpi.finished} / ${kpi.total}` : kpi[c.key]}
-                  </Typography>
-                  {c.key === 'total' && (
-                    <Typography variant="caption" color="text.secondary">
-                      完成率 {(kpi.finishRate * 100).toFixed(1)}%
-                    </Typography>
-                  )}
-                  {c.key === 'anomalyDocCount' && (
-                    <Typography variant="caption" color="text.secondary">
-                      共 {kpi.anomalyCount} 条异常记录
-                    </Typography>
-                  )}
-                </Box>
-                {c.icon}
-              </CardContent>
-            </Card>
+            <KpiCard
+              label={c.label}
+              value={c.key === 'finished' ? `${kpi.finished} / ${kpi.total}` : kpi[c.key]}
+              icon={c.icon}
+              accent={SEMANTIC.brand}
+              sub={
+                c.key === 'total'
+                  ? `完成率 ${(kpi.finishRate * 100).toFixed(1)}%`
+                  : c.key === 'anomalyDocCount'
+                    ? `共 ${kpi.anomalyCount} 条异常记录`
+                    : undefined
+              }
+            />
           </Grid>
         ))}
       </Grid>
@@ -246,31 +211,15 @@ export default function Dashboard({ batch }) {
       {/* 平均全流程耗时（跨所有已结束单据）卡片行 */}
       <Grid container spacing={2}>
         <Grid item xs={12} md={6}>
-          <Card>
-            <CardContent className="flex items-center justify-between">
-              <Box>
-                <Typography variant="body2" color="text.secondary">
-                  平均全流程耗时（已结束单据，跨 Part 合计口径见各环节）
-                </Typography>
-                <Typography variant="h5" fontWeight={700} sx={{ color: '#c62828' }}>
-                  {fmtHours(kpi.avgTotalHours)}
-                </Typography>
-              </Box>
-              <ScheduleIcon sx={{ fontSize: 40, color: '#c62828' }} />
-            </CardContent>
-          </Card>
+          <KpiCard
+            label="平均全流程耗时（已结束单据，跨 Part 合计口径见各环节）"
+            value={fmtHours(kpi.avgTotalHours)}
+            color={SEMANTIC.danger}
+            icon={<ScheduleIcon sx={{ fontSize: 40, color: SEMANTIC.danger }} />}
+          />
         </Grid>
         <Grid item xs={12} md={6}>
-          <Card>
-            <CardContent>
-              <Typography variant="body2" color="text.secondary" gutterBottom>
-                终止单据
-              </Typography>
-              <Typography variant="h5" fontWeight={700} sx={{ color: '#616161' }}>
-                {kpi.terminated} 张
-              </Typography>
-            </CardContent>
-          </Card>
+          <KpiCard label="终止单据" value={`${kpi.terminated} 张`} color={SEMANTIC.neutral} />
         </Grid>
       </Grid>
 
@@ -279,32 +228,32 @@ export default function Dashboard({ batch }) {
         <Grid item xs={12} lg={7}>
           <Card>
             <CardContent>
-              {partBarOption ? <EChart option={partBarOption} height={400} /> : <Alert severity="info">暂无时效数据</Alert>}
+              {partBarOption ? <EChart option={partBarOption} height={400} /> : <EmptyState>暂无时效数据</EmptyState>}
             </CardContent>
           </Card>
         </Grid>
         <Grid item xs={12} lg={5}>
           <Card>
             <CardContent>
-              {pieOption ? <EChart option={pieOption} height={400} /> : <Alert severity="info">暂无状态数据</Alert>}
+              {pieOption ? <EChart option={pieOption} height={400} /> : <EmptyState>暂无状态数据</EmptyState>}
             </CardContent>
           </Card>
         </Grid>
         <Grid item xs={12}>
           <Card>
             <CardContent>
-              {heatOption ? <EChart option={heatOption} height={420} /> : <Alert severity="info">暂无分段耗时数据</Alert>}
+              {heatOption ? <EChart option={heatOption} height={420} /> : <EmptyState>暂无分段耗时数据</EmptyState>}
             </CardContent>
           </Card>
         </Grid>
         <Grid item xs={12}>
           <Card>
             <CardContent>
-              {trendOption ? <EChart option={trendOption} height={360} /> : <Alert severity="info">暂无创建趋势数据</Alert>}
+              {trendOption ? <EChart option={trendOption} height={360} /> : <EmptyState>暂无创建趋势数据</EmptyState>}
             </CardContent>
           </Card>
         </Grid>
       </Grid>
-    </div>
+    </Box>
   );
 }

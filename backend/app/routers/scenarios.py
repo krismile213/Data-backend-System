@@ -95,9 +95,9 @@ def _item_base(sku, det, row):
     }
 
 
-def compute_scenarios():
-    """全量计算场景 A/B/C 分组清单。"""
-    data = get_review_data()
+def compute_scenarios(category=None):
+    """全量计算场景 A/B/C 分组清单（category 缺省 = 默认品类手机膜）。"""
+    data = get_review_data(category)
     rows = {r["sku"]: r for r in data["rows"]}
     now = datetime.now()
 
@@ -229,16 +229,16 @@ def compute_scenarios():
 
 
 @router.get("")
-def scenarios():
+def scenarios(category: str = None):
     """跨环节联动诊断：场景 A/B/C 分组清单 + KPI + 去化路径。"""
     try:
-        return compute_scenarios()
+        return compute_scenarios(category)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"场景诊断失败: {e}")
 
 
 @router.get("/export")
-def export_scenarios(code: str = ""):
+def export_scenarios(code: str = "", category: str = None):
     """导出场景清单 xlsx（可按场景过滤 A/B/C，默认全量）。"""
     import io
     import urllib.parse
@@ -247,7 +247,7 @@ def export_scenarios(code: str = ""):
     from fastapi.responses import StreamingResponse
 
     try:
-        data = compute_scenarios()
+        data = compute_scenarios(category)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"导出失败: {e}")
 

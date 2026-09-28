@@ -1,12 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { LoadingState, ErrorState, EmptyState } from '../components/StateViews.jsx';
+import { SEMANTIC } from '../theme.js';
 import {
-  Alert,
   Autocomplete,
   Box,
   Card,
   CardContent,
   Checkbox,
-  CircularProgress,
   Table,
   TableBody,
   TableCell,
@@ -19,6 +19,7 @@ import {
 } from '@mui/material';
 import { fetchCompare } from '../api.js';
 import EChart from '../components/EChart.jsx';
+import useApi from '../hooks/useApi.js';
 
 /** 小时数格式化（与 Dashboard 一致） */
 function fmtHours(h) {
@@ -27,7 +28,7 @@ function fmtHours(h) {
   return `${h.toFixed(1)} 小时`;
 }
 
-const BATCH_COLORS = ['#1e5eff', '#c62828', '#2e7d32', '#ef6c00', '#6a1b9a', '#00838f'];
+const BATCH_COLORS = [SEMANTIC.brand, SEMANTIC.danger, SEMANTIC.success, SEMANTIC.warning, SEMANTIC.purple, SEMANTIC.info];
 
 /** KPI 对比行定义 */
 const KPI_ROWS = [
@@ -65,9 +66,6 @@ const KPI_ROWS = [
 
 export default function Compare({ batches }) {
   const [selected, setSelected] = useState([]);
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
 
   // 批次列表就绪后，默认选最近两个批次
   useEffect(() => {
@@ -77,18 +75,17 @@ export default function Compare({ batches }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [batches]);
 
+  // 统一请求 hook：选中不足两个批次时不发请求，竞态由 hook 内部序号防护
+  const { data, error, loading, setData } = useApi(
+    () => fetchCompare(selected),
+    [selected],
+    { enabled: selected.length >= 2 },
+  );
+
+  // 选择不足两个批次时，清掉上一次的对比结果
   useEffect(() => {
-    if (selected.length < 2) {
-      setData(null);
-      return;
-    }
-    setLoading(true);
-    setError('');
-    fetchCompare(selected)
-      .then(setData)
-      .catch((e) => setError(e.message || '加载失败'))
-      .finally(() => setLoading(false));
-  }, [selected]);
+    if (selected.length < 2) setData(null);
+  }, [selected, setData]);
 
   // ---- 各 Part 平均耗时对比（分组柱状图） ----
   const partBarOption = useMemo(() => {
@@ -145,15 +142,15 @@ export default function Compare({ batches }) {
   }, [data]);
 
   if (batches.length < 2) {
-    return <Alert severity="info">数据目录下至少需要 2 个批次才能对比</Alert>;
+    return <EmptyState>数据目录下至少需要 2 个批次才能对比</EmptyState>;
   }
 
   return (
-    <div className="space-y-4">
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
       {/* 批次选择 */}
       <Card>
         <CardContent>
-          <Box className="flex items-center gap-3 flex-wrap">
+          <Box sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 1.5 }}>
             <Typography variant="subtitle1">选择要对比的批次（2~6 个）：</Typography>
             <Autocomplete
               multiple
@@ -176,16 +173,12 @@ export default function Compare({ batches }) {
       </Card>
 
       {selected.length < 2 && (
-        <Alert severity="info">请至少选择 2 个批次</Alert>
+        <EmptyState>请至少选择 2 个批次</EmptyState>
       )}
 
-      {loading && (
-        <Box sx={{ display: 'flex', justifyContent: 'center', mt: 6 }}>
-          <CircularProgress />
-        </Box>
-      )}
+      {loading && <LoadingState sx={{ mt: 6 }} />}
 
-      {error && <Alert severity="error">加载失败：{error}</Alert>}
+      {error && <ErrorState prefix="加载失败" error={error} />}
 
       {!loading && !error && data && selected.length >= 2 && (
         <>
@@ -231,18 +224,18 @@ export default function Compare({ batches }) {
           {/* Part 耗时对比 */}
           <Card>
             <CardContent>
-              {partBarOption ? <EChart option={partBarOption} height={420} /> : <Alert severity="info">暂无时效数据</Alert>}
+              {partBarOption ? <EChart option={partBarOption} height={420} /> : <EmptyState>暂无时效数据</EmptyState>}
             </CardContent>
           </Card>
 
           {/* 状态分布对比 */}
           <Card>
             <CardContent>
-              {statusOption ? <EChart option={statusOption} height={380} /> : <Alert severity="info">暂无状态数据</Alert>}
+              {statusOption ? <EChart option={statusOption} height={380} /> : <EmptyState>暂无状态数据</EmptyState>}
             </CardContent>
           </Card>
         </>
       )}
-    </div>
+    </Box>
   );
 }
