@@ -11,6 +11,7 @@ import {
   ListItemText,
   Paper,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import SearchIcon from '@mui/icons-material/Search';
@@ -58,8 +59,11 @@ function judgeColor(judge) {
   return SEMANTIC.neutral;
 }
 
-/** 由 SKU 档案构建 ECharts 甘特图 option（模仿 gantt_sheet.py：部门分组/超时红色/条尾判定） */
-function buildGanttOption(detail, publishAt) {
+/** 由 SKU 档案构建 ECharts 甘特图 option（模仿 gantt_sheet.py：部门分组/超时红色/条尾判定）
+ *  alias = { out: {new} | null, in: [旧号…], hold: bool }：换号时加一条灰色竖直参考线，
+ *  旧号标「换号 → 新号」，新号标「承接 旧号」；人工登记豁免时在末段尾标点状线
+ *  「人工豁免·不催办」，让中断处的含义在图上一眼可见。 */
+function buildGanttOption(detail, publishAt, alias) {
   const rows = detail.segments || [];
   if (rows.length === 0) return null;
 
@@ -103,6 +107,51 @@ function buildGanttOption(detail, publishAt) {
   });
 
   const barH = 14;
+
+  // 竖直参考线：官方发布（紫）+ 换号衔接（灰，旧号停在末段 / 新号起于首段）
+  const markData = [];
+  if (ts(publishAt) != null) {
+    markData.push({
+      xAxis: ts(publishAt),
+      lineStyle: { color: SEMANTIC.purple },
+      label: { formatter: '官方发布', color: SEMANTIC.purple },
+    });
+  }
+  const aliasNew = alias?.out?.new;
+  const aliasOld = (alias?.in || [])[0];
+  const segT0 = (r) => ts(r.t0) ?? ts(r.start);
+  const segT1 = (r) => ts(r.t1) ?? ts(r.end);
+  if (aliasNew) {
+    const ends = rows.map(segT1).filter((v) => v != null);
+    if (ends.length) {
+      markData.push({
+        xAxis: Math.max(...ends),
+        lineStyle: { color: SEMANTIC.neutral },
+        label: { formatter: `换号 → ${aliasNew}`, color: SEMANTIC.neutral },
+      });
+    }
+  } else if (aliasOld) {
+    const starts = rows.map(segT0).filter((v) => v != null);
+    if (starts.length) {
+      markData.push({
+        xAxis: Math.min(...starts),
+        lineStyle: { color: SEMANTIC.neutral },
+        label: { formatter: `承接 ${aliasOld}`, color: SEMANTIC.neutral },
+      });
+    }
+  }
+  // 人工登记（业务上已决定不再走完流程）：在末段尾画一条点状线，
+  // 表示「到这就不再推进了，后面的缺段属正常」。
+  if (alias?.hold) {
+    const ends = rows.map(segT1).filter((v) => v != null);
+    if (ends.length) {
+      markData.push({
+        xAxis: Math.max(...ends),
+        lineStyle: { color: SEMANTIC.neutral, type: 'dotted' },
+        label: { formatter: '人工豁免·不催办', color: SEMANTIC.neutral },
+      });
+    }
+  }
 
   const series = [
     {
@@ -165,11 +214,11 @@ function buildGanttOption(detail, publishAt) {
       },
       encode: { x: [1, 2], y: 0 },
       data,
-      markLine: ts(publishAt) == null ? undefined : {
+      markLine: markData.length === 0 ? undefined : {
         symbol: 'none',
-        lineStyle: { color: SEMANTIC.purple, type: 'dashed', width: 1.5 },
-        label: { formatter: '官方发布', fontSize: 10, color: SEMANTIC.purple },
-        data: [{ xAxis: ts(publishAt) }],
+        lineStyle: { type: 'dashed', width: 1.5 },
+        label: { fontSize: 10, position: 'insideEndTop' },
+        data: markData,
       },
     },
   ];
@@ -282,7 +331,13 @@ export default function Gantt() {
   const option = useMemo(() => {
     if (!detail) return null;
     const row = rows.find((r) => r.sku === sku);
-    return buildGanttOption(detail, row ? row.publishAt : null);
+    // hold 取档案（skuDetails.hold）最稳；out/in 取总览行（两者同源，缺一不影响标记）
+    const alias = {
+      out: row?.aliasOut ? { new: row.aliasOut } : null,
+      in: row?.aliasIn || [],
+      hold: !!detail.hold,
+    };
+    return buildGanttOption(detail, row ? row.publishAt : null, alias);
   }, [detail, sku, rows]);
 
   const segRows = (detail?.segments || []).filter((r) => ts(r.t0 || r.start) != null
@@ -317,11 +372,20 @@ export default function Gantt() {
             >
               <ListItemText
                 primary={`${r.sku}${r.model ? ` · ${r.model}` : ''}`}
-                secondary={r.valid ? '有效复盘' : '未闭环'}
+                secondary={r.holdOut
+                  ? '已豁免（人工登记）· 不催办'
+                  : (r.aliasOut
+                    ? `已换号 → ${r.aliasOut}`
+                    : ((r.aliasIn || []).length
+                      ? `承接 ${r.aliasIn.join('/')}`
+                      : (r.valid ? '有效复盘' : '未闭环')))}
                 primaryTypographyProps={{ fontSize: 13 }}
                 secondaryTypographyProps={{
                   fontSize: 11,
-                  color: r.valid ? 'success.main' : 'text.secondary',
+                  color: r.holdOut ? 'warning.main'
+                    : (r.aliasOut ? 'text.secondary'
+                      : ((r.aliasIn || []).length ? 'info.main'
+                        : (r.valid ? 'success.main' : 'text.secondary'))),
                 }}
               />
             </ListItemButton>
@@ -343,11 +407,24 @@ export default function Gantt() {
                 {sku} 全流程甘特图
               </Typography>
               <Chip size="small" label={detail.devType} />
-              <Chip
-                size="small"
-                label={detail.valid ? '有效复盘' : '未闭环'}
-                color={detail.valid ? 'success' : 'warning'}
-              />
+              <Tooltip title={detail.hold
+                ? `业务上已决定不再走完流程（人工登记${detail.hold.registeredAt ? `于 ${detail.hold.registeredAt}` : ''}）${detail.hold.reason ? ` · ${detail.hold.reason}` : ''}`
+                : (detail.valid ? '三部门终节点均已完成' : '三部门终节点有缺')}>
+                <Chip
+                  size="small"
+                  label={detail.hold ? '已豁免·不催办'
+                    : (detail.valid ? '有效复盘' : '未闭环')}
+                  color={detail.hold ? 'warning' : (detail.valid ? 'success' : 'warning')}
+                />
+              </Tooltip>
+              {detail.aliasOut && (
+                <Chip size="small" variant="outlined"
+                  label={`已换号 → ${detail.aliasOut.new}（旧号不催办）`} />
+              )}
+              {(detail.aliasIn || []).length > 0 && (
+                <Chip size="small" variant="outlined" color="info"
+                  label={`承接 ${detail.aliasIn.join('/')}`} />
+              )}
               {detail.bottleneck && (
                 <Chip
                   size="small"
@@ -375,6 +452,7 @@ export default function Gantt() {
                 ['留空段', NEUTRAL_FILL],
                 ['超时部分', RED_FILL],
                 ['部门终节点', SEMANTIC.purple],
+                ['换号衔接/豁免', SEMANTIC.neutral],
               ].map(([label, color]) => (
                 <Box key={label} sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
                   <Box sx={{ width: 14, height: 10, bgcolor: color, borderRadius: 0.5 }} />
@@ -388,6 +466,8 @@ export default function Gantt() {
               灰条为产品部留空·后勤接管段；橙色「XX渠道·未发货」行 = Part5 已立项渠道但至今无货件号
               （采购下单→今，超目标即红色 ✗超时未发货，独立于采购→发货末批判定）；
               紫色菱形为三部门终节点完成时刻；紫色虚线为官方发布时间（提前开发判定依据）；
+              灰色虚线为<strong>换号衔接点</strong>（旧号停用→新号承接的编码变更，旧号后半段缺失属正常，不催办）；
+              灰色<strong>点状线</strong>为<strong>人工登记豁免</strong>（业务上已决定不再走完流程，后面的缺段属正常，不催办）；
               底部滑块可缩放时间轴。
             </Typography>
           </Paper>

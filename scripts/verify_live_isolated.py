@@ -25,7 +25,9 @@ verify_live_isolated.py — 隔离端口在线验收（不打扰用户正在用�
     一、/api/deltas 口径（手机膜 / 手机壳 / 未知品类回退 / sku 过滤）
     二、/api/deltas/export 导出 xlsx（魔数 PK）
     三、POST /api/deltas/snapshot 幂等（第二次应 recorded=False）
-    四、既有四个检查脚本：scan_endpoints / verify_category_live /
+    四、/api/alerts 加急口径（T12：末端终止的作废单不进催办、与催办清单互斥、
+        导出含「已终止作废」sheet）
+    五、既有四个检查脚本：scan_endpoints / verify_category_live /
         browser_check（真浏览器 20 页）/ verify_review_downloads（弹窗双下载）
 
     ⚠️ 查询参数里的中文**必须转义**（本脚本用 `urllib.parse.urlencode` 统一处理）：
@@ -275,7 +277,31 @@ def main():
         assert reasons[0] == reasons[1] == "指纹未变化（无新数据导入）", \
             f"快照不幂等：{reasons}"
 
-        # ---------- 四、既有检查脚本 ----------
+        # ---------- 四、/api/alerts 加急口径（T12）----------
+        log("")
+        log("== 四、/api/alerts 加急口径（末端终止 → 不催办）==")
+        st6, a, err6 = jget(f"{B}/api/alerts?{q(category='手机膜')}")
+        if a is None:
+            raise SystemExit(f"/api/alerts 未返回 JSON：status={st6} {err6}")
+        log(f"  status={st6} 覆盖={a['totalSkus']} 催办={a['alertCount']} "
+            f"P0={a['p0']} P1={a['p1']} P2={a['p2']} 作废={a.get('voidCount')}")
+        assert a["alertCount"] == a["p0"] + a["p1"] + a["p2"], \
+            f"催办数 != P0+P1+P2：{a['alertCount']} vs {a['p0']}+{a['p1']}+{a['p2']}"
+        assert "voidRows" in a and "voidCount" in a, "响应缺 voidRows/voidCount"
+        assert a["voidCount"] == len(a["voidRows"]), "voidCount 与 voidRows 长度不符"
+        warned = {r["sku"] for r in a["rows"]}
+        void = {r["sku"] for r in a["voidRows"]}
+        assert not (warned & void), f"作废单泄漏进催办清单：{sorted(warned & void)}"
+        for r in a["voidRows"]:
+            succ = r.get("successor") or {}
+            log(f"    {r['sku']:6s} {r['part']}@{r['terminatedAt']} "
+                f"承接单={succ.get('sku') or '无'} | {r['successorNote']}")
+            assert r["successorNote"], f"{r['sku']} 缺结论文案"
+        st7, blob2, hdr7 = get(f"{B}/api/alerts/export?{q(category='手机膜')}")
+        log(f"  /api/alerts/export status={st7} bytes={len(blob2)} magic={blob2[:2]!r}")
+        assert st7 == 200 and blob2[:2] == b"PK", "加急导出不是 xlsx（魔数不对）"
+
+        # ---------- 五、既有检查脚本 ----------
         checks = [
             ("接口全扫", [str(PY), str(ROOT / "scripts" / "scan_endpoints.py"), B], ROOT),
             ("品类在线冒烟", [str(PY), str(ROOT / "scripts" / "verify_category_live.py"), B], ROOT),
@@ -286,7 +312,7 @@ def main():
         ]
         log("")
         for name, cmd, cwd in checks:
-            log(f"== 四、{name} ==")
+            log(f"== 五、{name} ==")
             r = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True)
             tail = (r.stdout or b"").decode("utf-8", "replace").strip().splitlines()
             for ln in (tail[-4:] if len(tail) > 4 else tail):

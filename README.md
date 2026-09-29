@@ -5,7 +5,8 @@
 
 ## 一、启动方式（一键）
 
-双击项目根目录下的 **`start.bat`**，它会：
+**入口只有一个：`start.py`。** 双击项目根目录下的 **`start.bat`**，或命令行
+`python start.py` —— 两者完全等价。它会：
 
 1. 检查/安装前端依赖（仅首次）；
 2. 启动后端 FastAPI（端口 8000）；
@@ -14,19 +15,33 @@
 
 关闭：直接关闭弹出的 `backend-8000` 和 `frontend-5173` 两个命令行窗口。
 
+> **关于 `start.bat`**：它现在只是一个 **7 行的双击壳**（内容就是 `python start.py %*`），
+> 不含任何逻辑——所有行为、参数白名单、错误提示都在 `start.py` 里。因此下文所有
+> `start.bat X` 都等价于 `python start.py X`，两种写法永远一致，不会再出现
+> 「bat 与 py 能力对不上」。留它的唯一原因是本机 `.py` 关联的是 IDE
+> （双击 `start.py` 会打开编辑器而不是运行）。
+> 壳本身由 `scripts/check_start_bat.py` 守着：纯 ASCII + CRLF + 只转发参数，
+> 并校验 start.py 的「白名单 / 用法说明 / main 分支」三者一致。
+
 ### 可选参数
 
-在 cmd 中带参数执行（例如 `start.bat restart`）：
+命令行执行（例：`python start.py restart`；双击场景下 `start.bat restart` 一样）：
 
 | 参数 | 作用 |
 |------|------|
 | （无） | 常规启动。若 8000 / 5173 已在监听，则**复用**已有服务，不会重复启动 |
 | `restart` | 先结束占用 8000 / 5173 的残留进程，再启动（页面空白时的首选手段） |
 | `stop` | 结束两个服务并退出（关闭系统不用再手工找窗口） |
-| `status` | 只检查当前状态：端口是否监听 + HTTP 是否响应，不启动任何东西 |
-| `clean` | 删除 Vite 依赖缓存 `node_modules\.vite` 后再启动（极端情况兜底） |
+| `status` | 只检查当前状态：端口是否监听 + HTTP 是否响应 + 前端是否真的在服务 JS 模块 |
+| `open` | 只打开浏览器，不动服务 |
+| `clean` | 清掉 Vite 依赖缓存后再启动（极端情况兜底） |
+| `check` | 启动后跑在线可用性检查：接口全扫 + 真实浏览器渲染每一页 |
+| `verify` | 启动后跑完整验收链：离线四件套（pytest / G506 基线 / 分品类规则 / 单据增量）+ 在线四步 |
+| `verify-live` | **隔离端口**（8001 + 5174）在线验收新代码，不打扰 8000 / 5173 上正在用的实例 |
 | `backup` | 备份 `backend/state/` 与数据库导出后退出（不启动服务） |
+| `delta` | 跑一次未闭环 SKU 单据增量（拍快照 + 出报告）后退出；可跟 `--days 7` / `--category 手机壳` / `--sku G506` / `--export 路径.xlsx` |
 | `help` | 打印参数列表后退出 |
+| `--no-pause` | 跑完不等回车（给脚本 / 自动化调用，与上面任何参数组合） |
 
 > `stop` / `status` 判断服务是否真的停了，靠的是**端口**：从 `netstat` 取占用
 > LISTENING 套接字的 PID 再结束它。只结束外层命令行窗口是不够的——子进程仍会
@@ -39,9 +54,9 @@
 > 启动过程中**不会**每次删除 Vite 依赖缓存——缓存只在 `clean` 参数或依赖本身变化时才重建，
 > 这样冷启动更快、首屏白屏时间更短。
 
-> 说明：`start.bat` 内的提示文字为英文，这是刻意的——Windows cmd 默认按 GBK
-> 解析批处理文件，bat 中包含中文会被解析成乱码并报错（「不是内部或外部命令」）。
-> 请勿往 start.bat 里添加中文内容；页面内的中文显示不受影响。
+> 说明：提示文字现在**全部由 `start.py` 输出**（UTF-8），中文提示不再受 cmd 代码页影响。
+> 唯一仍要求「纯 ASCII」的是 `start.bat` 那 7 行壳——它不打印任何业务提示、只转发参数；
+> `scripts/check_start_bat.py` 会拦住任何非 ASCII 或裸 LF 的改动。
 
 ## 二、手动启动
 
@@ -280,8 +295,8 @@ set "NPM=%USERPROFILE%\.workbuddy\binaries\node\versions\%NODE_VER%\npm.cmd"
 | GET /api/routes/export | 导出路线达标 xlsx（每 SKU 三行路线） |
 | GET /api/transport | 货件运输看板：KPI + 按渠道/运输方式聚合 + 逐票判定明细 |
 | GET /api/transport/export | 导出货件运输明细 xlsx |
-| GET /api/alerts | 加急预警：P0/P1/P2 未闭环明细 + 盯数清单 + 数据新鲜度（route_check_sys 口径） |
-| GET /api/alerts/export?priority=P0 | 导出加急预警清单 xlsx（可按优先级过滤） |
+| GET /api/alerts | 加急预警：P0/P1/P2 未闭环明细 + 盯数清单 + 数据新鲜度（route_check_sys 口径）；另返回 `voidRows`（末端终止作废单）、`aliasRows`（换号旧号）与 `holdRows`（人工登记豁免），**三者都不催办、只单列备查**（判定次序：人工登记 > 换号 > 末端终止） |
+| GET /api/alerts/export?priority=P0 | 导出加急预警清单 xlsx（可按优先级过滤；含「已终止作废」「已换号」「已豁免」三张附加 sheet） |
 | GET /api/review/overview/export | 导出大流程复盘总览 xlsx（117 SKU 全量行） |
 | GET /api/watch | 联动提醒（页面内预警）：R1 素材可先行启动 / R2 签样缺失 + 按责任人提醒文案 |
 | GET /api/fillins | 手工填报：节点清单 + 未闭环 SKU + 全部记录 |
@@ -309,9 +324,12 @@ set "NPM=%USERPROFILE%\.workbuddy\binaries\node\versions\%NODE_VER%\npm.cmd"
 
 ## 六、MySQL 数据层
 
-数据库：本机 MySQL 8.0，库 `data_admin`（utf8mb4），四张表：
+数据库：本机 MySQL 8.0，库 `data_admin`（utf8mb4），七张表：
 `batch`（批次与文件指纹）/ `part_doc`（单据，含 raw JSON 原始列）/
-`approval_node`（审批节点）/ `rule_config`（时效规则）。
+`approval_node`（审批节点）/ `rule_config`（时效规则）/
+`product_catalog`（商品资料：评级档位 + 单价）/
+`sku_alias`（换号对照：旧SKU → 新SKU，真源 = 商品资料「SKU换号」子表）/
+`sku_hold`（人工登记豁免：业务上已不需走完流程 → 不催办，真源 = 商品资料「人工登记」子表）。
 
 ### 连接配置：两套环境
 

@@ -3,7 +3,7 @@
 backup.py — 命令行备份入口
 ============================
 与 POST /api/etl/backup 共用同一套逻辑（app.routers.dataadmin.run_backup），
-供 start.bat 的 backup 参数调用，避免两处实现漂移。
+供 start.py 的 backup 子命令调用（start.bat 只是转发壳），避免两处实现漂移。
 
 用法：
     backend\\etl\\backup.py

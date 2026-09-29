@@ -20,6 +20,15 @@ alerts.py — SKU 加急预警引擎（GET /api/alerts）
 
   卡点与停滞：第一个存在非「已结束」单据的 Part；停滞 = 今天 - 该 Part 未结束单据最新动态时间。
 
+  末端终止（2026-09-28 新增）：末尾 Part 单据**全部终止**且全 SKU 无「审批中」单据的，
+  判为**作废单** → 不进 P0/P1/P2 催办，改列 `voidRows`（不催办、仅备查），并识别
+  「同型号、终止后重开」的**承接单**（501→G501、G448→G481 均属此例）。
+
+  换号（2026-09-28 新增）：SKU 在流程中途**换了编码**（旧号停用、新号承接）的，旧号也不进
+  催办，改列 `aliasRows`。数据源 = `商品资料.xlsx · SKU换号` 子表（`app/sku_alias.py`）。
+  与「末端终止」的区别：作废单是**从数据里推断**的（末尾全终止 + 无在跑单据），换号是
+  **业务登记**的（数据里没有可靠信号）—— 所以两者判据独立、互不覆盖，命中换号优先。
+
 缓存：与复盘引擎共用 batch 表指纹，ETL 后自动失效。
 """
 
@@ -38,6 +47,63 @@ from .review import _cat_cond, _db_fingerprint, _fmt, _live_batch_ids, _parse_dt
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
 
 OK_STATUS = {"已结束", "结束", "已通过", "已完成"}
+
+# ---------------------------------------------------------------------------
+# 「末端终止（作废单）」判定 —— 2026-09-28 加急口径修正
+# ---------------------------------------------------------------------------
+# 背景：「终止」此前不在 OK_STATUS 里 → 被当成「未结束」，于是卡点落在**那张已终止
+# 的单据**上、停滞天数从终止日算起。实测 G448 报「Part2 停滞 447 天」、501 报
+# 「Part2 停滞 340 天」，都是误催办。
+#
+# 证据（真机数据）：终止 = 「撤回 / 填错重开」，不进入后续环节（见流程手册 Part 说明）。
+#   · 501（Xiaomi Redmi Note 15 Pro 5G）Part2 终止于 2025-10-23 14:46:00
+#     → G501 开单于 14:48:47（间隔 2 分 47 秒），且 G501 已闭环（valid=True）
+#   · G448（Xiaomi Poco F7 5G）Part2 终止于 2025-07-08 09:28:12
+#     → G481 开单于 09:30:01（间隔 1 分 49 秒），且 G481 已闭环
+#
+# 判据（②与「承接单」识别在离线 route_check_sys.write_warn_md 有同源实现，改一处必须同步改另一处）：
+#   ① 该 SKU 没有任何「审批中」单据 —— 流程是真的停住了，不是在跑
+#   ② 最后一个有单据的 Part 里，单据状态**全部**为「终止」
+# 命中即判为作废：不进 P0/P1/P2 催办清单，改列 voidRows（不催办、仅备查，不吞数据）。
+VOID_TERMINATED = "终止"
+VOID_NOTE = "流程已终止，不进入后续环节，不列入催办"
+
+# ---------------------------------------------------------------------------
+# 「换号（旧号 → 新号）」判定 —— 2026-09-28 新增
+# ---------------------------------------------------------------------------
+# 背景：G493/G494 这类 SKU 在流程中途换了编码（Galaxy S26 Pro/Edge → S26/S26+），
+# 旧号的钉钉流程永远停在半路 → 复盘报「缺节点」、预警把它当卡点催办 → 多余异常。
+#
+# ⚠️ 与「末端终止」判据**完全独立**，不能互相覆盖：
+#   · 作废单 = 从数据推断（末尾 Part 全终止 + 全 SKU 无在跑单据）；
+#   · 换号   = 业务登记（流程单据里没有结构化痕迹，见 app/sku_alias.py 的说明）。
+#   实测 G493/G494/G495 各自都还有 2~3 张「审批中」单据 → 永远不会被 `_void_info` 判中，
+#   所以必须有这条独立通道。
+#
+# 真源：`资产文件\商品资料.xlsx` 的 `SKU换号` 子表 → MySQL `sku_alias` → app/sku_alias.py。
+# 消费方：本模块（预警）、routers/review.py（复盘+甘特图）、离线 route_check_sys.py（预警 md）。
+ALIAS_NOTE = "流程中途换了编码（旧号→新号），旧号不列入催办"
+
+# ---------------------------------------------------------------------------
+# 「人工登记（免催办）」判定 —— 2026-09-28 新增
+# ---------------------------------------------------------------------------
+# 背景：有些新品业务上**已决定不再走完流程**（渠道取消 / 并入其它型号 / 末端环节实际不执行），
+# 但钉钉单据还挂在半路 → 预警把它当卡点催办 → 多余异常。
+# 实测 6 例（商品资料里全部「在售」）：
+#   · G495（Samsung Galaxy S26 Ultra 5G）P0 —— 卡 Part8 两张「手机上架确认」
+#     （2026-03-25 起悬挂「审批中」，停滞 187 天），且空运 83>60、海运 87>69 超底线；
+#   · G524~G528（Realme 16 Pro / Honor Magic8 Lite / Oppo Reno15 三兄弟）P1 ——
+#     卡 Part9/Part8，自 2026-02 停滞 187~236 天。
+#
+# ⚠️ 与「换号」「末端终止」是三件不同的事，判据互相独立：
+#   · **人工登记** = 业务登记「不再走完」→ 没有承接号（人工决策，**最先判**）；
+#   · **换号**     = 旧号停下、**新号承接**（也是业务登记）；
+#   · **末端终止** = **数据推断**（末尾 Part 单据全「终止」且无在跑单据）。
+#   三者都单列备查、都移出 P0/P1/P2，但只有前两者认人工维护的登记表。
+#
+# 真源：`资产文件\商品资料.xlsx` 的 `人工登记` 子表 → MySQL `sku_hold` → app/sku_hold.py。
+# 消费方：本模块（预警）、routers/review.py（复盘+甘特图）、离线 route_check_sys.py（预警 md）。
+HOLD_NOTE = "业务上已不需走完流程，人工登记后不列入催办"
 
 NEXT_BY_PART = {
     "Part1": "催李杰华取得手机数据",
@@ -291,6 +357,122 @@ def _pending_part(sku_data, today):
     return None, None, None
 
 
+# ---- 「末端终止（作废单）」实现（判据见文件头注释）----------------------------
+def _doc_running(d):
+    """该单据是否「还在跑」：非已结束、也非终止。"""
+    return d["status"] not in OK_STATUS and d["status"] != VOID_TERMINATED
+
+
+def _last_part_with_docs(data):
+    """最后一个有单据的 Part（Part1→Part9 顺序里最靠后的那个）。"""
+    last = None
+    for pk in PART_LIST:
+        if data["parts"].get(pk):
+            last = pk
+    return last
+
+
+def _void_info(data):
+    """末端终止 → (True, part, 终止时刻)；否则 (False, None, None)。"""
+    if any(_doc_running(d) for docs in data["parts"].values() for d in docs):
+        return False, None, None                    # 还有在跑的单据 → 不当作废
+    pk = _last_part_with_docs(data)
+    if pk is None:
+        return False, None, None
+    docs = data["parts"][pk]
+    if any(d["status"] != VOID_TERMINATED for d in docs):
+        return False, None, None                    # 末尾 Part 不是全终止
+    at = max((d["finish"] or d["update"] or d["create"] for d in docs), default=None)
+    return True, pk, at
+
+
+def _first_doc_at(data):
+    """该 SKU 最早一张单据的创建时间（判断承接单「重开得更晚」用）。"""
+    return min((d["create"] for docs in data["parts"].values()
+                for d in docs if d["create"]), default=None)
+
+
+def _find_successor(sku, model, at, by_sku, valid_map):
+    """承接单 = 同型号、开单时间晚于终止时刻、不是自己（取最早一张）。"""
+    model = (model or "").strip()
+    if not model or at is None:
+        return None
+    cands = []
+    for other, od in by_sku.items():
+        if other == sku or (od.get("model") or "").strip() != model:
+            continue
+        first = _first_doc_at(od)
+        if first and first > at:
+            cands.append({"sku": other, "firstAt": _fmt(first),
+                          "valid": bool(valid_map.get(other))})
+    cands.sort(key=lambda x: x["firstAt"])
+    return cands[0] if cands else None
+
+
+def _successor_note(successor):
+    if not successor:
+        return "无同型号承接单，疑似型号取消或重开未导入，请确认"
+    return (f"已由 {successor['sku']} 于 {successor['firstAt']} 重开"
+            + ("（承接单已闭环）" if successor["valid"] else "（承接单进行中）"))
+
+
+# ---- 「换号（旧号 → 新号）」实现（数据源见文件头注释）--------------------------
+def _latest_dyn(data):
+    """该 SKU 全部单据里最新的动态时间（更新 > 完成 > 创建）。"""
+    return max((d["update"] or d["finish"] or d["create"]
+                for docs in data["parts"].values() for d in docs
+                if (d["update"] or d["finish"] or d["create"])), default=None)
+
+
+def _alias_conclusion(new_sku, new_valid, new_has_flow):
+    """结论文案：换号后新号到底是闭环、在跑，还是压根没导进来。"""
+    if not new_has_flow:
+        return f"已换号 → {new_sku}（新号在本品类暂无流程单据，请确认是否已导入）"
+    if new_valid:
+        return f"已换号 → {new_sku}（新号已闭环，旧号不再催办）"
+    return f"已换号 → {new_sku}（新号流程进行中，旧号不再催办）"
+
+
+def _alias_row(sku, data, info, by_sku, valid_map, today):
+    """换号旧号的一行。新号状态从同一份 by_sku / valid_map 取，不另查库。"""
+    new = info.get("new") or ""
+    new_data = by_sku.get(new)
+    last = _latest_dyn(data)
+    return {
+        "sku": sku,
+        "model": data.get("model") or "",
+        "newSku": new,
+        "note": info.get("note") or "",
+        "effectiveAt": info.get("effectiveAt") or "",
+        "lastDynamic": _fmt(last),
+        "stuckDays": (max((today - last).days, 0) if last else None),
+        "newHasFlow": new_data is not None,
+        "newValid": bool(valid_map.get(new)) if new_data is not None else None,
+        "conclusion": _alias_conclusion(new, bool(valid_map.get(new)),
+                                        new_data is not None),
+        "note2": ALIAS_NOTE,
+    }
+
+
+# ---- 「人工登记（免催办）」实现（数据源见文件头注释）--------------------------
+def _hold_row(sku, data, info, today):
+    """人工登记 SKU 的一行（不催办、仅备查）。"""
+    last = _latest_dyn(data)
+    pP, stuck, _ = _pending_part(data, today)
+    return {
+        "sku": sku,
+        "model": data.get("model") or "",
+        "reason": info.get("reason") or "",
+        "registeredAt": info.get("registeredAt") or "",
+        "pendingPart": pP,
+        "pendingPartName": PART_NAMES.get(pP, pP or "") if pP else "",
+        "lastDynamic": _fmt(last),
+        "stuckDays": (max((today - last).days, 0) if last else None),
+        "conclusion": "业务上已不需走完流程，人工登记后不列入催办",
+        "note2": HOLD_NOTE,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 计算
 # ---------------------------------------------------------------------------
@@ -325,10 +507,51 @@ def compute_alerts(category=None):
     review = get_review_data(rs.key)
     valid_map = {sku: d["valid"] for sku, d in review["skuDetails"].items()}
 
+    # 换号对照（旧号 → 新号）。DB/子表缺失时返回 {} → 行为与改造前完全一致。
+    from ..sku_alias import load_aliases
+    aliases = load_aliases()
+
+    # 人工登记（业务上不再走完 → 免催办）。同样缺失即空 → 行为与改造前一致。
+    from ..sku_hold import load_holds
+    holds = load_holds()
+
     rows = []
+    void_rows = []
+    alias_rows = []
+    hold_rows = []
     for sku, data in by_sku.items():
         if valid_map.get(sku, False):
             continue                       # 已闭环不列入（route_check_sys 口径）
+
+        # 判定次序（2026-09-28）：**人工登记 > 换号 > 末端终止 > 催办**。
+        # 三者都命中时按「人工决策 > 业务登记 > 数据推断」取信，且都单列备查、不进催办。
+        _hd = holds.get(str(sku).strip().upper())
+        if _hd:
+            hold_rows.append(_hold_row(sku, data, _hd, today))
+            continue
+
+        # 换号（业务登记）优先于末端终止（数据推断）：两者都命中时，
+        # 「业务说它换号了」比「数据看着像作废」更可信。
+        _al = aliases.get(str(sku).strip().upper())
+        if _al:
+            alias_rows.append(_alias_row(sku, data, _al, by_sku, valid_map, today))
+            continue
+
+        # 末端终止（作废单）：不进催办清单，单列备查 —— 2026-09-28 口径修正
+        is_void, void_part, void_at = _void_info(data)
+        if is_void:
+            succ = _find_successor(sku, data.get("model"), void_at, by_sku, valid_map)
+            void_rows.append({
+                "sku": sku, "model": data.get("model") or "",
+                "part": void_part,
+                "partName": PART_NAMES.get(void_part, void_part or ""),
+                "terminatedAt": _fmt(void_at),
+                "stuckDays": (max((today - void_at).days, 0) if void_at else None),
+                "successor": succ,
+                "successorNote": _successor_note(succ),
+                "note": VOID_NOTE,
+            })
+            continue
 
         t_prop = _node_time(data, "Part1", prop_action)
         t_fetch = _nt(data, "fetch")
@@ -473,6 +696,12 @@ def compute_alerts(category=None):
     order = {"P0": 0, "P1": 1, "P2": 2}
     rows.sort(key=lambda r: (order[r["priority"]], -(r["stuckDays"] or 0), r["sku"]))
 
+    # 作废单排序：「无承接单」在前（更可能真需要人确认是不是漏重开），再按 SKU
+    void_rows.sort(key=lambda r: (r["successor"] is not None, r["sku"]))
+
+    # 换号排序：新号没流程的在前（更需要人确认），再按 SKU
+    alias_rows.sort(key=lambda r: (r["newHasFlow"], r["sku"]))
+
     # 盯数清单：按卡点环节归组
     watch = {}
     for r in rows:
@@ -501,6 +730,25 @@ def compute_alerts(category=None):
         "p0": sum(1 for r in rows if r["priority"] == "P0"),
         "p1": sum(1 for r in rows if r["priority"] == "P1"),
         "p2": sum(1 for r in rows if r["priority"] == "P2"),
+        "voidCount": len(void_rows),
+        "voidRows": void_rows,
+        "voidDef": {"part": "末端终止", "note": VOID_NOTE},
+        "aliasCount": len(alias_rows),
+        "aliasRows": alias_rows,
+        "aliasDef": {
+            "note": ALIAS_NOTE,
+            "source": "商品资料.xlsx · SKU换号 子表",
+            "registered": len(aliases),
+            "hitInCategory": len(alias_rows),
+        },
+        "holdCount": len(hold_rows),
+        "holdRows": hold_rows,
+        "holdDef": {
+            "note": HOLD_NOTE,
+            "source": "商品资料.xlsx · 人工登记 子表",
+            "registered": len(holds),
+            "hitInCategory": len(hold_rows),
+        },
         "dataLagDays": max((today - latest_dyn).days, 0) if latest_dyn else None,
         "latestDynamic": _fmt(latest_dyn),
         "rows": rows,
@@ -556,7 +804,12 @@ def _get_alerts_cached(category=None):
 
 @router.get("/export")
 def export_alerts(priority: str = None, category: str = None):
-    """导出加急预警清单 xlsx（可按优先级过滤），下一步建议合并为一列。"""
+    """导出加急预警清单 xlsx（可按优先级过滤），下一步建议合并为一列。
+
+    四个 sheet：「加急预警」（P0/P1/P2 催办清单）+「已终止作废」（末端终止的作废单）
+    +「已换号」（换号旧号）+「已豁免」（人工登记免催办）—— 后三个都是
+    **不催办、仅备查**，仅在未按优先级过滤时附上。
+    """
     import io
     import urllib.parse
 
@@ -611,6 +864,54 @@ def export_alerts(priority: str = None, category: str = None):
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="加急预警", index=False)
+        # 已终止/作废 sheet：仅在未按优先级过滤时附上（别把「只要 P0」的导出塞成两页）
+        if not priority:
+            vcols = ["SKU", "型号", "终止环节", "终止时间", "停滞(天)",
+                     "承接单", "承接单开单时间", "承接单已闭环", "结论"]
+            vout = [{
+                "SKU": r["sku"], "型号": r["model"],
+                "终止环节": f"{r['part']}·{r['partName']}" if r["part"] else "—",
+                "终止时间": r["terminatedAt"] or "",
+                "停滞(天)": r["stuckDays"] if r["stuckDays"] is not None else "",
+                "承接单": (r["successor"] or {}).get("sku", ""),
+                "承接单开单时间": (r["successor"] or {}).get("firstAt", ""),
+                "承接单已闭环": ("" if not r["successor"]
+                                else ("是" if r["successor"]["valid"] else "否")),
+                "结论": r["successorNote"],
+            } for r in (data.get("voidRows") or [])]
+            pd.DataFrame(vout, columns=vcols).fillna("").to_excel(
+                writer, sheet_name="已终止作废", index=False)
+
+            # 已换号 sheet（同样只在未过滤时附上）
+            acols = ["旧SKU", "型号", "新SKU", "换号说明", "生效日期",
+                     "旧号停滞(天)", "旧号最近动态", "新号有流程", "新号已闭环", "结论"]
+            aout = [{
+                "旧SKU": r["sku"], "型号": r["model"], "新SKU": r["newSku"],
+                "换号说明": r["note"], "生效日期": r["effectiveAt"],
+                "旧号停滞(天)": r["stuckDays"] if r["stuckDays"] is not None else "",
+                "旧号最近动态": r["lastDynamic"] or "",
+                "新号有流程": "是" if r["newHasFlow"] else "否",
+                "新号已闭环": "" if r["newValid"] is None else ("是" if r["newValid"] else "否"),
+                "结论": r["conclusion"],
+            } for r in (data.get("aliasRows") or [])]
+            pd.DataFrame(aout, columns=acols).fillna("").to_excel(
+                writer, sheet_name="已换号", index=False)
+
+            # 已豁免 sheet（人工登记免催办；同样只在未过滤时附上）
+            hcols = ["SKU", "型号", "卡点环节", "停滞(天)", "最近动态",
+                     "登记日期", "豁免说明", "结论"]
+            hout = [{
+                "SKU": r["sku"], "型号": r["model"],
+                "卡点环节": (f"{r['pendingPart']}·{r['pendingPartName']}"
+                             if r["pendingPart"] else "—"),
+                "停滞(天)": r["stuckDays"] if r["stuckDays"] is not None else "",
+                "最近动态": r["lastDynamic"] or "",
+                "登记日期": r["registeredAt"] or "",
+                "豁免说明": r["reason"] or "",
+                "结论": r["conclusion"],
+            } for r in (data.get("holdRows") or [])]
+            pd.DataFrame(hout, columns=hcols).fillna("").to_excel(
+                writer, sheet_name="已豁免", index=False)
     buf.seek(0)
     suffix = f"_{priority}" if priority else ""
     filename = urllib.parse.quote(f"加急预警清单{suffix}.xlsx")

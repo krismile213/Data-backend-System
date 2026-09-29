@@ -236,26 +236,38 @@ export default function Alerts() {
     <Box>
       <PageHeader
         title="加急预警与盯数清单"
-        subtitle={`口径：route_check_sys 系统口径 · 只列未闭环 SKU，停滞越久越靠前 · 计算于 ${data.computedAt}${segDef ? ` · 产品段 ${segDef.prodSeg} · 运营段 ${segDef.opsSeg}` : ''}`}
+        subtitle={`口径：route_check_sys 系统口径 · 只列未闭环 SKU，停滞越久越靠前 · 末端终止（作废单）不催办、单列备案 · 已换号（旧号→新号）不催办、单列备案 · 已豁免（人工登记·业务上不需走完）不催办、单列备案 · 计算于 ${data.computedAt}${segDef ? ` · 产品段 ${segDef.prodSeg} · 运营段 ${segDef.opsSeg}` : ''}`}
       />
 
       <Grid container spacing={2} sx={{ mb: 2 }}>
-        <Grid item xs={6} md={2.4}>
+        <Grid item xs={6} sm={4} md={3}>
           <KpiCard label="覆盖 SKU" value={data.totalSkus} sub="全部批次去重" />
         </Grid>
-        <Grid item xs={6} md={2.4}>
+        <Grid item xs={6} sm={4} md={3}>
           <KpiCard label="未闭环（预警中）" value={data.alertCount}
             sub="已闭环 SKU 不列入" color={SEMANTIC.warning} />
         </Grid>
-        <Grid item xs={4} md={2.4}>
+        <Grid item xs={4} sm={4} md={3}>
           <KpiCard label="P0 立即处理" value={data.p0}
             sub="空/海超底线 · 提案超期 · Part7停滞>7天" color={SEMANTIC.danger} />
         </Grid>
-        <Grid item xs={4} md={2.4}>
+        <Grid item xs={4} sm={4} md={3}>
           <KpiCard label="P1 重点跟进" value={data.p1}
             sub="产品段超时 · 停滞>7天 · 渠道缺口" color={SEMANTIC.warning} />
         </Grid>
-        <Grid item xs={4} md={2.4}>
+        <Grid item xs={4} sm={4} md={3}>
+          <KpiCard label="已终止·不催办" value={data.voidCount ?? 0}
+            sub="末端终止的作废单，单列备查" color={SEMANTIC.neutral} />
+        </Grid>
+        <Grid item xs={4} sm={4} md={3}>
+          <KpiCard label="已换号·不催办" value={data.aliasCount ?? 0}
+            sub="流程中途换编码，旧号不催办" color={SEMANTIC.neutral} />
+        </Grid>
+        <Grid item xs={4} sm={4} md={3}>
+          <KpiCard label="已豁免·不催办" value={data.holdCount ?? 0}
+            sub="人工登记：业务上已不需走完流程" color={SEMANTIC.neutral} />
+        </Grid>
+        <Grid item xs={6} sm={4} md={3}>
           <KpiCard label="数据新鲜度" value={data.dataLagDays === null ? '—' : `滞后 ${data.dataLagDays} 天`}
             sub={`全库最新动态 ${data.latestDynamic || '—'}`}
             color={data.dataLagDays >= 3 ? SEMANTIC.danger : SEMANTIC.success} />
@@ -322,6 +334,178 @@ export default function Alerts() {
           </Table>
         </TableContainer>
       </Paper>
+
+      {!!(data.voidRows || []).length && (
+        <Paper sx={{ mb: 2 }}>
+          <Box sx={{ p: 2 }}>
+            <Typography variant="subtitle2" gutterBottom>
+              已终止 · 不催办（{data.voidRows.length} 个）
+            </Typography>
+            <Typography variant="caption" color="text.secondary"
+              sx={{ display: 'block', mb: 1 }}>
+              判据：末尾 Part 单据<strong>全部「终止」</strong>且全 SKU 无「审批中」单据
+              —— 流程已作废（撤回 / 填错重开 / 型号取消），不进入后续环节，故不计入催办。
+              「承接单」= 同型号、在终止之后重开的那张单。
+            </Typography>
+            <TableContainer>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>SKU</TableCell>
+                    <TableCell>型号</TableCell>
+                    <TableCell>终止环节</TableCell>
+                    <TableCell>终止时间</TableCell>
+                    <TableCell align="right">停滞(天)</TableCell>
+                    <TableCell>承接单</TableCell>
+                    <TableCell>结论</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {data.voidRows.map((r) => (
+                    <TableRow key={r.sku} hover>
+                      <TableCell sx={{ fontWeight: 600 }}>{r.sku}</TableCell>
+                      <TableCell>{r.model || '—'}</TableCell>
+                      <TableCell>{r.partName ? `${r.part} · ${r.partName}` : (r.part || '—')}</TableCell>
+                      <TableCell>{(r.terminatedAt || '').slice(0, 16) || '—'}</TableCell>
+                      <TableCell align="right">{r.stuckDays ?? '—'}</TableCell>
+                      <TableCell>
+                        {r.successor
+                          ? `${r.successor.sku}（${r.successor.valid ? '已闭环' : '进行中'}）`
+                          : <span style={{ color: SEMANTIC.danger }}>无</span>}
+                      </TableCell>
+                      <TableCell>
+                        <Typography variant="caption"
+                          sx={{ color: r.successor ? 'text.secondary' : SEMANTIC.danger }}>
+                          {r.successorNote}
+                        </Typography>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </Box>
+        </Paper>
+      )}
+
+      {!!(data.aliasRows || []).length && (
+        <Paper sx={{ mb: 2 }}>
+          <Box sx={{ p: 2 }}>
+            <Typography variant="subtitle2" gutterBottom>
+              已换号 · 不催办（{data.aliasRows.length} 个）
+            </Typography>
+            <Typography variant="caption" color="text.secondary"
+              sx={{ display: 'block', mb: 1 }}>
+              判据：流程中途把编码换了（旧号停用、新号承接），旧号流程必然停在中途，
+              报「缺节点」属正常，<strong>不计入催办</strong>。真源 = 商品资料
+              <strong>「SKU换号」</strong>子表（业务登记，非自动推断）
+              {data.aliasDef?.registered != null
+                ? ` · 全库登记 ${data.aliasDef.registered} 对，本品类命中 ${data.aliasDef?.hitInCategory ?? data.aliasRows.length} 个`
+                : ''}。
+            </Typography>
+            <TableContainer>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>旧 SKU</TableCell>
+                    <TableCell>型号</TableCell>
+                    <TableCell>新 SKU</TableCell>
+                    <TableCell>换号说明</TableCell>
+                    <TableCell>生效日期</TableCell>
+                    <TableCell align="right">旧号停滞(天)</TableCell>
+                    <TableCell>旧号最近动态</TableCell>
+                    <TableCell>结论</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {data.aliasRows.map((r) => (
+                    <TableRow key={r.sku} hover>
+                      <TableCell sx={{ fontWeight: 600 }}>{r.sku}</TableCell>
+                      <TableCell>{r.model || '—'}</TableCell>
+                      <TableCell sx={{ fontWeight: 600, color: SEMANTIC.success }}>
+                        {r.newSku || '—'}
+                      </TableCell>
+                      <TableCell>
+                        <Typography variant="caption" color="text.secondary">{r.note || '—'}</Typography>
+                      </TableCell>
+                      <TableCell>{(r.effectiveAt || '').slice(0, 10) || '—'}</TableCell>
+                      <TableCell align="right">{r.stuckDays ?? '—'}</TableCell>
+                      <TableCell>{(r.lastDynamic || '').slice(0, 16) || '—'}</TableCell>
+                      <TableCell>
+                        <Typography variant="caption"
+                          sx={{ color: r.newHasFlow ? 'text.secondary' : SEMANTIC.warning }}>
+                          {r.conclusion}
+                        </Typography>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </Box>
+        </Paper>
+      )}
+
+      {!!(data.holdRows || []).length && (
+        <Paper sx={{ mb: 2 }}>
+          <Box sx={{ p: 2 }}>
+            <Typography variant="subtitle2" gutterBottom>
+              已豁免 · 不催办（{data.holdRows.length} 个）
+            </Typography>
+            <Typography variant="caption" color="text.secondary"
+              sx={{ display: 'block', mb: 1 }}>
+              判据：业务上<strong>已决定不再走完流程</strong>（渠道取消 / 并入其它型号 /
+              末端环节实际不执行），人工登记后流程仍停在中途属正常，
+              <strong>不计入催办</strong>。真源 = 商品资料<strong>「人工登记」</strong>子表
+              {data.holdDef?.registered != null
+                ? ` · 全库登记 ${data.holdDef.registered} 个，本品类命中 ${data.holdDef?.hitInCategory ?? data.holdRows.length} 个`
+                : ''}。
+            </Typography>
+            <TableContainer>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>SKU</TableCell>
+                    <TableCell>型号</TableCell>
+                    <TableCell>卡点环节</TableCell>
+                    <TableCell align="right">停滞(天)</TableCell>
+                    <TableCell>最近动态</TableCell>
+                    <TableCell>登记日期</TableCell>
+                    <TableCell>豁免说明</TableCell>
+                    <TableCell>结论</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {data.holdRows.map((r) => (
+                    <TableRow key={r.sku} hover>
+                      <TableCell sx={{ fontWeight: 600 }}>{r.sku}</TableCell>
+                      <TableCell>{r.model || '—'}</TableCell>
+                      <TableCell>
+                        {r.pendingPart
+                          ? `${r.pendingPart}·${r.pendingPartName || ''}`
+                          : '—'}
+                      </TableCell>
+                      <TableCell align="right">{r.stuckDays ?? '—'}</TableCell>
+                      <TableCell>{(r.lastDynamic || '').slice(0, 16) || '—'}</TableCell>
+                      <TableCell>{(r.registeredAt || '').slice(0, 10) || '—'}</TableCell>
+                      <TableCell>
+                        <Typography variant="caption" color="text.secondary">
+                          {r.reason || '—'}
+                        </Typography>
+                      </TableCell>
+                      <TableCell>
+                        <Typography variant="caption" color="text.secondary">
+                          {r.conclusion}
+                        </Typography>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </Box>
+        </Paper>
+      )}
 
       <Paper>
         <Box sx={{ p: 2 }}>

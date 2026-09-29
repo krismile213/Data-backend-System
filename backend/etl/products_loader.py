@@ -5,6 +5,11 @@ products_loader.py — 商品资料.xlsx → product_catalog 表（评级档位 
 损益推算的**唯一输入源**：`推迟天数 × 评级日均区间 × 单价`。
 档位→日均区间的解析规则见 `app/product_rules.py`（权威 = 商品资料表 A1 说明）。
 
+同时导入同文件的两张登记子表：
+  - **`SKU换号`** → `sku_alias` 表（旧号→新号，见 `app/sku_alias.py`）；
+  - **`人工登记`** → `sku_hold` 表（业务上不再走完流程 → 免催办，见 `app/sku_hold.py`）。
+三者共用一次文件指纹，避免「商品资料更新了但登记表还是旧的」半新半旧状态。
+
 两个入口共用本模块：
     ① CLI   : python backend/etl/products_loader.py [--force] [--path X.xlsx]
     ② 界面  : POST /api/etl/products（app/routers/dataadmin.py）
@@ -35,10 +40,15 @@ if str(BACKEND_DIR) not in sys.path:
 
 from app.config import STATE_DIR                                    # noqa: E402
 from app.db import SessionLocal, engine                             # noqa: E402
-from app.models import Base, PartDoc, ProductCatalog                 # noqa: E402
+from app.models import (Base, PartDoc, ProductCatalog, SkuAlias,      # noqa: E402
+                        SkuHold)
 from app.product_rules import (GRADE_RANGES, parse_grade_ranges,     # noqa: E402
                                range_of, save_grades)
 from app.rule_service import get_rules                              # noqa: E402
+from app.sku_alias import (ALIAS_SHEET, read_alias_from_wb,          # noqa: E402
+                           validate_alias_rows)
+from app.sku_hold import (HOLD_SHEET, read_hold_from_wb,             # noqa: E402
+                          validate_hold_rows)
 
 # 商品资料默认路径（rule_config 的 products_xlsx_path 优先）
 DEFAULT_XLSX = r"C:\Users\dell\Desktop\work-main\资产文件\商品资料.xlsx"
@@ -158,6 +168,8 @@ def import_products(session=None, force: bool = False, path=None) -> dict:
         "xlsxPath": str(src),
         "importedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "total": 0, "matchedSkuCount": 0, "gradeDist": {}, "priceType": PRICE_TYPE,
+        "aliasTotal": 0, "aliasSheet": ALIAS_SHEET,
+        "holdTotal": 0, "holdSheet": HOLD_SHEET,
         "elapsed": 0.0, "notes": notes, "lastError": "",
     }
 
@@ -175,6 +187,8 @@ def import_products(session=None, force: bool = False, path=None) -> dict:
                        total=idx.get("total", 0),
                        matchedSkuCount=idx.get("matchedSkuCount", 0),
                        gradeDist=idx.get("gradeDist", {}),
+                       aliasTotal=idx.get("aliasTotal", 0),
+                       holdTotal=idx.get("holdTotal", 0),
                        importedAt=idx.get("importedAt", summary["importedAt"]))
         notes.append("文件指纹未变化，已跳过（force=True 可强制重导）")
         return summary
@@ -241,6 +255,23 @@ def import_products(session=None, force: bool = False, path=None) -> dict:
             })
             if grade:
                 grade_dist[grade] = grade_dist.get(grade, 0) + 1
+
+        # ---- 换号对照（同一文件的『SKU换号』子表）----
+        # 与 product_catalog 同一次导入、同一份文件 → 商品资料一变，换号口径跟着变，
+        # 不会出现「商品资料更新了但换号还是旧的」这种半新半旧状态。
+        alias_rows, anotes = read_alias_from_wb(wb)
+        notes.extend(anotes)
+        alias_rows, vnotes = validate_alias_rows(
+            alias_rows, known_skus=[x["sku"] for x in rows])
+        notes.extend(vnotes)
+
+        # ---- 人工登记（同一文件的『人工登记』子表，业务上不再走完 → 免催办）----
+        # 与换号表同样的全量覆盖语义；两张子表一起随商品资料刷新，口径不会半新半旧。
+        hold_rows, hnotes = read_hold_from_wb(wb)
+        notes.extend(hnotes)
+        hold_rows, hvnotes = validate_hold_rows(
+            hold_rows, known_skus=[x["sku"] for x in rows])
+        notes.extend(hvnotes)
         wb.close()
         wb = None
 
@@ -260,6 +291,26 @@ def import_products(session=None, force: bool = False, path=None) -> dict:
         try:
             sess.execute(delete(ProductCatalog))
             sess.execute(ProductCatalog.__table__.insert(), rows)
+            # 换号表也是全量覆盖：子表里删掉/改掉的行必须跟着消失，
+            # 否则旧映射会一直留在库里继续误判「不催办」。
+            sess.execute(delete(SkuAlias))
+            if alias_rows:
+                sess.execute(SkuAlias.__table__.insert(), [{
+                    "old_sku": x["old"], "new_sku": x["new"],
+                    "note": x.get("note") or None,
+                    "effective_at": x.get("effectiveAt") or None,
+                    "updated_at": datetime.now(),
+                } for x in alias_rows])
+            # 人工登记同理全量覆盖：子表里删掉的行必须跟着消失，
+            # 否则已恢复推进的 SKU 会一直躺在「已豁免」里不再被催办。
+            sess.execute(delete(SkuHold))
+            if hold_rows:
+                sess.execute(SkuHold.__table__.insert(), [{
+                    "sku": x["sku"],
+                    "reason": x.get("reason") or None,
+                    "registered_at": x.get("registeredAt") or None,
+                    "updated_at": datetime.now(),
+                } for x in hold_rows])
             matched = _count_matched(sess, [x["sku"] for x in rows])
             if own_session:
                 sess.commit()
@@ -274,6 +325,8 @@ def import_products(session=None, force: bool = False, path=None) -> dict:
         summary.update(
             status="imported", fingerprint=fp, total=len(rows),
             matchedSkuCount=matched, gradeDist=dict(sorted(grade_dist.items())),
+            aliasTotal=len(alias_rows),
+            holdTotal=len(hold_rows),
         )
     except Exception as e:                       # noqa: BLE001 — 任何失败都落索引并回显
         summary["status"] = "failed"
@@ -301,6 +354,8 @@ def main(argv=None) -> int:
     print(f"[{s['status']}] {s['xlsxPath']}")
     print(f"  SKU 行数={s['total']}  与 part_doc 命中={s['matchedSkuCount']}  "
           f"单价口径={s['priceType']}  用时={s['elapsed']}s")
+    print(f"  换号对照（{s.get('aliasSheet')} 子表）= {s.get('aliasTotal', 0)} 条")
+    print(f"  人工登记（{s.get('holdSheet')} 子表）= {s.get('holdTotal', 0)} 条（免催办）")
     print(f"  档位分布: {s['gradeDist']}")
     for n in s["notes"]:
         print("  - " + n)

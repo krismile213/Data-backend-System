@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""start.py — 数据后台系统启动器（Python 版，不依赖 cmd.exe）
+"""start.py — 数据后台系统启动器（唯一真源 / 不依赖 cmd.exe）
 
 为什么会有这个文件：
     start.bat 依赖 cmd.exe 与批处理语法。本机安全策略会拦 cmd.exe，而批处理
     对引号 / 括号 / 标签 / 行尾 / 代码页又极其敏感 —— 改一次就可能「双击没反应」。
     这个启动器只用 Python 标准库，通过 subprocess 直接拉起 uvicorn 与 vite，
-    完全不经过 cmd.exe，能力与 start.bat 一一对齐。
+    完全不经过 cmd.exe。
 
-用法（命令行跑，或直接双击 start.py 都行；.py 已关联 py.exe）：
+    **2026-09-28 起：所有能力只在 start.py 实现，start.bat 瘦身为 7 行双击壳**
+    （只做 `python start.py %*` 转发）。为什么还留着那个壳：本机 .py 关联的是
+    IDE（双击 start.py 会打开编辑器而不是运行），所以得留一个 bat 给双击用；
+    但它不再承载任何逻辑，「两份实现漂移」这个老毛病也就没了。
+    壳的结构由 `scripts/check_start_bat.py` 守着（纯 ASCII / CRLF / 只转发）。
+
+用法（命令行跑，或直接双击 start.bat；.py 关联了 python 的机器上双击 start.py 也行）：
     python start.py             启动（已在跑的服务自动复用）
     python start.py restart     先杀掉 8000 / 5173 上的旧进程，再启动
     python start.py stop        停止两个服务
@@ -23,6 +29,7 @@
                                       / --export 路径.xlsx / --no-record（不拍快照）
     python start.py verify-live 隔离端口在线验收（另起 8001 + 5174 跑新代码，
                                 不打扰 8000/5173 上正在用的实例）
+    python start.py help        打印这份用法说明
     python start.py --no-pause  跑完不等回车（给脚本/自动化调用）
 """
 
@@ -457,7 +464,7 @@ def report(verbose: bool = True) -> tuple[bool, bool]:
 # main
 # ----------------------------------------------------------------------
 KNOWN = {"clean", "restart", "stop", "status", "check", "verify", "backup",
-         "open", "help", "delta"}
+         "open", "help", "delta", "verify-live"}
 
 
 def main(argv: list[str]) -> int:

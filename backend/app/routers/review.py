@@ -44,6 +44,8 @@ from ..review_rules import DEPARTMENTS, PART_NAMES
 from ..rule_service import get_rules
 # 手机膜口径仅作为 ruleset=None 时的兜底默认值（品类规则统一由 category_rules 分发）
 from ..seg_rules import AIR_TARGET, FOUR_COUNTRIES, SEA_TARGET
+from ..sku_alias import load_aliases
+from ..sku_hold import load_holds
 
 router = APIRouter(prefix="/api/review", tags=["review"])
 
@@ -696,6 +698,17 @@ def compute_review(category=None):
     docs = _load_sku_docs(rs.key)          # 只取本品类批次（品类隔离）
     products = load_product_catalog()
 
+    # 换号对照（旧号→新号）：单一真源 app/sku_alias.py（商品资料 · SKU换号 子表）
+    aliases = load_aliases()
+    alias_in_map = {}                      # 新号 -> [旧号…]（反向标注用）
+    for _o, _v in aliases.items():
+        alias_in_map.setdefault(_v.get("new") or "", []).append(_o)
+    for _v in alias_in_map.values():
+        _v.sort()
+
+    # 人工登记（业务上不再走完 → 免催办）：单一真源 app/sku_hold.py（商品资料 · 人工登记 子表）
+    holds = load_holds()
+
     # ---- 按 SKU 组织（同 SKU 跨批次合并；同 Part 重复单据只留最新） ----
     by_sku = {}
     dup_total = 0
@@ -752,6 +765,26 @@ def compute_review(category=None):
         dev = "提前开发" if (pub and t_sub and pub >= t_sub) else "常规开发"
 
         dept = _dept_final(nodes, parts_docs, rs)
+
+        # 人工登记（免催办）优先于换号：业务已决定「不再走完流程」时，把部门结论就地
+        # 改写为「人工豁免·不催办」，下游（复盘页/甘特图/预警）拿到的就是人话，
+        # 而不是一串待解释的「缺节点」。
+        _hd = holds.get(str(sku).strip().upper()) or {}
+        if _hd:
+            _mark = "人工豁免·不催办"
+            dept = {k: (v[0], (_mark if v[1] != "完成" else v[1]))
+                    for k, v in dept.items()}
+
+        # 换号（旧号 → 新号）：旧号的「缺节点」不是卡点，是流程被新号接管了。
+        # 这里把部门结论就地改写为「已换号 → 新号（不催办）」，下游（复盘页/甘特图/
+        # 预警）拿到的就是人话，而不是一串待解释的「缺节点」。
+        al_out = {} if _hd else (aliases.get(str(sku).strip().upper()) or {})
+        if al_out:
+            _new = al_out.get("new") or ""
+            _mark = f"已换号 → {_new}（不催办）"
+            dept = {k: (v[0], (_mark if v[1] != "完成" else v[1]))
+                    for k, v in dept.items()}
+
         dept_times = {k: v[0] for k, v in dept.items()}
         valid = all(t is not None for t in dept_times.values())
         reasons = [f"{k}{v[1]}" for k, v in dept.items() if v[1] != "完成"]
@@ -832,6 +865,13 @@ def compute_review(category=None):
             "multiRound": bool(multi_round.get("flag")),
             "delayDays": (assess or {}).get("delayDays"),
             "rootCauseType": (root_cause or {}).get("type"),
+            # 换号（2026-09-28）：总览行也带上，前端可在 SKU 旁标注
+            # 「已换号 → 新号」（旧号）或「承接 <旧号>」（新号）。
+            "aliasOut": (al_out.get("new") or "") or None,
+            "aliasIn": alias_in_map.get(str(sku).strip().upper(), []),
+            # 人工登记（2026-09-28）：holdOut=True 表示该 SKU 业务上已不需走完流程
+            "holdOut": bool(_hd),
+            "noChase": bool(al_out) or bool(_hd),
         })
         # 各 Part 单据状态汇总（场景诊断用：Part4 是否已结束、Part5 是否仍有在途）
         part_stat = {}
@@ -887,6 +927,22 @@ def compute_review(category=None):
             "multiRound": multi_round,
             "rootCause": root_cause,
             "assessment": assess,
+            # 换号（2026-09-28）：旧号→新号 / 反向承接。noChase=True 表示
+            # 「缺节点」已由换号解释，不应再当成卡点催办（加急预警据此移出 P0/P1/P2）。
+            "aliasOut": ({"new": al_out.get("new") or "",
+                          "note": al_out.get("note") or "",
+                          "effectiveAt": al_out.get("effectiveAt") or ""}
+                         if al_out else None),
+            "aliasIn": alias_in_map.get(str(sku).strip().upper(), []),
+            # 人工登记（2026-09-28）：业务上已不需走完流程 → 免催办。与换号并列，
+            # 但优先级更高（人工决策 > 业务登记）：两者同时存在时只认这条。
+            "hold": ({"reason": _hd.get("reason") or "",
+                      "registeredAt": _hd.get("registeredAt") or ""}
+                     if _hd else None),
+            "noChase": bool(al_out) or bool(_hd),
+            "chaseReason": ("人工登记：业务上已不需走完流程，不催办" if _hd
+                            else ("换号：流程已由新号承接，旧号不催办"
+                                  if al_out else "")),
         }
 
     # ---- 汇总 ----
@@ -968,6 +1024,21 @@ def compute_review(category=None):
         "persons": person_list,
         "overDaysDist": over_days_dist,
         "monthlyTrend": monthly,
+        # 换号对照快照（复盘页/甘特图直接用；与预警共用 app/sku_alias.py 同一真源）
+        #   count   = 全库登记对数（含其它品类）
+        #   outN    = 本品类里命中为「旧号」的 SKU 数（⚠️ 不含人工登记，单独计）
+        #   inN     = 本品类里命中为「新号」的 SKU 数
+        "aliases": {
+            "out": aliases, "in": alias_in_map, "count": len(aliases),
+            "outN": sum(1 for r in rows if r.get("aliasOut")),
+            "inN": sum(1 for r in rows if r.get("aliasIn")),
+        },
+        # 人工登记快照（业务上不再走完 → 免催办；与预警共用 app/sku_hold.py 同一真源）
+        #   count = 全库登记数（含其它品类）；outN = 本品类命中数
+        "holds": {
+            "rows": holds, "count": len(holds),
+            "outN": sum(1 for r in rows if r.get("holdOut")),
+        },
         "skuDetails": sku_details,
     }
 

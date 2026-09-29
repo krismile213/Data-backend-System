@@ -106,3 +106,42 @@ class ProductCatalog(Base):
     category = Column(VARCHAR(32))                    # 类型：钢化膜/水凝膜/手机壳…
     state = Column(VARCHAR(32))                       # 状态：在售/停售/不销售
     updated_at = Column(DATETIME, default=datetime.now)
+
+
+class SkuAlias(Base):
+    """SKU 换号对照（旧号 → 新号）—— 复盘/预警「不催办」判据的输入。
+
+    来源：`资产文件\\商品资料.xlsx` 的 **`SKU换号`** 子表（表头 `旧SKU|新SKU|换号说明|生效日期`）。
+    由 `backend/etl/products_loader.py` 随商品资料一并导入（全量覆盖）。
+
+    ⚠️ 为什么必须人工维护、不能自动推导：
+      ① 流程单据里**没有**任何结构化字段承载换号（实测 G493/G494 自己的单据完全不提 G510/G533，
+         反向只有 G510 一处自由文本「按 G493 的发货计划和采购计划进行」）；
+      ② 商品资料装配表里的「共用<旧号>」是**刀模/神器共用**，全库 125 个 SKU 都有 → 自动推导必然误伤。
+      换号是业务决策，只认这张表。
+    """
+    __tablename__ = "sku_alias"
+
+    old_sku = Column(VARCHAR(128), primary_key=True)   # 旧号（被替代）
+    new_sku = Column(VARCHAR(128), nullable=False)     # 新号（承接）
+    note = Column(Text)                                # 换号说明（业务原话）
+    effective_at = Column(VARCHAR(32))                 # 生效日期（文本，业务可空）
+    updated_at = Column(DATETIME, default=datetime.now)
+
+
+class SkuHold(Base):
+    """SKU 人工登记（免催办）—— 复盘/预警「不催办」判据的输入。
+
+    来源：`资产文件\\商品资料.xlsx` 的 **`人工登记`** 子表（表头 `SKU|说明|登记日期`）。
+    由 `backend/etl/products_loader.py` 随商品资料一并导入（全量覆盖）。
+
+    ⚠️ 与 SkuAlias（换号）的区别：换号是「旧号停下、**新号承接**」；
+      本表是「业务上**不再走完**流程」，没有承接号 —— 两者都是业务登记，判据互相独立，
+      也都与「末端终止（作废单，数据推断）」独立。
+    """
+    __tablename__ = "sku_hold"
+
+    sku = Column(VARCHAR(128), primary_key=True)       # 被豁免的 SKU
+    reason = Column(Text)                              # 豁免说明（业务原话）
+    registered_at = Column(VARCHAR(32))                # 登记日期（文本，业务可空）
+    updated_at = Column(DATETIME, default=datetime.now)

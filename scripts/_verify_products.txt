@@ -1,0 +1,26 @@
+GET /api/etl/products -> 200
+  hasTable: True
+  total: 621
+  matchedSkuCount: 114
+  gradeDist: {'(空)': 214, 'A': 22, 'B': 101, 'C': 180, 'D': 17, 'E': 24, 'X': 15, 'XA': 2, 'XB': 17, 'XC': 14, 'XD': 3, 'XE': 12}
+  priceType: 参考成本价
+  importedAt: 2026-09-28 16:46:17
+  xlsxPath: C:\Users\dell\Desktop\work-main\资产文件\商品资料.xlsx
+  lastError: 
+
+POST /api/etl/products -> 200  status=skipped
+
+-- product_catalog['G506'] --
+  sku=G506 model=Xiaomi Redmi Note 14 4G (Europe) category=钢化膜 state=在售
+  grade=XC daily_min=1.3800 daily_max=5.5000
+  price=12.0266 price_type=参考成本价
+
+  全表 621 行；样本 3 行：
+    B133ZH  grade=None daily=None~None price=11.3140 cat=水凝膜
+    B134ZH  grade=None daily=None~None price=11.3140 cat=水凝膜
+    B135ZH  grade=None daily=None~None price=11.3140 cat=水凝膜
+  档位填了但未命中档位表：0 行
+  无单价：3 行
+
+======================================================================
+RESULT: PASS

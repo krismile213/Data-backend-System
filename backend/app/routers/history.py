@@ -86,6 +86,10 @@ def _build_kpi(review_data, category=None) -> dict:
         "transportTotal": tk.get("total"),
         "transportOverRate": tk.get("overRate"),
         "p0": al.get("p0"), "p1": al.get("p1"), "p2": al.get("p2"),
+        "voidCount": al.get("voidCount"),
+        "aliasCount": al.get("aliasCount"),
+        # 人工登记豁免（T14）：必须与 alerts.holdCount 同名同源，否则周报/KPI 行读到 None
+        "holdCount": al.get("holdCount"),
         "scenA": next((s["count"] for s in sc["summary"] if s["code"] == "A"), 0),
         "scenB": next((s["count"] for s in sc["summary"] if s["code"] == "B"), 0),
         "scenC": next((s["count"] for s in sc["summary"] if s["code"] == "C"), 0),
@@ -265,6 +269,9 @@ def report(days: int = 7, category: str = None):
     L.append(_row("P0 预警", "p0", "", good_down=True))
     L.append(_row("P1 预警", "p1", "", good_down=True))
     L.append(_row("P2 预警", "p2", "", good_down=True))
+    L.append(_row("已终止作废（不计催办）", "voidCount", "", good_down=True))
+    L.append(_row("已换号（不计催办）", "aliasCount", "", good_down=True))
+    L.append(_row("已豁免·人工登记（不计催办）", "holdCount", "", good_down=True))
     L.append(_row("场景 A（素材未完成）", "scenA", "", good_down=True))
     L.append(_row("场景 C（发货未完成）", "scenC", "", good_down=True))
     L.append("")
@@ -282,7 +289,10 @@ def report(days: int = 7, category: str = None):
     L.append(f"- **货件运输**：共 {kl.get('transportTotal')} 票，"
              f"超时率 {kl.get('transportOverRate')}%")
     L.append(f"- **加急预警**：P0 {kl.get('p0')} / P1 {kl.get('p1')} /"
-             f" P2 {kl.get('p2')}")
+             f" P2 {kl.get('p2')}（另有已终止作废 {kl.get('voidCount')} 个，"
+             f"末端终止不进入后续环节，不计入催办；换号旧号 "
+             f"{kl.get('aliasCount')} 个；人工登记豁免 {kl.get('holdCount')} 个"
+             f"（业务上已不需走完流程）—— 后三类同样不计催办）")
     L.append(f"- **场景诊断**：A {kl.get('scenA')} · B {kl.get('scenB')} ·"
              f" C {kl.get('scenC')}")
     L.append("")

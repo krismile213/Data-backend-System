@@ -297,7 +297,27 @@ export default function Review() {
               {rows.map((r) => (
                 <TableRow key={r.sku} hover onClick={() => openDetail(r.sku)}
                   sx={{ cursor: 'pointer' }}>
-                  <TableCell sx={{ fontWeight: 600 }}>{r.sku}</TableCell>
+                  <TableCell sx={{ fontWeight: 600 }}>
+                    {r.sku}
+                    {r.holdOut && (
+                      <Tooltip title="人工登记：业务上已决定不再走完流程（流程停在中途属正常，不催办）">
+                        <Chip size="small" variant="outlined" color="warning" sx={{ ml: 0.75 }}
+                          label="已豁免" />
+                      </Tooltip>
+                    )}
+                    {r.aliasOut && (
+                      <Tooltip title={`流程中途换了编码：已由 ${r.aliasOut} 承接，旧号停在半路属正常，不催办`}>
+                        <Chip size="small" variant="outlined" sx={{ ml: 0.75 }}
+                          label={`换号 → ${r.aliasOut}`} />
+                      </Tooltip>
+                    )}
+                    {(r.aliasIn || []).length > 0 && (
+                      <Tooltip title={`承接旧号 ${r.aliasIn.join('、')} 的流程（原编码已停用）`}>
+                        <Chip size="small" variant="outlined" color="info" sx={{ ml: 0.75 }}
+                          label={`承接 ${r.aliasIn.join('/')}`} />
+                      </Tooltip>
+                    )}
+                  </TableCell>
                   <TableCell>{r.model || '—'}</TableCell>
                   <TableCell>
                     <Chip size="small" variant="outlined"
@@ -329,6 +349,23 @@ export default function Review() {
         </TableContainer>
         <Typography variant="caption" color="text.secondary" sx={{ p: 2, display: 'block' }}>
           共 {rows.length} 个 SKU · 口径：实际动作映射（每段=起点动作→终点动作）· 总贡献 = Σ(段目标 − 实际天数)，正数表示快于目标，负数表示超时（仅考核段计入）
+          {(data.aliases?.outN || data.aliases?.inN) ? (
+            <>
+              {' · '}
+              <span style={{ color: SEMANTIC.neutral }}>
+                换号：旧号 {data.aliases.outN ?? 0} 个（已换号→新号，不催办）·
+                新号 {data.aliases.inN ?? 0} 个（承接旧号流程）
+              </span>
+            </>
+          ) : ''}
+          {(data.holds?.outN) ? (
+            <>
+              {' · '}
+              <span style={{ color: SEMANTIC.neutral }}>
+                人工登记豁免 {data.holds.outN ?? 0} 个（业务上已不需走完流程，不催办）
+              </span>
+            </>
+          ) : ''}
         </Typography>
       </Paper>
 
@@ -430,6 +467,41 @@ export default function Review() {
                   复盘报告 md
                 </Button>
               </Box>
+              {(detail.hold || detail.noChase || (detail.aliasIn || []).length > 0) && (
+                <Box sx={{ mb: 2, p: 1.5, borderRadius: 1,
+                  border: '1px solid', borderColor: 'divider', bgcolor: 'action.hover' }}>
+                  <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+                    {detail.hold ? '已豁免（人工登记）· 不催办'
+                      : (detail.noChase ? '已换号（旧号）· 不催办' : '已承接旧号（新号）')}
+                  </Typography>
+                  {detail.hold && (
+                    <Typography variant="body2">
+                      业务上<strong>已决定不再走完流程</strong>（渠道取消 / 并入其它型号 /
+                      末端环节实际不执行），下面「未完成 / 缺节点」属正常，
+                      <strong>不计入催办</strong>。
+                      {detail.hold.reason ? ` 说明：${detail.hold.reason}` : ''}
+                      {detail.hold.registeredAt ? `（登记于 ${detail.hold.registeredAt}）` : ''}
+                    </Typography>
+                  )}
+                  {detail.aliasOut && (
+                    <Typography variant="body2">
+                      流程中途换了编码：<strong>{detailSku}</strong> → <strong>{detail.aliasOut.new}</strong>
+                      {detail.aliasOut.effectiveAt ? `（${detail.aliasOut.effectiveAt} 生效）` : ''}
+                      {detail.aliasOut.note ? ` · ${detail.aliasOut.note}` : ''}
+                      。旧号流程必然停在中途，下面「未完成 / 缺节点」属正常，不计入催办。
+                    </Typography>
+                  )}
+                  {(detail.aliasIn || []).length > 0 && (
+                    <Typography variant="body2">
+                      本号承接了旧号 <strong>{detail.aliasIn.join('、')}</strong>
+                      的流程（原编码已停用，旧号的异常不计入催办）。
+                    </Typography>
+                  )}
+                  <Typography variant="caption" color="text.secondary">
+                    真源：商品资料{detail.hold ? '「人工登记」' : '「SKU换号」'}子表（业务登记，非自动推断）
+                  </Typography>
+                </Box>
+              )}
               {detail.multiRound?.flag && (
                 <Box sx={{ mb: 2, p: 1.5, borderRadius: 1,
                   bgcolor: 'warning.light', color: 'warning.contrastText' }}>
