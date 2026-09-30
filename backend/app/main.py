@@ -23,6 +23,13 @@ async def lifespan(_app: FastAPI):
     """
     from .prewarm import warm_async
     warm_async("启动")
+    # 规则快照落盘（离线同源件 `流程复盘/route_check_sys.py` 读取）：保证后端每次启动后
+    # 快照都在位。import 写在函数内保持启动轻量；失败被内部吞掉，绝不影响启动。
+    try:
+        from .rule_service import export_rules_snapshot
+        export_rules_snapshot()
+    except Exception:
+        pass
     yield
 
 

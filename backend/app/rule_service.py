@@ -11,6 +11,7 @@ rule_service.py — 时效规则配置中心（MySQL rule_config 表）
 """
 
 import json
+import os
 import re
 import threading
 from datetime import datetime
@@ -194,7 +195,12 @@ def save_rules(patch: dict, updated_by: str = ""):
     with _lock:
         _state["rules"] = merged
         _state["version"] += 1
-        return _state["version"]
+        new_version = _state["version"]
+    # 规则快照落盘（离线同源件读取通道）：刻意放在 `with _lock:` **之外** —— 文件 IO
+    # 不持锁、不阻塞其它请求；写失败被 export_rules_snapshot 内部吞掉，绝不影响保存语义。
+    # DB 提交成功、内存 _state 已更新之后才写，保证快照与「已生效规则」一致。
+    export_rules_snapshot(merged, new_version)
+    return new_version
 
 
 def seg_target(rules: dict, seg_name: str, default):
@@ -220,3 +226,89 @@ def eff_lookup(rules, dev: str, part: str) -> dict:
     return {"confirmed": fb.get("confirmed"),
             "suggested": fb.get("suggested"),
             "available": False}
+
+
+# ===========================================================================
+# 规则快照（供**离线同源件**读取）
+# ---------------------------------------------------------------------------
+# 背景：`流程复盘/route_check_sys.py` 是**纯离线件、不连数据库**（项目约定「离线脚本
+# 不得 import 后端包」），因此读不到规则页 `rule_config.seg_targets` 的覆盖值 —— 于是
+# 「同一口径两个数」（在线页跟随规则、离线件恒用代码默认）会重现。
+#
+# 本通道是给离线件用的**单向只读通道，不是规则项**：后端在「保存规则」「每次启动」时把
+# 白名单键落成一个 JSON 文件；离线件只读该文件，不写、不回传。路径**不是**可编辑规则键
+# （不放进 _default_rules / RULE_META / _STR_KEYS，别再造一个「改了不生效」的旋钮）。
+#
+# ⚠️ 只落**白名单**键（SNAPSHOT_KEYS），**绝不** dump 整个 rules —— 里面含
+#    mail_auth_code / mail_user 等凭据明文，落到磁盘上等于把 SMTP 授权码泄露到离线件目录。
+# ===========================================================================
+RULES_SNAPSHOT_JSON_DEFAULT = r"C:\Users\dell\Desktop\work-main\资产文件\规则快照.json"
+SNAPSHOT_KEYS = ("seg_targets", "loss_route_limit")
+
+
+def snapshot_path() -> Path:
+    """快照文件路径：`RULES_SNAPSHOT_JSON` 环境变量优先，否则代码默认路径。
+
+    **每次调用都重新读 env**（不做模块级冻结），便于测试注入临时路径。
+    """
+    return Path(os.environ.get("RULES_SNAPSHOT_JSON") or RULES_SNAPSHOT_JSON_DEFAULT)
+
+
+def build_snapshot(rules: dict, version: int) -> dict:
+    """构造快照文档（纯函数，便于测试）。只取白名单键，不 dump 整个 rules。"""
+    return {
+        "schema": 1,
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "rules_version": version,
+        "source": "rule_config(name='main') + 代码默认值兜底",
+        "keys": list(SNAPSHOT_KEYS),
+        "rules": {k: rules.get(k) for k in SNAPSHOT_KEYS},
+    }
+
+
+def export_rules_snapshot(rules=None, version=None, path=None) -> dict:
+    """把当前规则的白名单键**原子**落盘，供离线同源件读取（单向只读通道）。
+
+    - `rules` 缺省取 `get_rules()`；`path` 缺省取 `snapshot_path()`。
+    - 原子写：先写 `path + ".tmp"` 再 `os.replace`（同目录重命名，避免离线件读到半截文件）；
+      父目录不存在时创建。
+    - **任何异常都吞掉**并返回 `{"ok": False, ...}` —— 这是给离线件的旁路，绝不能因为
+      写文件失败而让「保存规则 / 后端启动」失败。
+    """
+    if path is None:
+        path = snapshot_path()
+    else:
+        path = Path(path)
+    try:
+        if rules is None or version is None:
+            _r, _v = get_rules()
+            rules = _r if rules is None else rules
+            version = _v if version is None else version
+        doc = build_snapshot(rules, version)
+        text = json.dumps(doc, ensure_ascii=False, indent=2)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)          # 同目录原子替换
+        return {"ok": True, "path": str(path),
+                "rulesVersion": version, "bytes": len(text.encode("utf-8"))}
+    except Exception as e:             # noqa: BLE001 —— 旁路通道，任何异常都不许外抛
+        return {"ok": False, "path": str(path), "error": f"{type(e).__name__}: {e}"}
+
+
+def snapshot_status() -> dict:
+    """只读读取快照文件状态（供前端展示）。读不到/坏文件 → `exists=False`，绝不抛。"""
+    path = snapshot_path()
+    info = {"path": str(path), "exists": False,
+            "generatedAt": None, "rulesVersion": None, "keys": None}
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(doc, dict):
+            return info
+        info["exists"] = True
+        info["generatedAt"] = doc.get("generated_at")
+        info["rulesVersion"] = doc.get("rules_version")
+        info["keys"] = doc.get("keys")
+    except Exception:
+        pass
+    return info

@@ -129,6 +129,40 @@ class TestBackupList:
         assert names == sorted(names, reverse=True)
 
 
+class TestBackupListIgnoresScratch:
+    """加固回归：backups/ 下非备份目录（agent 测试 / scratch）不得进列表。
+
+    本机禁止批量删除，历轮 agent 跑测试会往 backups/ 落 `_qa` / `_git_damaged_*` /
+    `_pytest_tmp_snap` 等目录，把上面 test_item_fields 的严格断言（名字==15位时间戳）打破。
+    解法是**加固代码**（只列 `\\d{8}-\\d{6}` 目录），而非放宽断言。
+    """
+
+    def test_only_timestamp_dirs_listed(self, monkeypatch, tmp_path):
+        from app.routers import dataadmin
+
+        (tmp_path / "20260101-000000").mkdir()      # 真备份（名字匹配 %Y%m%d-%H%M%S）
+        (tmp_path / "not_a_backup").mkdir()         # scratch 目录
+        (tmp_path / "_pytest_tmp_snap").mkdir()     # 旧脚本落在 backups/ 的 scratch
+        (tmp_path / "20260101-000000.txt").write_text("x", encoding="utf-8")  # 非目录
+
+        monkeypatch.setattr(dataadmin, "BACKUP_DIR", tmp_path)
+        items = dataadmin.list_backups()["items"]
+        assert [i["name"] for i in items] == ["20260101-000000"]
+        # 结构/schema 不变（backupDir + item 字段）
+        assert "backupDir" in dataadmin.list_backups()
+        assert set(items[0]) == {"name", "createdAt", "sizeKB", "files"}
+
+    def test_non_timestamp_names_excluded_by_regex(self, monkeypatch, tmp_path):
+        from app.routers import dataadmin
+
+        for bad in ["_qa", "20260101-0000", "20260101_000000", "20260101-0000000", "backups"]:
+            (tmp_path / bad).mkdir()
+        (tmp_path / "20260101-000000").mkdir()
+        monkeypatch.setattr(dataadmin, "BACKUP_DIR", tmp_path)
+        names = [i["name"] for i in dataadmin.list_backups()["items"]]
+        assert names == ["20260101-000000"]
+
+
 # ---------------------------------------------------------------------------
 # 独立登记表（SKU登记表.xlsx）端点 —— 与 /api/etl/products 对称
 # ---------------------------------------------------------------------------

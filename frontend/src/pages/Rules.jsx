@@ -104,6 +104,8 @@ export default function Rules() {
 
   // 只读调度信息（自动管线实际触发时刻，真源 scripts/install_auto_etl.ps1）
   const pipeline = data.pipeline;
+  // 只读：规则快照（供离线同源件 流程复盘/route_check_sys.py 读取）的状态
+  const snap = data.snapshot;
 
   const setSegCfg = (name, field, value) => {
     setDraft((d) => {
@@ -302,6 +304,27 @@ export default function Rules() {
             —— 时刻由 Windows 计划任务决定，在页面上无法修改；要改请改脚本后重新注册
             （<code>powershell -NoProfile -ExecutionPolicy Bypass -File
             scripts\install_auto_etl.ps1</code>），并同步确认上游钉钉同步时间。
+          </Typography>
+        </Alert>
+
+        {/* 规则快照：只读。离线同源件 `流程复盘/route_check_sys.py` 启动时读取本文件，
+            以此跟随规则页的覆盖值；这里如实展示快照是否在位。路径不可在页面修改。 */}
+        <Alert
+          severity={snap?.exists ? 'info' : 'warning'}
+          sx={{ mt: 2 }}
+          icon={false}
+        >
+          <Typography variant="body2" component="div">
+            <strong>规则快照（离线件读取）：</strong>
+            {snap?.exists
+              ? `已生成 · 规则版本 v${snap.rulesVersion} · 生成于 ${snap.generatedAt}`
+              : '尚未生成 —— 离线件将使用代码默认值'}
+          </Typography>
+          <Typography variant="caption" color="text.secondary" component="div">
+            <code>{snap?.path || '资产文件\\规则快照.json'}</code>
+            {snap?.exists
+              ? ' —— 离线件 流程复盘/route_check_sys.py 运行时会读取本文件；改完规则后重跑该脚本即生效。'
+              : ' —— 保存一次规则或重启后端即会生成。'}
           </Typography>
         </Alert>
       </Paper>

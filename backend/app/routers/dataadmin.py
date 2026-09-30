@@ -15,6 +15,7 @@ dataadmin.py — 数据管理：批次扫描 / 导入触发 / 备份
     POST /api/etl/backup    立即备份（state 目录 + SKU登记表.xlsx + mysqldump 若可用）
 """
 
+import re
 import shutil
 import subprocess
 import sys
@@ -308,14 +309,20 @@ def _find_mysqldump() -> str | None:
     return shutil.which("mysqldump")
 
 
+# 真备份目录名 = run_backup 用 datetime.now().strftime("%Y%m%d-%H%M%S") 生成。
+# 只有匹配该格式的目录才是备份；backups/ 下其它目录（agent 测试 / scratch）一律忽略，
+# 否则「本机禁止批量删除」留下的杂目录会污染备份列表与它的消费者（页面 / 验收用例）。
+_BACKUP_NAME_RE = re.compile(r"^\d{8}-\d{6}$")
+
+
 @router.get("/backup")
 def list_backups():
-    """列出已有备份（按时间倒序）"""
+    """列出已有备份（按时间倒序）。只列 name 匹配 `\\d{8}-\\d{6}` 的真备份目录。"""
     if not BACKUP_DIR.exists():
         return {"backupDir": str(BACKUP_DIR), "items": []}
     items = []
     for d in sorted(BACKUP_DIR.iterdir(), reverse=True):
-        if not d.is_dir():
+        if not d.is_dir() or not _BACKUP_NAME_RE.match(d.name):
             continue
         files = {f.name: f.stat().st_size for f in d.iterdir() if f.is_file()}
         items.append({

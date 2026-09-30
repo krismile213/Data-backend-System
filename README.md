@@ -307,8 +307,8 @@ set "NPM=%USERPROFILE%\.workbuddy\binaries\node\versions\%NODE_VER%\npm.cmd"
 | GET /api/history | KPI 快照列表（访问即补拍） |
 | POST /api/history/snapshot | 立即补拍快照（force=True 同指纹强制记录） |
 | GET /api/history/report?days=7 | 生成周报/月报 markdown 下载 |
-| GET /api/rules | 时效规则配置（当前值 + 默认值 + 说明） |
-| PUT /api/rules | 合并保存规则（合法键/范围校验），保存后复盘与预警立即重算 |
+| GET /api/rules | 时效规则配置（当前值 + 默认值 + 说明；另含只读 `pipeline`（自动管线时刻）与 `snapshot`（离线件规则快照状态）） |
+| PUT /api/rules | 合并保存规则（合法键/范围校验），保存后复盘与预警立即重算；并把白名单规则键**随保存落盘**到 `资产文件\规则快照.json`（供离线件读取，见下） |
 | POST /api/rules/reset | 恢复代码内置默认规则 |
 | GET /api/etl/scan | 扫描数据目录，对照数据库返回各批次导入状态（待导入 / 已变更 / 已是最新 / 数据源缺失） |
 | POST /api/etl/import | 触发导入（batch 为空则处理全部，未变化的自动跳过；force=true 强制重导） |
@@ -334,6 +334,11 @@ set "NPM=%USERPROFILE%\.workbuddy\binaries\node\versions\%NODE_VER%\npm.cmd"
 > ℹ️ 2026-09-30（T15）：两张登记子表已从 `商品资料.xlsx` **迁出**到独立文件
 > `资产文件\SKU登记表.xlsx`。`商品资料.xlsx` 只负责 `product_catalog`（评级档位 + 单价）。
 > 登记改**独立文件**、不再改 `商品资料` 子表；过渡期（约 30 天）独立文件缺失时会回退读旧子表并打废弃告警。
+
+> ℹ️ 2026-09-30（T17）：`rule_config` 的**白名单键**（`seg_targets` / `loss_route_limit`）在后端
+> **保存规则**与**每次启动**时，被原子落盘为只读快照 `资产文件\规则快照.json` —— 供**纯离线同源件**
+> `流程复盘/route_check_sys.py`（不连库）读取，使离线产物也跟随规则页的覆盖值。快照**只读、不含
+> `mail_*` 凭据**，且**不是**可编辑规则项（页面上无法修改其路径）。见 `docs/system_design.md` §9 T17。
 
 ### 连接配置：两套环境
 

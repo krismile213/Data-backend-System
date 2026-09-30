@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from ..review_rules import PART_LIST
 from ..rule_service import (RULE_META, _default_rules, get_rules,
-                            pipeline_schedule, save_rules)
+                            pipeline_schedule, save_rules, snapshot_status)
 from ..seg_rules import seg_meta
 
 router = APIRouter(prefix="/api/rules", tags=["rules"])
@@ -67,6 +67,9 @@ def read_rules():
         # 只读：自动管线的实际触发时刻（真源 = scripts/install_auto_etl.ps1）。
         # 曾经是可编辑键 daily_pipeline_slots，与真实调度脱钩 → 2026-09-24 删除。
         "pipeline": pipeline_schedule(),
+        # 只读：规则快照（供离线同源件 `流程复盘/route_check_sys.py` 读取）的状态。
+        # 快照**不是**规则项：路径由 rule_service 决定，在页面上不可编辑。
+        "snapshot": snapshot_status(),
     }
 
 

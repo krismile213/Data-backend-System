@@ -1330,7 +1330,124 @@ analysis.detect_anomalies(l4_target=)      routers/review 段目标天 / 超时�
 ### 待办 / 风险
 
 - **离线件读不到规则页覆盖值**（见上「已知局限」）：规则页改了 22，`route_check_sys.py` 的数会不一致。
+  → **已于 T17 修复**（见下节：离线件通过 `资产文件\规则快照.json` 跟随规则页）。
 - `routers/review.py` 的 `cfg.get("target", def_target)` 已统一改走 `seg_target`；`available`（考核开关）
   仍读 `cfg.get("available", True)`，本次**未**触碰考核语义。
+
+## T17 离线同源件跟随规则页覆盖值 · 规则快照通道（2026-09-30）
+
+**用户问题**：T16 把「采购→发货末批 = 22 天」统一到规则页单一真源，但在线页跟随规则、**离线同源件
+`流程复盘/route_check_sys.py` 恒用代码默认值** —— 用户在规则页把该段目标天改掉后，离线件出的产物与
+在线页仍是「同一口径两个数」。这是 T16 遗留的最后一个漏洞。
+
+### 缺陷（改造前）
+
+离线件是**纯离线、不连数据库**（项目约定「离线脚本不得 import 后端包」），因此读不到规则页
+`rule_config.seg_targets` / `loss_route_limit` 的覆盖值；它把目标天写成自己的字面量：`SEGS` 每段第 5 项、
+`L4` 索引 3、`ASSESS_LIMIT = 60`。要彻底对齐，必须让离线件也能拿到「规则页当前值」。
+
+### 通道设计（白名单 + 原子写 + 触发时机 + 单向只读）
+
+```
+规则页 PUT /api/rules ─▶ save_rules()（DB 提交 + 内存 _state 更新后，**锁外**）
+后端启动 lifespan    ─▶ export_rules_snapshot()                ┐
+                                                               ▼
+                     资产文件\规则快照.json（白名单键，原子写）  ← 单向只读通道
+                                                               │ 离线件只读、不回写
+                                                               ▼
+流程复盘/route_check_sys.py  load_rule_snapshot() ─▶ _apply_rule_snapshot()
+                             ─▶ 覆盖 SEGS / L4 / ASSESS_LIMIT ─▶ 输出产物
+```
+
+- **真源仍是规则页**（`rule_service.get_rules()`）；快照只是它的**只读投影**，不是规则项。
+- **白名单**：只落 `SNAPSHOT_KEYS = ("seg_targets", "loss_route_limit")`，**绝不** dump 整个 rules ——
+  `rules` 里含 `mail_auth_code` / `mail_user` 等**凭据明文**，落盘等于把 SMTP 授权码泄露到离线件目录。
+- **原子写**：先写 `*.tmp` 再 `os.replace`（同目录重命名），避免离线件读到半截文件；父目录不存在时创建。
+- **触发时机（两处，缺一不可）**：
+  1. `save_rules()`：DB 提交成功、`_state` 更新**之后**落盘，且调用点在 `with _lock:` **之外**
+     （持锁不做文件 IO；不改变「DB 失败不污染内存」语义）；
+  2. `main.py::lifespan`：`warm_async("启动")` 之后调用一次，保证后端每次启动后快照都在位。
+- **失败一律吞掉**：`export_rules_snapshot` 返回 `{"ok": bool, ...}`，任何异常都不外抛 —— 绝不能让
+  「保存规则 / 启动」因写文件失败而失败。
+- **路径不是可编辑规则键**：不进 `_default_rules` / `RULE_META` / `_STR_KEYS`，也**不新增 PUT 端点**
+  （`save_rules` 已自动落盘）。避免再造一个「改了不生效」的旋钮（同 T08 删 `daily_pipeline_slots` 的教训）。
+- 只读状态 `snapshot_status()` 挂在 `GET /api/rules` 的 `snapshot` 字段（与 `pipeline` 同级），前端只读展示。
+
+### 快照格式（真实生成样例）
+
+```json
+{
+  "schema": 1,
+  "generated_at": "2026-09-30 17:17:42",
+  "rules_version": 2,
+  "source": "rule_config(name='main') + 代码默认值兜底",
+  "keys": ["seg_targets", "loss_route_limit"],
+  "rules": {
+    "seg_targets": { "采购→发货末批": {"target": 22, "available": true}, "...": {} },
+    "loss_route_limit": 60
+  }
+}
+```
+
+### 离线侧回退与告警
+
+`load_rule_snapshot(path=None) -> (rules 字典, 告警行列表)`：路径取 `RULES_SNAPSHOT_JSON` 环境变量 →
+代码默认 `资产文件\规则快照.json`。文件**不存在 / JSON 坏 / 顶层非对象 / 缺 `rules`** → 返回 `({}, [一句明确告警])`，
+**绝不抛异常**；`schema != 1` 给告警但仍尽量使用可解析内容。模块级立即 `_apply_rule_snapshot(...)` 应用覆盖并
+`print()` 留痕（如 `[规则快照] 已应用 1 项覆盖：采购→发货末批 22→30；其余使用代码默认值` /
+`[规则快照] 未找到 <path>，全部使用代码默认值`）；缺失/损坏**决不静默**——静默回退正是「同一口径两个数」的温床。
+
+- `SEGS`：按**段名**匹配 `seg_targets[name]["target"]`（列表第 5 项），快照未覆盖的段保留默认值；
+- `L4`：按 `seg_targets["采购→发货末批"]["target"]` 覆盖（元组索引 3）；
+- `ASSESS_LIMIT`：`loss_route_limit` 存在时覆盖；
+- `__GAP__` 留空段不参与覆盖（不是真段，判定恒为「—留空」）。
+
+### null 语义对齐（与 T16 逐字一致）
+
+- `judge_seg(d, target, seg_name="")`：在 `d is None` / `d < 0` **之后**、`取数→签样` 过短检查**之前**插入
+  `if target is None: return "—未设目标"` —— 顺序与 `routers/review.py::_seg_judge` 逐字一致
+  （⚠反向/缺时间属数据质量判定，不因「没设目标」消失）。
+- `not_shipped_judge`：宽限天数为 `None`（规则页把该段留空）→ 返回**中性档**（`未发货` 且说明写「未设目标天，不判超时」），
+  **不抛异常**、`n` 照常算。
+- 展示层：目标天为 `None` 时，xlsx 单元格（`write_table` 的 `目标(天)` 列）与 md 文本（段级明细 / 异常汇总 /
+  货件运输明细）统一写 `—`。**行字典里仍保留 None**（不改成字符串），以免 `inflight_state` 等按数值语义判定处
+  发生 `str <= 0` 报错。
+
+### 一致性与验收
+
+- 同源双实现：后端 `rule_service.RULES_SNAPSHOT_JSON_DEFAULT` 与离线件 `RULES_SNAPSHOT_JSON_DEFAULT`
+  **逐字相同**（由 `tests/test_rules_snapshot.py` 兜底），改一处必须同步改另一处。
+- 新增 `tests/test_rules_snapshot.py`（23 例）：同源常量、离线件不 import 后端包、默认零漂移、覆盖生效、
+  null 不崩、坏/缺快照不崩、后端原子导出 + 白名单（不含 `mail_`）、`save_rules` 触发落盘（假 session 不碰生产库）。
+- 全量 `pytest tests/ -q` → **391 passed + 1 skipped**（T16 基线 368 + 新增 23）。
+
+### 零漂移证据
+
+同机同会话内，「无快照」跑一次（改动后）与「改动前」逐文件比对：md 正文除首行 `生成时间`（分钟级，
+两次运行天然不同分钟）外**逐字节相同**；xlsx 各 sheet 解包比对仅 `docProps/core.xml`（openpyxl 写入的
+时间戳）不同、数据成员全等。再用 `RULES_SNAPSHOT_JSON=<tmp 快照，采购→发货末批=30>` 跑一次，产物
+出现方向正确的变化（「> 22 天」→「> 30 天」、`目标(天)` 列 22→30）。
+
+### 附带加固：`list_backups()` 只列真备份目录（2026-09-30）
+
+**背景（两天内第三次被打破）**：本机禁止批量删除，历轮 agent 跑测试会往 `backups/` 落 scratch 目录
+（T15 `_qa` / `_git_damaged_*`、T16 同类、T17 `_pytest_tmp_snap`），而 `routers/dataadmin.py::list_backups()`
+原先「列出 `backups/` 下**所有**子目录」，于是把 scratch 目录也当备份返回，破坏了
+`tests/test_dataadmin.py::TestBackupList::test_item_fields` 的严格断言（名字须为 15 位 `YYYYMMDD-HHMMSS`）。
+
+**修法（加固代码，**不**放宽断言）**：`list_backups()` 只列名字匹配 `^\d{8}-\d{6}$` 的子目录
+（真备份即 `run_backup` 的 `datetime.now().strftime("%Y%m%d-%H%M%S")` 产物）；非时间戳目录**忽略**。
+返回结构 `{backupDir, items}` 与 item 字段（name/createdAt/sizeKB/files）**保持不变**。
+新增用例：`test_dataadmin.py::TestBackupListIgnoresScratch`（monkeypatch `BACKUP_DIR` 到 tmp，造
+`not_a_backup/` + `20260101-000000/` → 只列后者；**不在真 `backups/` 造目录**）。
+
+> ⚠️ 约定：scratch 一律用 `$TEMP` 或仓库根被 `/_*` 忽略的目录，**不要**放 `backups/`。
+
+### 遗留 / 风险（尚未覆盖的字面量）
+
+- 运输汇总行目标 `AIR_TARGET/SEA_TARGET = 15/35`、4 国单独行口径：**故意不动** —— 它们属
+  `route_check.py`（**已归档件**）/ 运输段自带口径，不在本次「段目标天」范围内；若要统一需单独立项。
+- 离线件 `SEGS` 的**段集合本身**仍与代码默认一致（快照只覆盖**目标天**，不新增/删除段）；规则页新增段
+  仍需同步改离线件 `SEGS`（与 T16 同）。
 
 
