@@ -357,6 +357,8 @@ export default function Rules() {
                         onChange={(e) => setSegCfg(s.name, 'target',
                           e.target.value === '' ? null : Number(e.target.value))}
                         sx={{ width: 90 }}
+                        helperText={(cfg.target === null || cfg.target === undefined)
+                          ? '留空 = 该段不设目标（不判超时）' : ''}
                         error={cfg.target !== null && cfg.target !== undefined
                           && (!Number.isFinite(Number(cfg.target)) || cfg.target < 0)} />
                     </TableCell>

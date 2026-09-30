@@ -41,7 +41,7 @@ from ..reporting import assessment_report as _assessment_xlsx
 from ..reporting import route_limits
 from ..reporting import sku_check_report as _skucard_xlsx
 from ..review_rules import DEPARTMENTS, PART_NAMES
-from ..rule_service import get_rules
+from ..rule_service import get_rules, seg_target
 # 手机膜口径仅作为 ruleset=None 时的兜底默认值（品类规则统一由 category_rules 分发）
 from ..seg_rules import AIR_TARGET, FOUR_COUNTRIES, SEA_TARGET
 from ..sku_alias import load_aliases
@@ -419,6 +419,11 @@ def _seg_judge(d, target, seg_name="", backfill_ok=False):
         if backfill_ok:
             return f"—补录({_fmt_days(d)}天·先线下后补录)"
         return f"⚠反向({_fmt_days(d)}天)"
+    if target is None:
+        # 规则页把该段目标天清空（target=null）→「该段不设目标天」→ 不判超时。
+        # 放在 d<0 之后：⚠反向 / —补录 属数据质量判定，不因「没设目标」而消失。
+        # （不考核另有 available 开关，与本语义不冲突。）
+        return "—未设目标"
     if seg_name == "取数→签样" and d < 9:
         return f"⚠过短({_fmt_days(d)}<9天)"
     return "✓" if d <= target else f"✗超{_fmt_days(d - target)}天"
@@ -540,7 +545,8 @@ def review_sku_segments(sku, parts_docs, rules, restrict=None, ruleset=None):
     seg_rows = []
     for dept, name, n0, n1, def_target, owner, note, is_gap in rs.segs:
         cfg = seg_targets.get(name) or {}
-        target = cfg.get("target", def_target)
+        # 段目标天：规则页 seg_targets 优先，缺失回退代码默认（与 analysis.py 同一真源）
+        target = seg_target(rules, name, def_target)
         available = bool(cfg.get("available", True))
         nd0, nd1 = nodes[n0], nodes[n1]
         t0, src0 = nd0["adopted"], nd0["src"]
@@ -574,7 +580,8 @@ def review_sku_segments(sku, parts_docs, rules, restrict=None, ruleset=None):
     # 后勤④ 采购→发货末批（多货件取末批发货日期）
     dept, name, n0, def_target, owner, note = rs.l4
     cfg = seg_targets.get(name) or {}
-    target = cfg.get("target", def_target)
+    # 段目标天：规则页 seg_targets 优先，缺失回退代码默认（与 analysis.py 同一真源）
+    target = seg_target(rules, name, def_target)
     nd_purchase = nodes[n0]
     ship_days = [it["ship"] for it in items if it["ship"] is not None]
     last_ship = max(ship_days) if ship_days else None
@@ -604,7 +611,8 @@ def review_sku_segments(sku, parts_docs, rules, restrict=None, ruleset=None):
     for it in items:
         if not it.get("noShip"):
             continue
-        over = stall_days is not None and stall_days > target
+        over = (target is not None and stall_days is not None
+                and stall_days > target)
         it["stallDays"] = stall_days
         it["judge"] = (f"✗超时未发货(采购后{stall_days:.0f}天)" if over
                        else (f"⏳未发货(采购后{stall_days:.0f}天)"
@@ -801,7 +809,9 @@ def compute_review(category=None):
         # 段贡献与统计（留空段/未考核段不计）
         contrib_total, contrib_n = 0.0, 0
         for r in seg_rows:
-            if r["gap"] or not r["assessed"] or r["days"] is None:
+            # target=None（规则页清空该段目标天）= 该段不设目标 → 不计贡献、不进段统计
+            if (r["gap"] or not r["assessed"] or r["days"] is None
+                    or r["target"] is None):
                 continue
             contrib = round(r["target"] - float(r["days"]), 2)
             contrib_total += contrib

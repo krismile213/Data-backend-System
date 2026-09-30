@@ -197,6 +197,18 @@ def save_rules(patch: dict, updated_by: str = ""):
         return _state["version"]
 
 
+def seg_target(rules: dict, seg_name: str, default):
+    """取段级目标天：规则页可编辑值优先，缺失回退 default。
+
+    ⚠️ 语义必须与 review.py 既有写法 `cfg.get("target", def_target)` **逐字一致**：
+    键存在但值为 None 时返回 None（= 规则页显式留空），**不是**回退 default。
+
+    「渠道未发货超时判定线」等所有消费方都走这一个入口，保证同一口径只有一个真源。
+    """
+    cfg = (rules.get("seg_targets") or {}).get(seg_name) or {}
+    return cfg.get("target", default)
+
+
 def eff_lookup(rules, dev: str, part: str) -> dict:
     """取 开发类型×Part 的目标配置；缺失回退常规开发（口径同 review_rules.eff_cfg）。"""
     t = rules["part_targets"].get(dev, {}).get(part)

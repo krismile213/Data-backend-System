@@ -8,7 +8,16 @@ analysis.py — 时效统计与异常识别核心（移植自现有时效分析�
   - 异常识别：审批编号缺失/重复、审批记录为空、终止单据、已结束缺终节点、
     长期停滞（审批中且超过 max(3天, 该环节已结束单据全流程P90)）、
     环节耗时超长（> max(7天, Q3+1.5*IQR)）、分段耗时异常小（疑似补录）、
-    流程回退/重做、节点时间乱序、业务时间列缺失。
+    流程回退/重做、节点时间乱序、业务时间列缺失、
+    渠道未发货超时（判定线见下）。
+
+口径（渠道未发货超时判定线）：
+  「渠道未发货超时」判定线 = **规则页 seg_targets『采购→发货末批』**（可在 /api/rules 调整），
+  兜底值 = **该品类 seg_rules 的 L4 目标天**（手机膜 22 / 手机壳名义值），
+  两者统一经 `rule_service.seg_target()` 取值 —— 与复盘页同一真源，不再各自硬编码。
+  ⚠️ 批次缓存同时以**数据文件指纹 + 规则版本**为键：改目标天后批次页也会重算。
+  ⚠️ `seg_target` 返回 None（规则页把该段目标天显式清空 target=null）时，
+     统一语义 = **该段不设目标天 → 不判超时**（批次页仍产出中性「渠道未发货」，不丢数据）。
 
 本模块同时负责批次数据的加载与缓存（进程内字典缓存）。
 """
@@ -20,14 +29,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .category_rules import category_of_text, rules_for
 from .config import (FILE_GLOB, PART_CONFIGS, TEXT_SAFE_COLS, THRESHOLD,
                      get_batch_dir)
 from .parser import (action_occurrences, get_key_action_time,
                      load_part_file, parse_approval_record)
-from .seg_rules import L4 as _L4_SEG
-
-# 渠道未发货超时判定线：采购→发货末批目标天（seg_rules.L4）
-L4_TARGET_DAYS = _L4_SEG[3]
+from .rule_service import get_rules, seg_target
 
 # ---------------------------------------------------------------------------
 # 工具函数
@@ -175,10 +182,24 @@ def compute_statistics(flow_dict):
 # 异常排查（口径与现有分析程序完全一致）
 # ---------------------------------------------------------------------------
 
+# detect_anomalies 的 l4_target 缺省哨兵：
+#   「调用者没传参」（_UNSET） 与 「规则页把该段目标天显式清空」（None）必须区分——
+#   前者回落到默认品类的 L4 目标天（向后兼容），后者表示「未设目标 → 不判超时」。
+_UNSET = object()
+
 
 def detect_anomalies(part_key, df, actions, base_time, outlier_map, med_map,
-                     p90_flow):
-    """对单个 Part 做异常排查，返回异常记录 list[dict]"""
+                     p90_flow, l4_target=_UNSET):
+    """对单个 Part 做异常排查，返回异常记录 list[dict]。
+
+    l4_target：渠道未发货超时判定线（天），三态语义：
+      - 不传（缺省哨兵 `_UNSET`）= 直接调用者未提供 → 兜底为**默认品类的 L4 目标天**
+        （= 22），保证直接调用 detect_anomalies 的行为与改造前逐字一致；
+      - `None` = 规则页把「采购→发货末批」目标天**显式清空**（target=null）→ 视为
+        「未设目标 → 不判超时」：该条**仍照常产出中性「渠道未发货」**，只是不升级为
+        「渠道未发货(超时)」；
+      - 数值 = 正常比较（wait > l4_target 即超时）。
+    """
     cfg = PART_CONFIGS[part_key]
     stuck_ref = max(THRESHOLD["stuck_hours"], p90_flow or 0)
     issues = []
@@ -309,10 +330,16 @@ def detect_anomalies(part_key, df, actions, base_time, outlier_map, med_map,
                 issues.append(item)
 
     # 12) Part5 渠道未发货（有发往渠道仓库但无货件号/发货记录）
-    #     独立异常类型：超过采购→发货末批目标(seg_rules.L4=22天)仍未建货件
-    #     判为「渠道未发货(超时)」，与「采购→发货末批超时」区分
+    #     独立异常类型：超过『采购→发货末批』目标（= 规则页 seg_targets 取值，
+    #     兜底 = 该品类 seg_rules.L4[3]）仍未建货件 → 判「渠道未发货(超时)」，
+    #     与「采购→发货末批超时」区分。
+    #     l4_target 为 None（规则页显式留空）= 未设目标 → 不判超时，但仍产出中性
+    #     「渠道未发货」（不整块跳过，避免丢数据）。
     if part_key == "Part5" and "发往渠道仓库" in df.columns:
-        ship_limit_days = L4_TARGET_DAYS
+        ship_limit_days = l4_target
+        if ship_limit_days is _UNSET:
+            # 未传参（直接调用者）→ 函数内兜底：默认品类（手机膜）的 L4 目标天（= 22）
+            ship_limit_days = rules_for(None).l4[3]
         for _, row in df.iterrows():
             hub = str(row.get("发往渠道仓库", "") or "").strip()
             if not hub or hub.lower() == "nan":
@@ -331,7 +358,7 @@ def detect_anomalies(part_key, df, actions, base_time, outlier_map, med_map,
             if create_t is not None and base_time is not None:
                 wait_d = (base_time - create_t).days
                 note += f"，建单已 {wait_d} 天"
-                if wait_d > ship_limit_days:
+                if ship_limit_days is not None and wait_d > ship_limit_days:
                     kind = "渠道未发货(超时)"
                     note += f"（超过采购→发货目标 {ship_limit_days} 天仍未建货件）"
             push(kind, note)
@@ -363,6 +390,9 @@ class BatchData:
         self.name = name
         self.path = path
         self.fingerprint = _dir_fingerprint(path)
+        # 品类（按批次名/数据目录推断）+ 规则版本（规则改动后缓存据此失效）
+        self.category = category_of_text(name, str(path))
+        self.rules_version = get_rules()[1]
         self.base_time = None
         self.raw = {}         # part -> 原始 DataFrame
         self.flow = {}        # part -> (flow_df, actions)
@@ -400,12 +430,21 @@ class BatchData:
                 flow[flow["审批状态"] == "已结束"]["全流程总耗时(h)"],
                 errors="coerce").dropna()
             self.p90_flow[pk] = p90(s)
+        # 渠道未发货超时判定线 = 规则页 seg_targets『采购→发货末批』（可在 /api/rules 调整），
+        # 兜底值 = 该品类 seg_rules 的 L4 目标天。与复盘页同一真源（rule_service.seg_target）。
+        # ⚠️ seg_target 可能返回 None（规则页把该段目标天显式清空 target=null）——
+        #    这里**不做** None→22 的转换，原样传给 detect_anomalies（None=未设目标→不判超时）。
+        rs = rules_for(self.category)
+        _l4_name = rs.l4[1]        # "采购→发货末批"
+        _l4_default = rs.l4[3]     # 该品类默认目标天（手机膜 22 / 手机壳名义值）
+        l4_target = seg_target(get_rules()[0], _l4_name, _l4_default)
         # 异常排查
         for pk, df in self.raw.items():
             flow, actions = self.flow[pk]
             self.anomalies.extend(detect_anomalies(
                 pk, df, actions, self.base_time,
-                self.outlier_map, self.med_map, self.p90_flow.get(pk)))
+                self.outlier_map, self.med_map, self.p90_flow.get(pk),
+                l4_target=l4_target))
 
     # -- 总览 ----------------------------------------------------------------
 
@@ -703,21 +742,29 @@ def _build_lock(name):
 def get_batch_data(batch_name: str) -> BatchData:
     """获取批次数据（带进程内缓存）。
 
-    缓存失效策略：每次调用都比对批次目录内数据文件的指纹（文件名/修改时间/大小），
-    钉钉重新导出覆盖文件后自动重算，无需重启后端。
+    缓存失效策略：命中需**同时**满足两条 ——
+      ① 批次目录内数据文件的指纹（文件名/修改时间/大小）未变 ——
+         钉钉重新导出覆盖文件后自动重算，无需重启后端；
+      ② **规则版本未变**（`get_rules()[1]`）—— 否则用户改了规则页目标天，
+         数据文件没变、缓存却不失效，就会出现「改了规则批次页不重算」的缺陷。
+    （项目的既有正确范式：routers/review.py::fingerprint_for、routers/alerts.py
+     的缓存键都含 get_rules()[1]。）
     批次不存在抛 FileNotFoundError。
     """
     d = get_batch_dir(batch_name)          # 校验存在性（抛 FileNotFoundError）
     fp = _dir_fingerprint(d)
+    rv = get_rules()[1]
     with _cache_lock:
         cached = _cache.get(batch_name)
-        if cached is not None and cached.fingerprint == fp:
+        if (cached is not None and cached.fingerprint == fp
+                and cached.rules_version == rv):
             return cached
     lock = _build_lock(batch_name)
     with lock:
         with _cache_lock:                  # 双重检查：可能已被前面的线程构建好
             cached = _cache.get(batch_name)
-            if cached is not None and cached.fingerprint == fp:
+            if (cached is not None and cached.fingerprint == fp
+                    and cached.rules_version == rv):
                 return cached
         bd = BatchData(batch_name, d)
         with _cache_lock:

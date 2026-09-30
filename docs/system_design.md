@@ -110,6 +110,9 @@ CREATE TABLE product_catalog (
 
 规则保存后 version+1，inflight/review 缓存按既有指纹机制自动失效。
 
+- **段级目标天的单一真源（2026-09-30，见 §9 T16）**：段目标天（含『采购→发货末批』= 22 天）的**唯一可编辑真源**是 `rule_config.seg_targets[段名].target`；所有消费方统一经 `rule_service.seg_target(规则, 段名, 兜底)` 取值，兜底 = 该品类 `seg_rules` 的默认值。消费方有两处：复盘页段目标天（`routers/review.py`）、批次分析页「渠道未发货超时」判定线（`analysis.py`）。批次缓存键同时含规则 version，因此改目标天后批次页也会重算（不再只在数据文件变时才失效）。
+  - ⚠️ 段目标天**可在规则页留空**（前端提交 `target: null`，后端校验放行）：留空 = **该段不设目标天 → 不判超时**。复盘页判定显示「—未设目标」，批次页仍产出**中性「渠道未发货」**（不升级为「(超时)」，也不丢该条）。详见 §9 T16「target=null 的统一语义」。
+
 ## 3. 核心算法设计
 
 ### 3.1 段级预警（85% 环节工期阈值，P1-2）
@@ -1232,5 +1235,102 @@ alerts / review / history / 流程复盘/route_check_sys.py（离线同源双实
     得不偿失；`SKU换号` 子表因「旧SKU+新SKU **两列同时命中**」立判表头，不受此边界影响。
 - 过渡兼容的 30 天窗口到期后，移除回退读 `商品资料.xlsx` 的分支（后端 + 离线各一处）。
 - 迁移正式落库（`import_registry(force=True)`）由主理人统一编排；本次**未**执行真实迁移。
+
+## T16 「渠道未发货超时」判定线统一到单一真源（2026-09-30）
+
+**用户问题**：业务概念「采购→发货末批 = 22 天」在两个页面**不是同一个数**——复盘页能在规则页改、
+批次分析页却永远 22。根因是该口径有**三处独立取值**，其中批次分析页**不跟随规则**。
+
+### 缺陷（改造前，file:line）
+
+| # | 位置 | 取值方式 | 跟随规则？ |
+|---|---|---|---|
+| ① | `routers/review.py` L541-543 / L584-586 | `cfg.get("target", def_target)`（`cfg = seg_targets.get(name) or {}`） | ✅ 跟随 |
+| ② | `analysis.py` L29-30 / L315 | 模块级冻结常量 `L4_TARGET_DAYS = seg_rules.L4[3]`（永远 22，且**只读手机膜**的 seg_rules，手机壳批次也用它） | ❌ 不跟随 |
+| ③ | `流程复盘/route_check_sys.py` L426 | 独立字面量 `NOT_SHIPPED_GRACE_DAYS = 22`（自称与 L4 同源，代码上并未派生） | ❌ 不跟随 |
+
+第二个缺陷：批次缓存 `analysis.get_batch_data` **只以数据文件指纹**（`_dir_fingerprint`）为键，
+改规则不变数据文件指纹 → 缓存不失效 → 「改了规则批次页也不重算」。
+
+### 单一真源取值链（改造后）
+
+```
+rule_config.seg_targets["采购→发货末批"].target   ← 规则页可编辑（唯一真源）
+                    │ 缺失/未覆盖时兜底
+                    ▼
+该品类 seg_rules.L4[3]（手机膜 22 / 手机壳名义值 22）
+                    │
+                    ▼  rule_service.seg_target(rules, seg_name, default)
+        ┌───────────┴────────────┐
+        ▼                        ▼
+analysis.detect_anomalies(l4_target=)      routers/review 段目标天 / 超时判定
+（批次分析页「渠道未发货(超时)」判定线）      （复盘页「渠道未发货(超时)」判定线）
+```
+
+- 取值入口：`rule_service.seg_target(rules, seg_name, default)` —— 语义**逐字等于** `cfg.get("target", default)`：
+  键存在但值为 None 时返回 None（= 规则页显式留空），**不是**回退 default。
+- `analysis.py` **删除** `L4_TARGET_DAYS`（模块级冻结常量）及其 `from .seg_rules import L4 as _L4_SEG`。
+- `BatchData.__init__` 新增 `self.category = category_of_text(name, str(path))` 与 `self.rules_version = get_rules()[1]`；
+  `BatchData._load()` 按品类解析 `段名 = rules_for(cat).l4[1]`、`兜底 = rules_for(cat).l4[3]`，
+  `l4_target = seg_target(get_rules()[0], 段名, 兜底)`，并传入 `detect_anomalies(..., l4_target=l4_target)`。
+  （`detect_anomalies` 新增可选参数 `l4_target=None`；未传时函数内兜底 = 默认品类 L4 目标天，保证直接调用行为不变。）
+
+### 缓存失效（同一真源的另一半）
+
+`get_batch_data` 的命中条件由「仅数据指纹」改为「**数据指纹 + 规则 version**」双重检查（L713-714、L719-720 两处）。
+照抄项目既有正确范式（`routers/review.py::fingerprint_for`、`routers/alerts.py::_get_alerts_cached` 的缓存键都含 `get_rules()[1]`）。
+
+### target=null 的统一语义（2026-09-30 追加修复）
+
+**触发链**：前端 `Rules.jsx` 段目标输入框 `onChange` 把清空写成 `target: null`；后端 `routers/rules.py`
+校验**明确放行 null**（报错语即「需为 0~3650 的数值或 null」）→ 存进 DB → `seg_target()` 按语义返回 `None`。
+
+**既有崩溃（改造前 `cfg.get("target", def_target)` 同样返回 None，属老缺陷）**：
+`_seg_judge(5, None)` / `5 > None` 直接 `TypeError` → 复盘页几乎每个请求 500。
+
+**统一语义**：`target = null` 一律解释为「**该段不设目标天 → 不判超时**」，**任何路径都不得抛异常**
+（字段可清空、校验又放行 null，就不能让它崩；「不设目标」自然等于「没有可超的线」。不考核另有 `available` 开关，不冲突）。
+
+| 位置 | 处理 |
+|---|---|
+| `routers/review.py::_seg_judge` | 在 `d is None` / `d < 0` **之后**、`取数→签样` 过短检查**之前**插入 `if target is None: return "—未设目标"`（放 d<0 之后：⚠反向/—补录 这类数据质量标注不因「没设目标」消失） |
+| `routers/review.py` noShip 判定 | `over = (target is not None and stall_days is not None and stall_days > target)` |
+| `routers/review.py` 段贡献统计 | 跳过 `r["target"] is None` 的段（不设目标 → 不计贡献、不进段统计），否则 `r["target"] - float(days)` 同样 TypeError |
+| `analysis.py::detect_anomalies` | 新增模块级哨兵 `_UNSET`：`l4_target=_UNSET`（**没传参**）→ 兜底默认品类 L4 目标天（向后兼容）；`l4_target=None`（**规则显式留空**）→ 不判超时，但**仍产出中性「渠道未发货」**（不丢数据） |
+| `analysis.py::BatchData._load` | 不再把 `seg_target()` 的 None 转成 22，原样传入 |
+| 前端 `Rules.jsx` | 段目标格 `cfg.target` 为 null/undefined 时显示 `helperText="留空 = 该段不设目标（不判超时）"`（不改 null 语义、不拒绝空值） |
+
+**未受影响的消费方（已核对）**：`inflight_service.seg_state` 早已 `if target is None ... 只报进度不做阈值判定`；
+`reporting` 预警/超期行只来自 `seg_state`（target 必为数值）；`alerts.py` 的段目标走 `product_target_*` / `ops_target`
+等**其它**规则键、与 `seg_targets` 无关；`causal.py` 用 `float(r.get("target") or 0)` 已护。
+
+### 离线孪生件（`流程复盘/route_check_sys.py`，**在本项目仓库之外**）
+
+- `NOT_SHIPPED_GRACE_DAYS = 22` → 派生自同文件 `L4[3]`（`L4 = (部门, 名称, 起点, 目标天, …)`，目标天是索引 3）。
+- 口径说明 sheet 文案里的「22 天」→ 「L4 目标天（默认 22 天）」。
+- ⚠️ **已知局限（不改）**：该文件是**纯离线件、不连数据库**，读不到规则页 `seg_targets` 的覆盖值 ——
+  用户在规则页把「采购→发货末批」目标天改掉后，**离线件的这个天数仍恒等于代码默认值 L4[3]=22**，
+  与在线页会出现不一致。本次只保证「文件内不再重复字面量、单一真源 = L4」。要彻底对齐需离线件也能读规则文件/DB，超出本次范围。
+
+### 零漂移证据（默认规则下，真实批次 手机膜 + 手机壳）
+
+改造前判定线 = 冻结常量 22；改造后 = `seg_target(规则, 段名, 兜底)`，默认取值亦为 22。
+两者走**同一份** `detect_anomalies` 实现，唯一差别是传入的 `l4_target` → 用 `l4_target=22` 精确复现改造前，
+与真实（改造后）清单逐条比对：**两批次 `equal=True`、总条数一致、各异常类型计数逐项一致**
+（手机膜 2075 条：渠道未发货(超时) 12 / 渠道未发货 85 / …；手机壳 359 条：渠道未发货(超时) 55 / 渠道未发货 55 / …）。
+
+### 验收
+
+- 新增 `tests/test_l4_single_source.py`（16 例）：seg_target 语义、**决定性用例**（规则值 N-1/N+1 切换异常类型）、
+  缓存随规则版本失效、默认零漂移（手机膜/手机壳皆 22）、无硬编码（源码不含 `L4_TARGET_DAYS`）。
+- 全量 `pytest tests/ -q` → **361 passed + 1 skipped**（T15 基线 345 + 新增 16）。
+- `scripts/verify_rules_keys.py` / `verify_t02.py` / `verify_shell_rules.py` 均 **exit=0**。
+- 全仓 grep `L4_TARGET_DAYS` → 后端 0 命中。
+
+### 待办 / 风险
+
+- **离线件读不到规则页覆盖值**（见上「已知局限」）：规则页改了 22，`route_check_sys.py` 的数会不一致。
+- `routers/review.py` 的 `cfg.get("target", def_target)` 已统一改走 `seg_target`；`available`（考核开关）
+  仍读 `cfg.get("available", True)`，本次**未**触碰考核语义。
 
 
