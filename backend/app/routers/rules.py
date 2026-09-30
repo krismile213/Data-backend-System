@@ -42,6 +42,7 @@ _NUM_KEYS = {
 # 文本键 → 最大长度
 _STR_KEYS = {
     "products_xlsx_path": 512,
+    "registry_xlsx_path": 512,
     "mail_to": 256, "mail_host": 256, "mail_user": 256, "mail_auth_code": 256,
 }
 _BOOL_KEYS = {"mail_enabled"}

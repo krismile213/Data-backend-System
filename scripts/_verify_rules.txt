@@ -7,6 +7,7 @@ GET /api/rules -> 200
     inflight_warn_ratio      = 0.85                         事中预警系数
     report_retention_days    = 90                           日报保留天数
     products_xlsx_path       = 'C:\\Users\\dell\\Desktop\\work-main\\资产文件\\商品资料.xlsx' 商品资料路径
+    registry_xlsx_path       = 'C:\\Users\\dell\\Desktop\\work-main\\资产文件\\SKU登记表.xlsx' SKU登记表路径
     loss_route_limit         = 60                           损益推迟底线(天)
     loss_daily_default       = {'min': 1.38, 'max': 5.5}    日均销量兜底区间
     mail_enabled             = False                        邮件上报开关

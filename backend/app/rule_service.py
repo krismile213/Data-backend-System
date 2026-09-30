@@ -54,6 +54,9 @@ def _default_rules():
         "inflight_warn_ratio": 0.85,       # 段级预警系数：已进行天数 > 目标×该值 即「即将超期」
         "report_retention_days": 90,       # 事中日报保留天数
         "products_xlsx_path": r"C:\Users\dell\Desktop\work-main\资产文件\商品资料.xlsx",
+        # 独立登记表（SKU换号 / 人工登记 两张人工维护子表）—— 与商品资料**分开**，
+        # 因为商品资料是机器每月重导、会被整体替换；登记表是人工源、丢了不能自愈。
+        "registry_xlsx_path": r"C:\Users\dell\Desktop\work-main\资产文件\SKU登记表.xlsx",
         "loss_route_limit": 60,            # 损益推迟天数底线（空运口径，对齐 ROUTE_TARGETS）
         "loss_daily_default": {"min": 1.38, "max": 5.5},   # 评级未命中时的日均兜底区间
         "mail_enabled": False,             # 邮件试验通道总开关（用户要求默认不推送）
@@ -94,6 +97,8 @@ RULE_META = {
                               "desc": "事中日报 xlsx 的保留期，过期由自动管线清理"},
     "products_xlsx_path": {"label": "商品资料路径",
                            "desc": "评级档位与单价的来源 xlsx（商品资料表 A1 为档位说明）"},
+    "registry_xlsx_path": {"label": "SKU登记表路径",
+                           "desc": "「SKU换号 / 人工登记」两张人工维护子表的来源 xlsx（独立于商品资料）"},
     "loss_route_limit": {"label": "损益推迟底线(天)",
                          "desc": "空运口径：取数→最晚空运到货超过该天数即计入亏损（对齐路线总评级底线）"},
     "loss_daily_default": {"label": "日均销量兜底区间",

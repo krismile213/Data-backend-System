@@ -8,8 +8,11 @@ dataadmin.py — 数据管理：批次扫描 / 导入触发 / 备份
 接口：
     GET  /api/etl/scan      扫描数据根目录，对照数据库给出每个批次的导入状态
     POST /api/etl/import    触发导入（可选 batch / force）
+    POST /api/etl/products  导入商品资料（评级档位+单价）→ product_catalog
+    POST /api/etl/registry  导入独立登记表（SKU换号+人工登记）→ sku_alias / sku_hold
+    GET  /api/etl/registry  登记表导入状态（路径/条数/指纹/告警）
     GET  /api/etl/backup    列出已有备份
-    POST /api/etl/backup    立即备份（state 目录 + mysqldump 若可用）
+    POST /api/etl/backup    立即备份（state 目录 + SKU登记表.xlsx + mysqldump 若可用）
 """
 
 import shutil
@@ -27,7 +30,10 @@ from ..category_rules import DEFAULT_CATEGORY
 from ..config import DATA_ROOTS, STATE_DIR, data_root, list_batches
 from ..db import MYSQL_DATABASE, MYSQL_HOST, MYSQL_PASSWORD, MYSQL_PORT, MYSQL_USER
 from ..db import engine, get_session
-from ..models import ApprovalNode, Batch, PartDoc, ProductCatalog
+from ..models import (ApprovalNode, Batch, PartDoc, ProductCatalog,   # noqa: F401
+                      SkuAlias, SkuHold)
+from ..sku_alias import ALIAS_SHEET, resolve_registry_path
+from ..sku_hold import HOLD_SHEET
 
 # etl 包位于 backend/etl（不在 app 包内），需把 backend 目录加入 sys.path 才能导入
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -38,7 +44,8 @@ if str(BACKEND_DIR) not in sys.path:
 from etl.import_excel import (ensure_schema, fingerprint_str,  # noqa: E402
                               import_batch)
 
-from etl.products_loader import import_products, read_index  # noqa: E402
+from etl.products_loader import (import_products, import_registry,  # noqa: E402
+                                 read_index, read_registry_index)
 
 ensure_schema()
 
@@ -197,6 +204,11 @@ def run_products_import(force: bool = False, session: Session = Depends(get_sess
     """导入商品资料.xlsx → product_catalog（全量覆盖；指纹未变时自动跳过）。
 
     force=true 忽略指纹强制重导（商品资料改了售价/档位后立刻生效）。
+
+    ⚠️ 本端点**只**动 product_catalog —— 两张人工登记表（SKU换号 / 人工登记）
+    已迁到独立文件，改由 `POST /api/etl/registry` 单独导入，**不在此处联动**。
+    这样「商品资料被整体替换」绝不会再清空 sku_alias / sku_hold
+    （且 import_registry 自带「异常绝不清库」护栏）。
     """
     result = import_products(session=session, force=force)
     # product 表内容参与损益缓存指纹 → 导入成功后让 review/alerts 缓存失效并择机预热
@@ -235,6 +247,55 @@ def products_status(session: Session = Depends(get_session)):
         "priceType": idx.get("priceType", "参考成本价"),
         "importedAt": idx.get("importedAt"),
         "xlsxPath": idx.get("xlsxPath"),
+        "notes": idx.get("notes", []),
+        "lastError": idx.get("lastError", ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 独立登记表（SKU换号 / 人工登记）导入 —— 两张**人工维护**子表，与商品资料分开
+# ---------------------------------------------------------------------------
+@router.post("/registry")
+def run_registry_import(force: bool = False, session: Session = Depends(get_session)):
+    """导入 `SKU登记表.xlsx`（SKU换号 + 人工登记 两子表）→ sku_alias / sku_hold。
+
+    force=true 忽略指纹强制重导。⚠️ 自带「异常绝不清库」护栏：登记文件/子表/表头
+    缺失时**不执行任何 DELETE**，status="warned"（见 `etl/products_loader.import_registry`）。
+    """
+    result = import_registry(session=session, force=force)
+    # alias/hold 表内容参与 alerts/review 的「不催办」判定 → 导入成功后失效并预热缓存
+    if result.get("status") == "imported":
+        from ..prewarm import warm_async
+        warm_async("SKU登记表导入后")
+    return result
+
+
+@router.get("/registry")
+def registry_status(session: Session = Depends(get_session)):
+    """登记表导入状态：路径、DB 条数、上次指纹/告警/错误（与 `/api/etl/products` 对称）。"""
+    idx = read_registry_index()
+    src = resolve_registry_path()
+
+    has_table = True
+    alias_total = hold_total = 0
+    try:
+        alias_total = session.query(SkuAlias).count()
+        hold_total = session.query(SkuHold).count()
+    except Exception as e:  # noqa: BLE001 — 表未建/连接异常时仍给出可读状态
+        has_table = False
+        idx = {**idx, "lastError": idx.get("lastError") or f"{type(e).__name__}: {e}"}
+
+    return {
+        "hasTable": has_table,
+        "xlsxPath": str(src),
+        "xlsxExists": src.is_file(),
+        "aliasTotal": alias_total,
+        "holdTotal": hold_total,
+        "aliasSheet": ALIAS_SHEET,
+        "holdSheet": HOLD_SHEET,
+        "status": idx.get("status"),
+        "fingerprint": idx.get("fingerprint"),
+        "importedAt": idx.get("importedAt"),
         "notes": idx.get("notes", []),
         "lastError": idx.get("lastError", ""),
     }
@@ -285,6 +346,13 @@ def run_backup():
                 shutil.copy2(f, target / f.name)
                 state_files.append(f.name)
 
+    # 独立登记表（SKU换号 / 人工登记）：唯一「丢了不能自愈」的手工源 → 一并备份
+    registry_file = None
+    registry_src = resolve_registry_path()
+    if registry_src.is_file():
+        shutil.copy2(registry_src, target / registry_src.name)
+        registry_file = registry_src.name
+
     dump_name = None
     dump_status = "skipped"
     dump_error = ""
@@ -313,10 +381,12 @@ def run_backup():
         "\n".join([
             f"备份时间: {datetime.now():%Y-%m-%d %H:%M:%S}",
             f"state 文件: {', '.join(state_files) or '(无)'}",
+            f"手工登记表: {registry_file or '(未找到，见 registry_xlsx_path)'}",
             f"数据库导出: {dump_name or '(未执行)'}  状态: {dump_status}",
             f"数据库: {MYSQL_DATABASE} @ {MYSQL_HOST}:{MYSQL_PORT}",
             "数据根目录: " + "；".join(f"{c}={p}" for c, p in DATA_ROOTS.items()),
-            f"说明: state/ 为不可再生的手工数据；数据库可由 data/ 下的 xlsx 重新导入。",
+            f"说明: state/ 为不可再生的手工数据；SKU登记表.xlsx 为人工维护、"
+            f"丢了不能自愈的登记源；数据库可由 data/ 下的 xlsx 重新导入。",
         ]),
         encoding="utf-8",
     )
@@ -325,6 +395,7 @@ def run_backup():
         "name": stamp,
         "path": str(target),
         "stateFiles": state_files,
+        "registryFile": registry_file,
         "dump": dump_name,
         "dumpStatus": dump_status,
         "dumpError": dump_error,

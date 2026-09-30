@@ -5,19 +5,23 @@ products_loader.py — 商品资料.xlsx → product_catalog 表（评级档位 
 损益推算的**唯一输入源**：`推迟天数 × 评级日均区间 × 单价`。
 档位→日均区间的解析规则见 `app/product_rules.py`（权威 = 商品资料表 A1 说明）。
 
-同时导入同文件的两张登记子表：
+⚠️ 2026-09-30 拆分：两张**人工维护**的登记子表已**迁出**本文件 ——
   - **`SKU换号`** → `sku_alias` 表（旧号→新号，见 `app/sku_alias.py`）；
   - **`人工登记`** → `sku_hold` 表（业务上不再走完流程 → 免催办，见 `app/sku_hold.py`）。
-三者共用一次文件指纹，避免「商品资料更新了但登记表还是旧的」半新半旧状态。
+  改由**独立文件** `资产文件\\SKU登记表.xlsx` 承载，用 `import_registry()` 单独导入。
+  原因：商品资料是**机器每月重导、会被用户整体替换**的主数据，一换文件这两张子表就消失，
+  本模块原来的「全量覆盖」会**静默清空** `sku_alias`/`sku_hold`（2026-09-29 真实发生过）。
+  现在 `import_products()` **完全不碰**这两张表；`import_registry()` 自带「异常绝不清库」护栏。
 
 两个入口共用本模块：
-    ① CLI   : python backend/etl/products_loader.py [--force] [--path X.xlsx]
-    ② 界面  : POST /api/etl/products（app/routers/dataadmin.py）
+    ① CLI   : python backend/etl/products_loader.py [--force] [--path X.xlsx] [--registry-path R.xlsx]
+    ② 界面  : POST /api/etl/products（商品资料） / POST /api/etl/registry（登记表）
 
 设计要点：
   - **全量覆盖式**：先清空 product_catalog 再整表写入（约 620 行，单事务，失败自动回滚）。
     商品资料是"当前状态快照"，不做行级 diff——删除的 SKU 必须从表里消失，否则损益会算到已下架 SKU。
   - **指纹增量**：文件 (mtime_ns, size) 未变且未 force 时直接跳过，避免钉钉同步后每次管线都重导。
+    登记表用**独立指纹**（`state/registry_index.json`），因为两个文件 mtime 不同。
   - 未命中的列/行**不静默**：缺表头、缺 SKU 列、档位未命中都会写进 notes 并在接口回显。
   - ⚠️ **性能陷阱**：openpyxl 的 read_only 模式**禁止** `ws.cell(row, col)` 随机访问——
     每次调用都会从头重解析工作表，621 行实测要 89 秒。必须单遍 `iter_rows` 流式读取（实测 <0.5s）。
@@ -31,7 +35,7 @@ from datetime import datetime
 from pathlib import Path
 
 from openpyxl import load_workbook
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 HERE = Path(__file__).resolve()
 BACKEND_DIR = HERE.parents[1]           # backend/
@@ -45,15 +49,17 @@ from app.models import (Base, PartDoc, ProductCatalog, SkuAlias,      # noqa: E4
 from app.product_rules import (GRADE_RANGES, parse_grade_ranges,     # noqa: E402
                                range_of, save_grades)
 from app.rule_service import get_rules                              # noqa: E402
-from app.sku_alias import (ALIAS_SHEET, read_alias_from_wb,          # noqa: E402
-                           validate_alias_rows)
-from app.sku_hold import (HOLD_SHEET, read_hold_from_wb,             # noqa: E402
+from app.sku_alias import (ALIAS_SHEET, resolve_registry_path,       # noqa: E402
+                           scan_alias_wb, validate_alias_rows)
+from app.sku_hold import (HOLD_SHEET, scan_hold_wb,                  # noqa: E402
                           validate_hold_rows)
 
 # 商品资料默认路径（rule_config 的 products_xlsx_path 优先）
 DEFAULT_XLSX = r"C:\Users\dell\Desktop\work-main\资产文件\商品资料.xlsx"
 SHEET_NAME = "商品资料"
 INDEX_PATH = Path(STATE_DIR) / "products_index.json"
+# 独立登记表导入状态（与 products_index.json **分开**：两个文件 mtime 不同，指纹不能共用）
+REGISTRY_INDEX_PATH = Path(STATE_DIR) / "registry_index.json"
 PRICE_TYPE = "参考成本价"      # 表内无膜售价列；补售价列后改此处并重导即自动切换
 
 # 表头关键字（**按包含匹配**，规避全角空格与月度列名变化，如「7月销量得分」/「2月销量得分」）
@@ -119,6 +125,28 @@ def _write_index(d: dict) -> None:
     INDEX_PATH.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+# ---- 登记表（SKU登记表.xlsx）独立指纹与索引（与 products 索引分开）-----------------
+def registry_fingerprint(path: Path) -> str:
+    """登记表文件指纹：mtime_ns|size（与商品资料指纹**独立**，两文件 mtime 不同）。"""
+    st = path.stat()
+    return f"{st.st_mtime_ns}|{st.st_size}"
+
+
+def read_registry_index() -> dict:
+    if REGISTRY_INDEX_PATH.exists():
+        try:
+            return json.loads(REGISTRY_INDEX_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _write_registry_index(d: dict) -> None:
+    REGISTRY_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    REGISTRY_INDEX_PATH.write_text(json.dumps(d, ensure_ascii=False, indent=2),
+                                   encoding="utf-8")
+
+
 def _map_cols(hdr, notes: list) -> dict:
     """把表头行（单元格元组）映射成 {语义: 1 基列号}。
 
@@ -168,8 +196,6 @@ def import_products(session=None, force: bool = False, path=None) -> dict:
         "xlsxPath": str(src),
         "importedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "total": 0, "matchedSkuCount": 0, "gradeDist": {}, "priceType": PRICE_TYPE,
-        "aliasTotal": 0, "aliasSheet": ALIAS_SHEET,
-        "holdTotal": 0, "holdSheet": HOLD_SHEET,
         "elapsed": 0.0, "notes": notes, "lastError": "",
     }
 
@@ -187,9 +213,8 @@ def import_products(session=None, force: bool = False, path=None) -> dict:
                        total=idx.get("total", 0),
                        matchedSkuCount=idx.get("matchedSkuCount", 0),
                        gradeDist=idx.get("gradeDist", {}),
-                       aliasTotal=idx.get("aliasTotal", 0),
-                       holdTotal=idx.get("holdTotal", 0),
                        importedAt=idx.get("importedAt", summary["importedAt"]))
+        # 登记表（换号/人工登记）已迁出到独立文件 → 见 import_registry()／registry_index.json
         notes.append("文件指纹未变化，已跳过（force=True 可强制重导）")
         return summary
 
@@ -256,22 +281,8 @@ def import_products(session=None, force: bool = False, path=None) -> dict:
             if grade:
                 grade_dist[grade] = grade_dist.get(grade, 0) + 1
 
-        # ---- 换号对照（同一文件的『SKU换号』子表）----
-        # 与 product_catalog 同一次导入、同一份文件 → 商品资料一变，换号口径跟着变，
-        # 不会出现「商品资料更新了但换号还是旧的」这种半新半旧状态。
-        alias_rows, anotes = read_alias_from_wb(wb)
-        notes.extend(anotes)
-        alias_rows, vnotes = validate_alias_rows(
-            alias_rows, known_skus=[x["sku"] for x in rows])
-        notes.extend(vnotes)
-
-        # ---- 人工登记（同一文件的『人工登记』子表，业务上不再走完 → 免催办）----
-        # 与换号表同样的全量覆盖语义；两张子表一起随商品资料刷新，口径不会半新半旧。
-        hold_rows, hnotes = read_hold_from_wb(wb)
-        notes.extend(hnotes)
-        hold_rows, hvnotes = validate_hold_rows(
-            hold_rows, known_skus=[x["sku"] for x in rows])
-        notes.extend(hvnotes)
+        # ⚠️ 登记表（SKU换号 / 人工登记）已迁出本文件 → 由 import_registry() 读独立文件导入。
+        #    这里**只**处理 product_catalog，绝不再从商品资料 workbook 读/写 alias/hold。
         wb.close()
         wb = None
 
@@ -287,30 +298,12 @@ def import_products(session=None, force: bool = False, path=None) -> dict:
             notes.append(f"⚠ {skipped_na} 行档位不在档位表中（未命中，将走兜底区间）")
 
         # ---- 全量覆盖写入（单事务）----
+        # ⚠️ 只覆盖 product_catalog。**绝不**在此 DELETE/写入 SkuAlias/SkuHold ——
+        #    它们已迁到独立登记表，由 import_registry() 负责（带「异常绝不清库」护栏）。
         sess = session if session is not None else SessionLocal()
         try:
             sess.execute(delete(ProductCatalog))
             sess.execute(ProductCatalog.__table__.insert(), rows)
-            # 换号表也是全量覆盖：子表里删掉/改掉的行必须跟着消失，
-            # 否则旧映射会一直留在库里继续误判「不催办」。
-            sess.execute(delete(SkuAlias))
-            if alias_rows:
-                sess.execute(SkuAlias.__table__.insert(), [{
-                    "old_sku": x["old"], "new_sku": x["new"],
-                    "note": x.get("note") or None,
-                    "effective_at": x.get("effectiveAt") or None,
-                    "updated_at": datetime.now(),
-                } for x in alias_rows])
-            # 人工登记同理全量覆盖：子表里删掉的行必须跟着消失，
-            # 否则已恢复推进的 SKU 会一直躺在「已豁免」里不再被催办。
-            sess.execute(delete(SkuHold))
-            if hold_rows:
-                sess.execute(SkuHold.__table__.insert(), [{
-                    "sku": x["sku"],
-                    "reason": x.get("reason") or None,
-                    "registered_at": x.get("registeredAt") or None,
-                    "updated_at": datetime.now(),
-                } for x in hold_rows])
             matched = _count_matched(sess, [x["sku"] for x in rows])
             if own_session:
                 sess.commit()
@@ -325,8 +318,6 @@ def import_products(session=None, force: bool = False, path=None) -> dict:
         summary.update(
             status="imported", fingerprint=fp, total=len(rows),
             matchedSkuCount=matched, gradeDist=dict(sorted(grade_dist.items())),
-            aliasTotal=len(alias_rows),
-            holdTotal=len(hold_rows),
         )
     except Exception as e:                       # noqa: BLE001 — 任何失败都落索引并回显
         summary["status"] = "failed"
@@ -344,24 +335,190 @@ def import_products(session=None, force: bool = False, path=None) -> dict:
     return summary
 
 
+def import_registry(session=None, force: bool = False, path=None) -> dict:
+    """导入**独立登记表** `SKU登记表.xlsx`（`SKU换号` + `人工登记` 两子表）→ sku_alias / sku_hold。
+
+    返回摘要 dict（同时写入 `state/registry_index.json`）。
+
+    ⚠️ 核心护栏（**「异常绝不清库」**）：只有同时满足
+      ① 登记文件存在、② 两张子表都在、③ 两张表头都定位成功 ——
+      才允许对 `sku_alias` / `sku_hold` 做 DELETE + 全量覆盖。
+    以上任一不满足 → **不执行任何 DELETE**，保留 DB 现有行，`status="warned"`，
+      notes 里写**显著告警**（含期望路径与实际缺失项）。
+    「子表在、表头在、但数据行 0 条」= 用户**主动清空**，允许 DELETE，但会**高声告警**
+      并记录 before/after 计数（让「清空」显式可见，不再可能被误当故障静默发生）。
+    """
+    t0 = time.time()
+    own_session = session is None
+    src = Path(path) if path else resolve_registry_path()
+    notes: list = []
+    summary = {
+        "status": "skipped",
+        "xlsxPath": str(src),
+        "importedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "aliasTotal": 0, "aliasSheet": ALIAS_SHEET,
+        "holdTotal": 0, "holdSheet": HOLD_SHEET,
+        "aliasBefore": None, "aliasAfter": None,
+        "holdBefore": None, "holdAfter": None,
+        "elapsed": 0.0, "notes": notes, "lastError": "",
+    }
+
+    # ---- 护栏①：登记文件不存在 → 绝不 DELETE ----
+    if not src.is_file():
+        summary["status"] = "warned"
+        summary["lastError"] = f"登记文件不存在：{src}"
+        notes.append("🚫 " + summary["lastError"])
+        notes.append("🚫 护栏已生效：未执行任何 DELETE，sku_alias / sku_hold 保持 DB 现有内容")
+        _write_registry_index({**read_registry_index(), **summary})
+        return summary
+
+    # ---- 指纹增量 ----
+    fp = registry_fingerprint(src)
+    idx = read_registry_index()
+    if not force and idx.get("fingerprint") == fp and idx.get("status") == "imported":
+        summary.update(status="skipped", fingerprint=fp,
+                       aliasTotal=idx.get("aliasTotal", 0),
+                       holdTotal=idx.get("holdTotal", 0),
+                       aliasBefore=idx.get("aliasBefore"),
+                       aliasAfter=idx.get("aliasAfter"),
+                       holdBefore=idx.get("holdBefore"),
+                       holdAfter=idx.get("holdAfter"),
+                       importedAt=idx.get("importedAt", summary["importedAt"]))
+        notes.append("登记表指纹未变化，已跳过（force=True 可强制重导）")
+        return summary
+
+    # ---- 读两张子表（只读定位状态；此阶段不碰 DB）----
+    raw_alias: list = []
+    raw_hold: list = []
+    a_state = h_state = "error"
+    wb = None
+    try:
+        wb = load_workbook(src, read_only=True, data_only=True)
+        raw_alias, a_notes, a_state = scan_alias_wb(wb)
+        raw_hold, h_notes, h_state = scan_hold_wb(wb)
+        notes.extend(a_notes)
+        notes.extend(h_notes)
+    except Exception as e:                       # noqa: BLE001 — 打开失败也走护栏
+        notes.append(f"⚠ 登记表读取失败：{type(e).__name__}: {e}")
+        a_state = h_state = "error"
+    finally:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass
+
+    # ---- 护栏②③：子表缺失 / 表头未命中 / 读取失败 → 绝不 DELETE ----
+    bad = [name for name, st in ((ALIAS_SHEET, a_state), (HOLD_SHEET, h_state)) if st != "ok"]
+    if bad:
+        summary["status"] = "warned"
+        summary["lastError"] = f"登记表定位失败：{bad}（state: {ALIAS_SHEET}={a_state}, {HOLD_SHEET}={h_state}）"
+        notes.append(f"🚫 『{'』『'.join(bad)}』子表缺失或表头未命中 → 未执行任何 DELETE")
+        notes.append(f"🚫 期望文件 {src} 同时含『{ALIAS_SHEET}』+『{HOLD_SHEET}』两子表；"
+                     f"护栏已生效：sku_alias / sku_hold 保持 DB 现有内容")
+        summary["elapsed"] = round(time.time() - t0, 2)
+        _write_registry_index({**read_registry_index(), **summary})
+        return summary
+
+    # ---- 校验 + 全量覆盖写入 ----
+    a_before = h_before = a_after = h_after = None
+    sess = session if session is not None else SessionLocal()
+    try:
+        if own_session:
+            Base.metadata.create_all(engine)          # 幂等建表
+        known = [r for (r,) in sess.execute(select(ProductCatalog.sku)) if r]
+        alias_rows, a_vnotes = validate_alias_rows(raw_alias, known_skus=known)
+        hold_rows, h_vnotes = validate_hold_rows(raw_hold, known_skus=known)
+        notes.extend(a_vnotes)
+        notes.extend(h_vnotes)
+
+        a_before = sess.execute(select(func.count()).select_from(SkuAlias)).scalar() or 0
+        h_before = sess.execute(select(func.count()).select_from(SkuHold)).scalar() or 0
+
+        # 换号表全量覆盖：子表里删掉/改掉的行必须跟着消失，否则旧映射会继续误判「不催办」。
+        sess.execute(delete(SkuAlias))
+        if alias_rows:
+            sess.execute(SkuAlias.__table__.insert(), [{
+                "old_sku": x["old"], "new_sku": x["new"],
+                "note": x.get("note") or None,
+                "effective_at": x.get("effectiveAt") or None,
+                "updated_at": datetime.now(),
+            } for x in alias_rows])
+        # 人工登记同理全量覆盖。
+        sess.execute(delete(SkuHold))
+        if hold_rows:
+            sess.execute(SkuHold.__table__.insert(), [{
+                "sku": x["sku"],
+                "reason": x.get("reason") or None,
+                "registered_at": x.get("registeredAt") or None,
+                "updated_at": datetime.now(),
+            } for x in hold_rows])
+
+        a_after = sess.execute(select(func.count()).select_from(SkuAlias)).scalar() or 0
+        h_after = sess.execute(select(func.count()).select_from(SkuHold)).scalar() or 0
+        if own_session:
+            sess.commit()
+    except Exception as e:                       # noqa: BLE001 — 失败落索引并回显
+        if own_session:
+            sess.rollback()
+        summary["status"] = "failed"
+        summary["lastError"] = f"{type(e).__name__}: {e}"
+        notes.append("⚠ " + summary["lastError"])
+    finally:
+        if own_session:
+            sess.close()
+
+    # ---- 「主动清空」必须高声告警（表头在位但 0 行）----
+    if summary["status"] != "failed":
+        if not alias_rows:
+            notes.append(f"⚠⚠ 『{ALIAS_SHEET}』表头在位但数据行 0 条 —— 视为**主动清空**，"
+                         f"已允许覆盖 sku_alias（{a_before} → {a_after}）")
+        if not hold_rows:
+            notes.append(f"⚠⚠ 『{HOLD_SHEET}』表头在位但数据行 0 条 —— 视为**主动清空**，"
+                         f"已允许覆盖 sku_hold（{h_before} → {h_after}）")
+        summary.update(status="imported", fingerprint=fp,
+                       aliasTotal=len(alias_rows), holdTotal=len(hold_rows),
+                       aliasBefore=a_before, aliasAfter=a_after,
+                       holdBefore=h_before, holdAfter=h_after)
+
+    summary["elapsed"] = round(time.time() - t0, 2)
+    _write_registry_index(summary)
+    return summary
+
+
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="导入商品资料（评级档位+单价）到 product_catalog")
+    ap = argparse.ArgumentParser(
+        description="导入商品资料（评级档位+单价）与独立登记表（SKU换号+人工登记）")
     ap.add_argument("--force", action="store_true", help="忽略指纹，强制重导")
     ap.add_argument("--path", default=None, help="商品资料 xlsx 路径（默认读 rule_config）")
+    ap.add_argument("--registry-path", default=None,
+                    help="登记表 xlsx 路径（默认读 rule_config.registry_xlsx_path）")
     args = ap.parse_args(argv)
 
     s = import_products(force=args.force, path=args.path)
     print(f"[{s['status']}] {s['xlsxPath']}")
     print(f"  SKU 行数={s['total']}  与 part_doc 命中={s['matchedSkuCount']}  "
           f"单价口径={s['priceType']}  用时={s['elapsed']}s")
-    print(f"  换号对照（{s.get('aliasSheet')} 子表）= {s.get('aliasTotal', 0)} 条")
-    print(f"  人工登记（{s.get('holdSheet')} 子表）= {s.get('holdTotal', 0)} 条（免催办）")
     print(f"  档位分布: {s['gradeDist']}")
     for n in s["notes"]:
         print("  - " + n)
     if s["lastError"]:
         print("  错误: " + s["lastError"])
-    return 0 if s["status"] in ("imported", "skipped") else 1
+
+    # 登记表在商品资料**之后**导入：校验「新号/SKU 是否在商品资料里」的 known_skus 依赖 product_catalog
+    r = import_registry(force=args.force, path=args.registry_path)
+    print(f"[{r['status']}] 登记表 {r['xlsxPath']}")
+    print(f"  换号对照（{r.get('aliasSheet')} 子表）= {r.get('aliasTotal', 0)} 条"
+          f"（{r.get('aliasBefore')} → {r.get('aliasAfter')}）")
+    print(f"  人工登记（{r.get('holdSheet')} 子表）= {r.get('holdTotal', 0)} 条（免催办）"
+          f"（{r.get('holdBefore')} → {r.get('holdAfter')}）")
+    for n in r["notes"]:
+        print("  - " + n)
+    if r["lastError"]:
+        print("  错误: " + r["lastError"])
+
+    ok = s["status"] in ("imported", "skipped") and r["status"] != "failed"
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

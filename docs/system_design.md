@@ -63,6 +63,7 @@ CREATE TABLE product_catalog (
 
 - **来源**：`C:\Users\dell\Desktop\work-main\资产文件\商品资料.xlsx`，路径写入 rule_config 键 `products_xlsx_path`（可配置，见 2.4）。A1 档位说明文本 + 每行 SKU 的评级列 / 参考成本价列。
 - **导入入口**（两个，均复用同一 loader）：① CLI `python backend/etl/products_loader.py`；② 界面 `POST /api/etl/products`（数据管理页）。按文件 mtime+size 指纹增量，全量覆盖式导入。
+- **登记表已拆出**（2026-09-30，见 §9 T15）：`SKU换号` / `人工登记` 两张**人工维护**子表原内嵌于本文件，而本文件是**机器每月重导、会被用户整体替换**的主数据 —— 一换文件子表就消失，`import_products` 的全量覆盖会**静默清空** `sku_alias`/`sku_hold`。现两张子表迁到**独立** `SKU登记表.xlsx`（rule 键 `registry_xlsx_path`），由 `import_registry()` 单独导入（自带「异常绝不清库」护栏）。`import_products` **不再**读写这两张表。
 - **匹配方式**：SKU `str.strip()` 后精确等值（18 位审批编号式陷阱不涉及；SKU 无精度问题）。未命中 SKU 在评估结果中显式标注 `productMatched: false`，不静默。
 - **更新频率**：手动触发（商品资料变动不频繁）；导入后因 rule/数据指纹无关、product 表内容计入损益缓存指纹（见 §3.2）。
 
@@ -98,7 +99,8 @@ CREATE TABLE product_catalog (
 | `inflight_warn_ratio` | 0.85 | 段级预警系数（P1-2，界面可改） |
 | `report_retention_days` | 90 | 事中日报保留天数 |
 | ~~`daily_pipeline_slots`~~ | **已删除（2026-09-24）** | 曾为「自动管线时刻」，但与真实调度脱钩（无任何消费方，改它不改计划任务）→ 删键。改为 `GET /api/rules` 的**只读**字段 `pipeline = {taskName, times[], source, updatedAt, ok}`，真源 = `scripts/install_auto_etl.ps1` 的 `$At1/$At2`（`rule_service.pipeline_schedule()`）。规则页只展示、不可编辑 |
-| `products_xlsx_path` | `C:\Users\dell\Desktop\work-main\资产文件\商品资料.xlsx` | 商品资料路径 |
+| `products_xlsx_path` | `C:\Users\dell\Desktop\work-main\资产文件\商品资料.xlsx` | 商品资料路径（机器每月重导的主数据） |
+| `registry_xlsx_path` | `C:\Users\dell\Desktop\work-main\资产文件\SKU登记表.xlsx` | 独立登记表路径（`SKU换号`/`人工登记` 两张人工维护子表）。2026-09-30 新增，见 §9 T15 |
 | `loss_route_limit` | 60 | 损益推迟天数底线（空运口径，与 ROUTE_TARGETS["空运"].limit 对齐） |
 | `loss_daily_default` | `{"min":1.38,"max":5.5}` | 评级未命中时的日均区间兜底（输出降级标注） |
 | `mail_enabled` | false | 邮件试验通道总开关（不默认推送） |
@@ -203,8 +205,10 @@ delayDays = airSpan − loss_route_limit(60)
 
 | # | 方法/路径 | 说明 |
 |---|---|---|
-| 13 | POST `/api/etl/products` | 触发商品资料导入（读 rule_config 的 products_xlsx_path，指纹增量） |
+| 13 | POST `/api/etl/products` | 触发商品资料导入（读 rule_config 的 products_xlsx_path，指纹增量）。**只动 product_catalog**，不碰登记表 |
 | 14 | GET `/api/etl/products` | `{importedAt, total, matchedSkuCount, gradeDist, priceType, lastError}` |
+| 15 | POST `/api/etl/registry` | 触发**独立登记表**导入（读 rule_config 的 registry_xlsx_path，独立指纹）。自带「异常绝不清库」护栏（2026-09-30，见 §9 T15） |
+| 16 | GET `/api/etl/registry` | `{xlsxPath, xlsxExists, aliasTotal, holdTotal, aliasSheet, holdSheet, status, fingerprint, notes, lastError}` |
 
 ## 5. 前端设计
 
@@ -919,8 +923,8 @@ if not exist "%PY%" set "PY=py"
 ### 真源：一份人工维护的对照表（单一真源，四消费方共用）
 
 ```
-商品资料.xlsx · 「SKU换号」子表   ← 唯一真源（业务登记）
-        │  etl/products_loader.py（与 product_catalog 同一次导入、同一份文件指纹）
+SKU登记表.xlsx · 「SKU换号」子表   ← 唯一真源（业务登记）
+        │   ⚠️ 2026-09-30 迁移：原为「商品资料.xlsx · SKU换号 子表」，见 §9 T15  etl/products_loader.py（与 product_catalog 同一次导入、同一份文件指纹）
         ▼
    MySQL `sku_alias`（old_sku PK / new_sku / note / effective_at / updated_at）
         │
@@ -1010,7 +1014,9 @@ alerts 导出 xlsx 新增第三张 sheet「已换号」。
   与「最终拍摄缺失」矛盾，需业务确认是**真卡点 / 也是换号 / 数据缺失需补录**，
   在确认前**不写进换号表**（避免用错误登记掩盖真问题）。
   → ✅ **T14 已结案**：结论是「业务上已不需走完流程」，按**人工登记**处理（见下一章），**不写入换号表**。
-- 换号表目前**手工维护**：新增换号只能改商品资料子表 → 重导（或等自动管线）。
+- 换号表目前**手工维护**：新增换号只能改登记子表 → 重导（或等自动管线）。
+  → ✅ **T15（2026-09-30）已迁到独立 `资产文件\SKU登记表.xlsx`**：登记改该文件、**不再改 `商品资料.xlsx` 子表**，
+    重导走 `POST /api/etl/registry`（与商品资料导入解耦，见 §9 T15）。
   若将来换号频繁，可考虑在「数据管理」页加一个录入入口（未做）。
 
 ---
@@ -1041,8 +1047,8 @@ Part8 有 2 张「手机上架确认」不计入时效。」
 ### 真源：又一份人工维护的登记表（单一真源，四消费方共用）
 
 ```
-商品资料.xlsx · 「人工登记」子表   ← 唯一真源（业务登记）
-        │  etl/products_loader.py（与 product_catalog / SKU换号 同一次导入、同一份文件指纹）
+SKU登记表.xlsx · 「人工登记」子表   ← 唯一真源（业务登记）
+        │   ⚠️ 2026-09-30 迁移：原为「商品资料.xlsx · 人工登记 子表」，见 §9 T15  etl/products_loader.py（与 product_catalog / SKU换号 同一次导入、同一份文件指纹）
         ▼
    MySQL `sku_hold`（sku PK / reason / registered_at / updated_at）
         │
@@ -1131,5 +1137,100 @@ zip 手术自检 **PASS**；真文件重导后 `holdTotal=6`；前端 `vite buil
 
 - 两张登记表（换号 / 人工登记）目前**手工维护**：改子表 → 重导（或等自动管线）。
   若变频繁，可在「数据管理」页加录入入口（未做）。
+
+
+## T15 SKU 登记表独立化 · 加「异常绝不清库」护栏（2026-09-30）
+
+**用户问题**：两张手工登记表（`SKU换号` / `人工登记`）被塞在 `资产文件\商品资料.xlsx` 里。
+而这份文件是**机器每月重新导出的商品主数据、用户会不定期整体替换** ——
+一换文件，两张子表就消失 → 后端下次手动导入时**静默清空** DB（`import_products` 是全量覆盖），
+离线脚本则静默读到空。**2026-09-29 已真实发生过一次**（催办单凭空多出来）。
+
+**方案（用户拍板）**：把两张登记表搬进**独立文件** `资产文件\SKU登记表.xlsx`，
+后端与离线脚本都改读它；并加**护栏**：登记文件/子表/表头缺失时**绝不执行 DELETE**。
+
+### 真源迁出（同一份真源）
+
+```
+资产文件\SKU登记表.xlsx   ← 人工维护、低频、不随商品资料刷新
+    ├─ 「SKU换号」子表   旧SKU | 新SKU | 换号说明 | 生效日期
+    └─ 「人工登记」子表   SKU | 说明 | 登记日期
+        │  import_registry()（独立指纹 state/registry_index.json + 「异常绝不清库」护栏）
+        ▼  MySQL sku_alias / sku_hold
+        │  app/sku_alias.py / app/sku_hold.py（唯一读写入口，读 DB）
+        ▼
+alerts / review / history / 流程复盘/route_check_sys.py（离线同源双实现）
+```
+
+- 路径真源常量：后端 `app/sku_alias.REGISTRY_XLSX_DEFAULT` == rule 默认键 `registry_xlsx_path`
+  == 离线 `route_check_sys.ALIAS_XLSX_DEFAULT` / `HOLD_XLSX_DEFAULT`（逐字相同，新测试看守）。
+- `scripts/seed_sku_registry.py`：从 DB（或硬编码兜底）**幂等**生成该文件（逐字节可复现）。
+
+### 「异常绝不清库」护栏（核心）
+
+`import_registry()` 的护栏规则：
+
+| 情形 | 行为 |
+|---|---|
+| 登记文件不存在 | **不 DELETE**；`status="warned"`；notes 显著告警（含期望路径） |
+| 子表缺失 / 表头定位失败 | **不 DELETE**（两张子表「全有才覆盖」）；`status="warned"` |
+| 子表在、表头在位、0 数据行 | 视为用户**主动清空** → 允许 DELETE，但**高声告警** + 记录 before/after 计数 |
+| 子表在、表头在位、有数据 | 正常全量覆盖（DELETE + insert） |
+
+`import_products()` 里原来的 `delete(SkuAlias)` / `delete(SkuHold)` **已删除** ——
+「换文件即清库」当场消失；`import_products` 只动 `product_catalog`。
+
+### 过渡兼容（30 天后关闭）
+
+读入口（`read_alias_sheet` / `read_hold_sheet` / 离线 `read_alias_map` / `read_hold_map`）
+在**默认路径**下若独立文件或其子表不存在 → **回退**读 `商品资料.xlsx` 的同名子表，
+并在 notes 附 `⚠ [deprecated] ...（计划 30 天后关闭此兼容）`。读不到一律**显眼告警**（绝不静默）。
+
+### 离线孪生（最小增量）
+
+`流程复盘/route_check_sys.py`：`ALIAS_XLSX_DEFAULT` 改指独立登记表、新增 `LEGACY_XLSX_DEFAULT`；
+`read_alias_map` / `read_hold_map` 缺失时**不再静默返回 {}**（打印含路径的告警），仍返回 {} 以免中断主流程；
+`CATALOG_XLSX`（档位/单价）**不动**。仍**不 import 后端包**。
+
+### 数据管理页
+
+- `POST /api/etl/products`（只导商品资料）与 `POST /api/etl/registry`（只导登记表）**分开** ——
+  不联动，避免再次耦合（登记表人工维护、低频，宜显式触发）。
+- `GET /api/etl/registry` 状态（对称 `GET /api/etl/products`）。
+- 备份清单**加入 `SKU登记表.xlsx`**（唯一「丢了不能自愈」的手工源）。
+
+### 验收
+
+- 新增 `tests/test_sku_registry.py`（同源常量 / 读入口签名未变 / 离线不 import 后端 /
+  老清库路径消失 / 护栏 4 分支 / 指纹跳过 / 默认读真文件 / **表头大小写折叠**），
+  改 `tests/test_sku_alias.py`、`tests/test_sku_hold.py`（真文件指向新登记表）、
+  `tests/test_dataadmin.py`、`tests/test_rules_center.py`。
+- **表头大小写折叠（QA 发现 A，本次修）**：`_pick`（后端 `app/sku_alias.py`，`sku_hold` 复用）
+  与 `_alias_pick`（离线 `route_check_sys.py`，`read_hold_map` 复用）**两侧同源**改为
+  「表头格与关键字**同时** fold 成大写」再包含判断 → 表头写成 `旧sku|新sku` 也能命中
+  （修复前只去空格不折叠大小写 → 命中 0 条 / `no_header`）。既有「去空格/全角空格/空单元格跳过/
+  1 基列号/找不到返回 None」及 `sku_hold` 标题行防护、`MAX_HDR_SCAN=6` 行为不变。
+- 全量 `pytest tests/ -q` → **345 passed + 1 skipped**。
+  水位线：T15 交付 **310 + 1**（较基线 290+1 净增 +20）→ QA 独立验证新增
+  `tests/test_sku_registry_verify_edward.py` 32 例 → 342 → 本次「表头大小写折叠」新增 3 例 → **345**。
+  （`TestBackupList::test_item_fields` 的严格 15 字符断言**保持不变**——迁移快照目录已规范命名为
+  `20260930-093840`；此前为兼容一个手工长名目录曾短暂放宽，已还原。）
+- `SKU登记表.xlsx` 由 `scripts/seed_sku_registry.py` 生成：`SKU换号` 2 行、`人工登记` 6 行，幂等可复现。
+
+### 待办
+
+- **解析器启发式边界（QA 发现 B，**既有、非本次迁移引入**）**：`人工登记` 子表若在真实表头前
+  **再插一行「两格短标题」**（如 `["SKU登记表", "说明"]`），该行会被当成表头 → 真实表头行
+  `["SKU", "说明", "登记日期"]` 被当数据 → 多出一条 `SKU="SKU"` **伪行**。
+  - **数据不丢、不静默吞表**：伪行会被 `validate_hold_rows` 标「格式可疑」并因不在商品资料清单而告警；
+    真数据行仍照常读入。
+  - **单格**标题行（`["业务上不需走完流程的 SKU 登记表", None, None]`）已被现有防护正确挡掉
+    （见本方案「标题行防护：SKU 格 ≤8 字 **且** 该行 ≥2 非空格」，两格短标题恰好落在两条件的漏洞上）。
+  - 最小反例（QA 复现）：`人工登记` 首行 `["SKU登记表", "说明"]`（"SKU登记表" 6 字 ≤8、2 格非空）→
+    真表头被当数据 → 读到 `SKU="SKU"` 伪行 + 原 6 条真数据共 7 条。
+  - **暂不收紧启发式**：收紧（如要求 SKU 列必须精确等于短标签集合）会危及真实表里 `产品SKU` 等写法，
+    得不偿失；`SKU换号` 子表因「旧SKU+新SKU **两列同时命中**」立判表头，不受此边界影响。
+- 过渡兼容的 30 天窗口到期后，移除回退读 `商品资料.xlsx` 的分支（后端 + 离线各一处）。
+- 迁移正式落库（`import_registry(force=True)`）由主理人统一编排；本次**未**执行真实迁移。
 
 

@@ -9,8 +9,8 @@
   ② 商品资料装配表的「共用<旧号>」是**刀模/神器共用**（全库 125 个 SKU 都有），推导必误伤；
   ③ `参考SKU` 列是「上一代同系列产品」（G593 参考 G511），语义不是换号。
 
-真源 = `资产文件\\商品资料.xlsx` 的 **`SKU换号`** 子表
-  → MySQL `sku_alias`（`etl/products_loader.py` 随商品资料一并导入）
+真源 = `资产文件\\SKU登记表.xlsx` 的 **`SKU换号`** 子表
+  → MySQL `sku_alias`（`etl/products_loader.py` 的 `import_registry()` 导入）
   → `app/sku_alias.py`（唯一读写入口，带 DB 指纹缓存）
 
 本文件覆盖三层：
@@ -38,7 +38,8 @@ from app import sku_alias                                        # noqa: E402
 from app.routers import alerts                                   # noqa: E402
 
 OFFLINE_SCRIPT = REPO / "流程复盘" / "route_check_sys.py"
-REAL_XLSX = Path(r"C:\Users\dell\Desktop\work-main\资产文件\商品资料.xlsx")
+# 真源 = 独立登记表（2026-09-30 从商品资料.xlsx 迁出）
+REAL_XLSX = Path(r"C:\Users\dell\Desktop\work-main\资产文件\SKU登记表.xlsx")
 
 HDR = ("旧SKU", "新SKU", "换号说明", "生效日期")
 

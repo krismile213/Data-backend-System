@@ -698,7 +698,7 @@ def compute_review(category=None):
     docs = _load_sku_docs(rs.key)          # 只取本品类批次（品类隔离）
     products = load_product_catalog()
 
-    # 换号对照（旧号→新号）：单一真源 app/sku_alias.py（商品资料 · SKU换号 子表）
+    # 换号对照（旧号→新号）：单一真源 app/sku_alias.py（SKU登记表.xlsx · SKU换号 子表 → DB）
     aliases = load_aliases()
     alias_in_map = {}                      # 新号 -> [旧号…]（反向标注用）
     for _o, _v in aliases.items():
@@ -706,7 +706,7 @@ def compute_review(category=None):
     for _v in alias_in_map.values():
         _v.sort()
 
-    # 人工登记（业务上不再走完 → 免催办）：单一真源 app/sku_hold.py（商品资料 · 人工登记 子表）
+    # 人工登记（业务上不再走完 → 免催办）：单一真源 app/sku_hold.py（SKU登记表.xlsx · 人工登记 子表 → DB）
     holds = load_holds()
 
     # ---- 按 SKU 组织（同 SKU 跨批次合并；同 Part 重复单据只留最新） ----

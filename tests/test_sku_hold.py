@@ -8,8 +8,8 @@
 - G495：卡 Part8 两张「手机上架确认」（2026-03-25 起悬挂「审批中」），且空运/海运超底线（曾判 P0）；
 - G524~G528：卡 Part9「新品环节检查」，自 2026-02 起停滞。（用户口径：Part8 那两张不计入时效。）
 
-真源 = `资产文件\\商品资料.xlsx` 的 **`人工登记`** 子表（`SKU|说明|登记日期`）
-  → MySQL `sku_hold`（`etl/products_loader.py` 随商品资料一并导入，全量覆盖）
+真源 = `资产文件\\SKU登记表.xlsx` 的 **`人工登记`** 子表（`SKU|说明|登记日期`）
+  → MySQL `sku_hold`（`etl/products_loader.py` 的 `import_registry()` 导入，全量覆盖）
   → `app/sku_hold.py`（唯一读写入口，带 DB 指纹缓存）
 
 ⚠️ 与另外两条「不催办」通道**互相独立**，不能互相覆盖：
@@ -41,7 +41,8 @@ from app import sku_hold                                         # noqa: E402
 from app.routers import alerts                                   # noqa: E402
 
 OFFLINE_SCRIPT = REPO / "流程复盘" / "route_check_sys.py"
-REAL_XLSX = Path(r"C:\Users\dell\Desktop\work-main\资产文件\商品资料.xlsx")
+# 真源 = 独立登记表（2026-09-30 从商品资料.xlsx 迁出）
+REAL_XLSX = Path(r"C:\Users\dell\Desktop\work-main\资产文件\SKU登记表.xlsx")
 
 HDR = ("SKU", "说明", "登记日期")
 

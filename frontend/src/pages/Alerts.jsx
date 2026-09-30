@@ -397,7 +397,7 @@ export default function Alerts() {
             <Typography variant="caption" color="text.secondary"
               sx={{ display: 'block', mb: 1 }}>
               判据：流程中途把编码换了（旧号停用、新号承接），旧号流程必然停在中途，
-              报「缺节点」属正常，<strong>不计入催办</strong>。真源 = 商品资料
+              报「缺节点」属正常，<strong>不计入催办</strong>。真源 = SKU登记表.xlsx
               <strong>「SKU换号」</strong>子表（业务登记，非自动推断）
               {data.aliasDef?.registered != null
                 ? ` · 全库登记 ${data.aliasDef.registered} 对，本品类命中 ${data.aliasDef?.hitInCategory ?? data.aliasRows.length} 个`
@@ -456,7 +456,7 @@ export default function Alerts() {
               sx={{ display: 'block', mb: 1 }}>
               判据：业务上<strong>已决定不再走完流程</strong>（渠道取消 / 并入其它型号 /
               末端环节实际不执行），人工登记后流程仍停在中途属正常，
-              <strong>不计入催办</strong>。真源 = 商品资料<strong>「人工登记」</strong>子表
+              <strong>不计入催办</strong>。真源 = SKU登记表.xlsx<strong>「人工登记」</strong>子表
               {data.holdDef?.registered != null
                 ? ` · 全库登记 ${data.holdDef.registered} 个，本品类命中 ${data.holdDef?.hitInCategory ?? data.holdRows.length} 个`
                 : ''}。

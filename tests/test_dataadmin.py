@@ -127,3 +127,34 @@ class TestBackupList:
     def test_list_sorted_desc(self, client):
         names = [i["name"] for i in client.get("/api/etl/backup").json()["items"]]
         assert names == sorted(names, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# 独立登记表（SKU登记表.xlsx）端点 —— 与 /api/etl/products 对称
+# ---------------------------------------------------------------------------
+class TestRegistryStatus:
+    """⚠️ 只读校验：不发 POST /api/etl/registry，避免测试触发真实写库。"""
+
+    def test_status_shape(self, client):
+        r = client.get("/api/etl/registry")
+        assert r.status_code == 200
+        d = r.json()
+        for key in ("hasTable", "xlsxPath", "xlsxExists", "aliasTotal", "holdTotal",
+                    "aliasSheet", "holdSheet", "status", "notes"):
+            assert key in d, f"缺少字段 {key}"
+        assert d["aliasSheet"] == "SKU换号"
+        assert d["holdSheet"] == "人工登记"
+        assert isinstance(d["aliasTotal"], int) and isinstance(d["holdTotal"], int)
+
+    def test_registry_file_present(self, client):
+        """独立登记表应已生成并在位（迁移的一部分）。"""
+        d = client.get("/api/etl/registry").json()
+        assert d["xlsxPath"].endswith("SKU登记表.xlsx")
+        assert d["xlsxExists"] is True, "SKU登记表.xlsx 应已在位（跑 scripts/seed_sku_registry.py）"
+
+    def test_endpoints_declared(self, client):
+        """GET + POST /api/etl/registry 都已注册（POST 仅校验存在，不调用）。"""
+        paths = client.get("/openapi.json").json()["paths"]
+        assert "/api/etl/registry" in paths
+        assert "get" in paths["/api/etl/registry"]
+        assert "post" in paths["/api/etl/registry"]

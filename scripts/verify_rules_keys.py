@@ -25,8 +25,8 @@ def w(s=""):
 
 
 NEW_KEYS = ["inflight_warn_ratio", "report_retention_days",
-            "products_xlsx_path", "loss_route_limit", "loss_daily_default",
-            "mail_enabled", "mail_to", "mail_host", "mail_port",
+            "products_xlsx_path", "registry_xlsx_path", "loss_route_limit",
+            "loss_daily_default", "mail_enabled", "mail_to", "mail_host", "mail_port",
             "mail_user", "mail_auth_code"]
 
 # 2026-09-24 删除的键：与真实调度脱钩、无任何消费方 → 必须**不再被接受**

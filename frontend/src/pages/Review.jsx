@@ -498,7 +498,7 @@ export default function Review() {
                     </Typography>
                   )}
                   <Typography variant="caption" color="text.secondary">
-                    真源：商品资料{detail.hold ? '「人工登记」' : '「SKU换号」'}子表（业务登记，非自动推断）
+                    真源：SKU登记表.xlsx{detail.hold ? '「人工登记」' : '「SKU换号」'}子表（业务登记，非自动推断）
                   </Typography>
                 </Box>
               )}

@@ -43,7 +43,7 @@ const INFLIGHT_NUM = [
 ];
 // 文本项（原样提交；空串表示未配置）
 const TEXT_KEYS = [
-  'products_xlsx_path', 'mail_to', 'mail_host', 'mail_user', 'mail_auth_code',
+  'products_xlsx_path', 'registry_xlsx_path', 'mail_to', 'mail_host', 'mail_user', 'mail_auth_code',
 ];
 // 敏感字段渲染成密码框
 const SECRET_KEYS = new Set(['mail_auth_code']);

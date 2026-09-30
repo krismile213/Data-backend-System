@@ -83,3 +83,21 @@ def test_defaults_have_no_scheduler_keys():
     """代码默认值里不得再有任何「时刻类」配置（调度不归规则管）。"""
     for k in _default_rules():
         assert not k.endswith("_slots"), f"疑似把调度塞回规则里：{k}"
+
+
+def test_registry_xlsx_path_key_registered(rules_payload):
+    """新增键 `registry_xlsx_path`（独立登记表路径）必须三处齐备：rules / defaults / meta。"""
+    from app.sku_alias import REGISTRY_XLSX_DEFAULT
+
+    for bucket in ("rules", "defaults", "meta"):
+        assert "registry_xlsx_path" in rules_payload[bucket], f"{bucket} 缺 registry_xlsx_path"
+    assert rules_payload["defaults"]["registry_xlsx_path"] == REGISTRY_XLSX_DEFAULT
+    # meta 必须有中文 label（规则页要能渲染）
+    assert rules_payload["meta"]["registry_xlsx_path"].get("label")
+
+
+def test_registry_xlsx_path_registered_in_str_keys():
+    """该键必须在路由的文本键白名单里，否则保存会被 422（此处只读白名单，不写库）。"""
+    from app.routers.rules import _STR_KEYS
+
+    assert "registry_xlsx_path" in _STR_KEYS

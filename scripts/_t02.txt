@@ -30,9 +30,9 @@
         4国     美国·运输                  days=     13 target=   35 ✓
 
 [2] GET /api/review/assessment → 200
-    summary = {'assessedCount': 93, 'lossCount': 43, 'gainCount': 48, 'noneCount': 2, 'lossTotalMin': 61575.68, 'lossTotalMax': 118314.77, 'gainTotalMin': 28603.13, 'gainTotalMax': 50248.98, 'lossQtyMin': 4805, 'lossQtyMax': 9267, 'degradedCount': 27}
+    summary = {'assessedCount': 93, 'lossCount': 43, 'gainCount': 48, 'noneCount': 2, 'lossTotalMin': 76989.07, 'lossTotalMax': 126837.2, 'gainTotalMin': 29056.59, 'gainTotalMax': 49989.87, 'lossQtyMin': 5974, 'lossQtyMax': 9703, 'degradedCount': 17}
     G506 项 = {'sku': 'G506', 'grade': 'XC', 'basis': '空运', 'startNode': '取数', 'startAt': '2025-10-30', 'spanDays': 232.0, 'limit': 60, 'delayDays': 172.0, 'direction': 'loss', 'qtyMin': 237, 'qtyMax': 946, 'amountMin': 2854.63, 'amountMax': 11377.16, 'dailyMin': 1.38, 'dailyMax': 5.5, 'price': 12.0266, 'priceType': '参考成本价', 'degraded': []}
-[3] GET /api/review/assessment/export → 200, 18494 bytes
+[3] GET /api/review/assessment/export → 200, 18396 bytes
 
 [4] GET /api/review/sku/G506/checkreport → 200, 11294 bytes
     sheets = ['段级明细与人工核对', '甘特', '核心原因与损益']

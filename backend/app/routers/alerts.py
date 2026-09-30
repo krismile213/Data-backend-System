@@ -25,7 +25,7 @@ alerts.py — SKU 加急预警引擎（GET /api/alerts）
   「同型号、终止后重开」的**承接单**（501→G501、G448→G481 均属此例）。
 
   换号（2026-09-28 新增）：SKU 在流程中途**换了编码**（旧号停用、新号承接）的，旧号也不进
-  催办，改列 `aliasRows`。数据源 = `商品资料.xlsx · SKU换号` 子表（`app/sku_alias.py`）。
+  催办，改列 `aliasRows`。数据源 = `SKU登记表.xlsx · SKU换号` 子表（`app/sku_alias.py`）。
   与「末端终止」的区别：作废单是**从数据里推断**的（末尾全终止 + 无在跑单据），换号是
   **业务登记**的（数据里没有可靠信号）—— 所以两者判据独立、互不覆盖，命中换号优先。
 
@@ -80,7 +80,7 @@ VOID_NOTE = "流程已终止，不进入后续环节，不列入催办"
 #   实测 G493/G494/G495 各自都还有 2~3 张「审批中」单据 → 永远不会被 `_void_info` 判中，
 #   所以必须有这条独立通道。
 #
-# 真源：`资产文件\商品资料.xlsx` 的 `SKU换号` 子表 → MySQL `sku_alias` → app/sku_alias.py。
+# 真源：`资产文件\SKU登记表.xlsx` 的 `SKU换号` 子表 → MySQL `sku_alias` → app/sku_alias.py。
 # 消费方：本模块（预警）、routers/review.py（复盘+甘特图）、离线 route_check_sys.py（预警 md）。
 ALIAS_NOTE = "流程中途换了编码（旧号→新号），旧号不列入催办"
 
@@ -101,7 +101,7 @@ ALIAS_NOTE = "流程中途换了编码（旧号→新号），旧号不列入催
 #   · **末端终止** = **数据推断**（末尾 Part 单据全「终止」且无在跑单据）。
 #   三者都单列备查、都移出 P0/P1/P2，但只有前两者认人工维护的登记表。
 #
-# 真源：`资产文件\商品资料.xlsx` 的 `人工登记` 子表 → MySQL `sku_hold` → app/sku_hold.py。
+# 真源：`资产文件\SKU登记表.xlsx` 的 `人工登记` 子表 → MySQL `sku_hold` → app/sku_hold.py。
 # 消费方：本模块（预警）、routers/review.py（复盘+甘特图）、离线 route_check_sys.py（预警 md）。
 HOLD_NOTE = "业务上已不需走完流程，人工登记后不列入催办"
 
@@ -507,11 +507,13 @@ def compute_alerts(category=None):
     review = get_review_data(rs.key)
     valid_map = {sku: d["valid"] for sku, d in review["skuDetails"].items()}
 
-    # 换号对照（旧号 → 新号）。DB/子表缺失时返回 {} → 行为与改造前完全一致。
+    # 换号对照（旧号 → 新号）。真源 = 独立登记表 `SKU登记表.xlsx·SKU换号 子表` → DB。
+    # DB/登记表缺失时返回 {} → 行为与改造前完全一致。
     from ..sku_alias import load_aliases
     aliases = load_aliases()
 
-    # 人工登记（业务上不再走完 → 免催办）。同样缺失即空 → 行为与改造前一致。
+    # 人工登记（业务上不再走完 → 免催办）。真源 = `SKU登记表.xlsx·人工登记 子表` → DB。
+    # 同样缺失即空 → 行为与改造前一致。
     from ..sku_hold import load_holds
     holds = load_holds()
 
@@ -737,7 +739,7 @@ def compute_alerts(category=None):
         "aliasRows": alias_rows,
         "aliasDef": {
             "note": ALIAS_NOTE,
-            "source": "商品资料.xlsx · SKU换号 子表",
+            "source": "SKU登记表.xlsx · SKU换号 子表",
             "registered": len(aliases),
             "hitInCategory": len(alias_rows),
         },
@@ -745,7 +747,7 @@ def compute_alerts(category=None):
         "holdRows": hold_rows,
         "holdDef": {
             "note": HOLD_NOTE,
-            "source": "商品资料.xlsx · 人工登记 子表",
+            "source": "SKU登记表.xlsx · 人工登记 子表",
             "registered": len(holds),
             "hitInCategory": len(hold_rows),
         },

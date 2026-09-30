@@ -328,8 +328,12 @@ set "NPM=%USERPROFILE%\.workbuddy\binaries\node\versions\%NODE_VER%\npm.cmd"
 `batch`（批次与文件指纹）/ `part_doc`（单据，含 raw JSON 原始列）/
 `approval_node`（审批节点）/ `rule_config`（时效规则）/
 `product_catalog`（商品资料：评级档位 + 单价）/
-`sku_alias`（换号对照：旧SKU → 新SKU，真源 = 商品资料「SKU换号」子表）/
-`sku_hold`（人工登记豁免：业务上已不需走完流程 → 不催办，真源 = 商品资料「人工登记」子表）。
+`sku_alias`（换号对照：旧SKU → 新SKU，真源 = `资产文件\SKU登记表.xlsx`「SKU换号」子表）/
+`sku_hold`（人工登记豁免：业务上已不需走完流程 → 不催办，真源 = `资产文件\SKU登记表.xlsx`「人工登记」子表）。
+
+> ℹ️ 2026-09-30（T15）：两张登记子表已从 `商品资料.xlsx` **迁出**到独立文件
+> `资产文件\SKU登记表.xlsx`。`商品资料.xlsx` 只负责 `product_catalog`（评级档位 + 单价）。
+> 登记改**独立文件**、不再改 `商品资料` 子表；过渡期（约 30 天）独立文件缺失时会回退读旧子表并打废弃告警。
 
 ### 连接配置：两套环境
 
