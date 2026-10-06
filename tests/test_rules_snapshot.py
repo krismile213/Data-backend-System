@@ -183,9 +183,33 @@ class TestOverrideApplied:
         mod, _ = load_sys_module(NONEXISTENT)
         segs0 = list(mod.SEGS)
         l40 = mod.L4
-        _segs, _l4, _a, _app = mod._apply_rule_snapshot(
+        _segs, _l4, _a, _app, _bad = mod._apply_rule_snapshot(
             mod.SEGS, mod.L4, 60, {"seg_targets": {"提案→取数": {"target": 1}}})
         assert mod.SEGS == segs0 and mod.L4 == l40
+
+    def test_non_numeric_targets_are_ignored_with_warning(self, tmp_path):
+        """手改快照写成字符串 target（"30"）→ 忽略覆盖、回退默认、warnings 非空、不抛。"""
+        snap = _write_snap(tmp_path / "snap.json",
+                           {"seg_targets": {"采购→发货末批": {"target": "30"},
+                                            "提案→取数": {"target": "40"}},
+                            "loss_route_limit": "60"})
+        mod, out = load_sys_module(snap)             # 模块加载不得抛
+        assert mod.L4[3] == 22                       # 回退代码默认值
+        assert mod.NOT_SHIPPED_GRACE_DAYS == 22
+        assert mod.ASSESS_LIMIT == 60
+        seg = {row[1]: row[4] for row in mod.SEGS}
+        assert seg["提案→取数"] == 75                 # 回退默认
+        assert mod._snap_warn and any("非数值" in w for w in mod._snap_warn)
+        # 判定层不再因 str 目标报 TypeError
+        assert mod.judge_seg(3, mod.L4[3]) == "✓"
+
+    def test_bool_target_is_rejected(self, tmp_path):
+        """bool 是 int 子类 → 必须当作非数值拒绝（True 不得被当成 1）。"""
+        snap = _write_snap(tmp_path / "snap.json",
+                           {"seg_targets": {"采购→发货末批": {"target": True}}})
+        mod, _ = load_sys_module(snap)
+        assert mod.L4[3] == 22
+        assert any("非数值" in w for w in mod._snap_warn)
 
 
 # ---------------------------------------------------------------------------
@@ -264,10 +288,24 @@ class TestBackendExport:
         assert "someone@example.com" not in text
 
     def test_build_snapshot_keys(self):
-        doc = RS.build_snapshot({"seg_targets": {}, "loss_route_limit": 60}, 3)
+        # ⚠️ 入参刻意掺入**非白名单**键（尤其是明文凭据）：若 build_snapshot 退化为
+        # 「整包 dump rules」，下方两条断言会立刻变红——这是本用例存在的唯一意义。
+        rules = {
+            "seg_targets": {},
+            "loss_route_limit": 60,
+            "mail_auth_code": "SECRET-CODE",
+            "mail_user": "a@b.c",
+            "future_unknown_key": 123,
+        }
+        doc = RS.build_snapshot(rules, 3)
         assert doc["schema"] == 1 and doc["rules_version"] == 3
         assert doc["keys"] == list(RS.SNAPSHOT_KEYS)
         assert set(doc["rules"].keys()) == set(RS.SNAPSHOT_KEYS)
+        # 非白名单键（含凭据）绝不出现在输出里
+        assert "mail_auth_code" not in doc["rules"]
+        assert "mail_user" not in doc["rules"]
+        assert "future_unknown_key" not in doc["rules"]
+        assert "SECRET-CODE" not in json.dumps(doc, ensure_ascii=False)
 
     def test_export_failure_is_swallowed(self, tmp_path):
         """写到不可写路径 → ok=False 且**不抛异常**。"""

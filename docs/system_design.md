@@ -1417,9 +1417,12 @@ analysis.detect_anomalies(l4_target=)      routers/review 段目标天 / 超时�
 
 - 同源双实现：后端 `rule_service.RULES_SNAPSHOT_JSON_DEFAULT` 与离线件 `RULES_SNAPSHOT_JSON_DEFAULT`
   **逐字相同**（由 `tests/test_rules_snapshot.py` 兜底），改一处必须同步改另一处。
-- 新增 `tests/test_rules_snapshot.py`（23 例）：同源常量、离线件不 import 后端包、默认零漂移、覆盖生效、
-  null 不崩、坏/缺快照不崩、后端原子导出 + 白名单（不含 `mail_`）、`save_rules` 触发落盘（假 session 不碰生产库）。
-- 全量 `pytest tests/ -q` → **391 passed + 1 skipped**（T16 基线 368 + 新增 23）。
+- 新增 `tests/test_rules_snapshot.py`（25 例）：同源常量、离线件不 import 后端包、默认零漂移、覆盖生效、
+  非数值/布尔覆盖被忽略（只挡非数值、**不 clamp**，`-5`/`999999` 原样生效）、null 不崩、坏/缺快照不崩、
+  后端原子导出 + 白名单（`build_snapshot` 入参掺入 `mail_auth_code` 等非白名单键，断言输出**只含**白名单）、
+  `save_rules` 触发落盘（假 session 不碰生产库）。
+- 全量 `pytest tests/ -q` → **395 passed + 1 skipped**（共采集 396 例；其中 T17 新增
+  `tests/test_rules_snapshot.py` 25 例）。
 
 ### 零漂移证据
 

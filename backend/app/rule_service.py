@@ -273,12 +273,13 @@ def export_rules_snapshot(rules=None, version=None, path=None) -> dict:
     - 原子写：先写 `path + ".tmp"` 再 `os.replace`（同目录重命名，避免离线件读到半截文件）；
       父目录不存在时创建。
     - **任何异常都吞掉**并返回 `{"ok": False, ...}` —— 这是给离线件的旁路，绝不能因为
-      写文件失败而让「保存规则 / 后端启动」失败。
+      写文件失败而让「保存规则 / 后端启动」失败；失败时顺手清理残留的 `*.json.tmp`。
     """
     if path is None:
         path = snapshot_path()
     else:
         path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
     try:
         if rules is None or version is None:
             _r, _v = get_rules()
@@ -287,12 +288,15 @@ def export_rules_snapshot(rules=None, version=None, path=None) -> dict:
         doc = build_snapshot(rules, version)
         text = json.dumps(doc, ensure_ascii=False, indent=2)
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, path)          # 同目录原子替换
         return {"ok": True, "path": str(path),
                 "rulesVersion": version, "bytes": len(text.encode("utf-8"))}
     except Exception as e:             # noqa: BLE001 —— 旁路通道，任何异常都不许外抛
+        try:                           # 清理可能残留的半截临时文件（失败也不许外抛）
+            os.remove(tmp)
+        except Exception:
+            pass
         return {"ok": False, "path": str(path), "error": f"{type(e).__name__}: {e}"}
 
 
