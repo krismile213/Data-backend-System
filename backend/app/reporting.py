@@ -13,7 +13,8 @@ reporting.py — xlsx 报告生成（P0-6 核查报告 / P1-4 评估导出）
 """
 
 import io
-from datetime import datetime
+import math
+from datetime import datetime, timedelta
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -578,20 +579,22 @@ def route_limits(ruleset=None):
 
 
 # ---------------------------------------------------------------------------
-# P0-4 · 事中日报（5 sheets：在研总表 / 超期明细 / 风险预警 / 今日进度 / 上报清单）
+# P0-4 · 事中日报（5 sheets：在研总表 / 超期明细 / 风险预警 / 在研SKU甘特图 / 上报清单）
 # ---------------------------------------------------------------------------
 def daily_report(*, category, computed_at, date_str, items, alerts,
-                 progress, provisional=False, targets_source="", exempts=None):
+                 gantts=None, provisional=False, targets_source="", exempts=None):
     """生成事中日报 xlsx（bytes）。
 
-    items    ：inflight overview 的在研 SKU 行；
+    items    ：inflight overview 的在研 SKU 行（staySeg=当前停留环节，
+               stayDaysLeft=距超时天数，负=已超期）；
     alerts   ：compute_alerts_today() 的 {todayNewOverdue, ongoingOverdue, warnings}；
-    progress ：progress_for(days=1) 的 [{date, newNodes}]；
+    gantts   ：_gantt_records() 的甘特记录（每在研 SKU 一块）→「在研SKU甘特图」
+               sheet（2026-10-06 替换原「今日进度变化」）；
     provisional/targets_source：该品类的目标天/评级线是否仍是待校准的名义值
                 （手机壳 = True）。为 True 时在总表标题下打一条橙色口径警示——
                 日报是要拿去催办/上报的，口径不确定必须写在脸上。
     exempts  ：被豁免移出追踪的 SKU 明细（compute_inflight 的 exempted，
-                [{sku, model, kind, reason}]）。非空时追加第 6 sheet「豁免备查」
+                [{sku, model, kind, reason}]）。非空时追加「豁免备查」sheet
                 ——移出追踪但不吞数据，谁被豁免、为什么豁免，日报里要能对上账。
     """
     wb = Workbook()
@@ -609,10 +612,10 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
                      "不得作为既定 KPI 引用；业务确认后须重跑本日报。")
         ws1["A2"].font = Font(bold=True, size=10, color="EF6C00")
         ws1.merge_cells(start_row=2, start_column=1, end_row=2, end_column=12)
-    _head_row(ws1, 3, ["SKU", "型号", "状态", "最差环节", "部门", "已进行(天)",
-                       "目标(天)", "超期(天)", "预警段数", "多轮提交",
+    _head_row(ws1, 3, ["SKU", "型号", "状态", "当前停留环节", "部门", "已停留(天)",
+                       "目标(天)", "距超时(天)", "预警段数", "多轮提交",
                        "核心原因", "责任人"],
-              widths=[14, 18, 8, 20, 8, 10, 9, 9, 9, 10, 26, 10])
+              widths=[14, 18, 8, 22, 8, 10, 9, 11, 9, 10, 26, 10])
     r = 4
     for it in items or []:
         _put(ws1, r, 1, it.get("sku"))
@@ -622,15 +625,26 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
         c.font = Font(size=10, bold=st in ("超期", "预警"),
                       color="C62828" if st == "超期"
                       else ("EF6C00" if st == "预警" else "2E7D32"))
-        _put(ws1, r, 4, it.get("worstSeg") or "—")
-        _put(ws1, r, 5, it.get("worstSegDept") or "—")
-        _put(ws1, r, 6, "—" if it.get("worstElapsed") is None
-             else it.get("worstElapsed"), align=Alignment(horizontal="center"))
-        _put(ws1, r, 7, "—" if it.get("worstTarget") is None
-             else it.get("worstTarget"), align=Alignment(horizontal="center"))
-        _put(ws1, r, 8, "—" if it.get("worstOverDays") is None
-             else it.get("worstOverDays"),
-             align=Alignment(horizontal="center"))
+        _put(ws1, r, 4, it.get("staySeg") or "—")
+        _put(ws1, r, 5, it.get("staySegDept") or "—")
+        _put(ws1, r, 6, "—" if it.get("stayElapsed") is None
+             else it.get("stayElapsed"), align=Alignment(horizontal="center"))
+        _put(ws1, r, 7, "—" if it.get("stayTarget") is None
+             else it.get("stayTarget"), align=Alignment(horizontal="center"))
+        # 距超时(天)：负 = 已超期 N 天（红），0 = 今日到期（红），
+        # ≤2 天临近（橙），其余正常 —— 数字比"超期天数"更有行动性
+        dl = it.get("stayDaysLeft")
+        if dl is None:
+            dl_txt, dl_color, dl_bold = "—", "616161", False
+        elif dl < 0:
+            dl_txt, dl_color, dl_bold = f"已超{-dl:.0f}天", "C62828", True
+        elif dl == 0:
+            dl_txt, dl_color, dl_bold = "今日到期", "C62828", True
+        else:
+            dl_txt = f"剩{dl:.0f}天"
+            dl_color, dl_bold = ("EF6C00", True) if dl <= 2 else ("2E7D32", False)
+        c = _put(ws1, r, 8, dl_txt, align=Alignment(horizontal="center"))
+        c.font = Font(size=10, bold=dl_bold, color=dl_color)
         _put(ws1, r, 9, len(it.get("warnSegs") or []),
              align=Alignment(horizontal="center"))
         _put(ws1, r, 10, "⚠ 是" if it.get("multiRound") else "—")
@@ -690,22 +704,9 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
     if r == 4:
         _put(ws3, 4, 1, "（无预警段）")
 
-    # ---- Sheet4 今日进度变化（P1-1） ----
-    ws4 = wb.create_sheet("今日进度变化")
-    ws4["A1"] = "今日新完成节点（对比上一快照）"
-    ws4["A1"].font = TITLE_FONT
-    _head_row(ws4, 3, ["快照日期", "SKU", "新完成节点", "完成时间"],
-              widths=[12, 14, 22, 20])
-    r = 4
-    for p in progress or []:
-        for n in p.get("newNodes") or []:
-            _put(ws4, r, 1, p.get("date"))
-            _put(ws4, r, 2, n.get("sku"))
-            _put(ws4, r, 3, n.get("node"))
-            _put(ws4, r, 4, n.get("at"))
-            r += 1
-    if r == 4:
-        _put(ws4, 4, 1, "（今日无新完成节点）")
+    # ---- Sheet4 在研SKU甘特图（2026-10-06 替换原「今日进度变化」）----
+    ws4 = wb.create_sheet("在研SKU甘特图")
+    _gantt_sheet_inflight(ws4, gantts or [], date_str)
 
     # ---- Sheet5 异常上报清单（P0-7） ----
     ws5 = wb.create_sheet("异常上报清单")
@@ -761,3 +762,199 @@ def _fill_report_row(ws, r, x):
     c.font = Font(size=10, bold=True, color="C62828")
     _put(ws, r, 6, x.get("elapsed"), align=Alignment(horizontal="center"))
     _put(ws, r, 7, x.get("owner") or "—")
+
+
+# ---------------------------------------------------------------------------
+# 在研 SKU 流程甘特（2026-10-06 替换原「今日进度变化」sheet）
+# 画法 1:1 抄 流程复盘/gantt_sheet.py（route_check_sys 汇总 xlsx 同款）：
+# 全局日历轴每格=1天 / 月份合并轴 / 部门列纵向合并 / 条形超出目标部分红色；
+# 事中差异：未完成段条形延伸至今日（当前停留可见）、只画在研 SKU、区块新→旧。
+# ---------------------------------------------------------------------------
+G_CAL0 = 7                              # 日历轴起始列（G；标签列 A-F）
+G_DEPT_FILL = {"产品": "4472C4", "运营": "70AD47", "后勤": "ED7D31",
+               "运输": "7030A0", "4国": "BF8F00", "应发未发": "C00000"}
+G_DEPT_HEAD = {"产品": "D9E1F2", "运营": "E2EFDA", "后勤": "FCE4D6",
+               "运输": "E4DFEC", "4国": "FFF2CC", "留空": "F2F2F2",
+               "__GAP__": "F2F2F2", "应发未发": "F4CCCC"}
+G_DEPT_LABEL = {"产品": "产品部", "运营": "运营部", "后勤": "后勤部",
+                "运输": "运输", "4国": "4国单独", "__GAP__": "留空",
+                "应发未发": "应发未发"}
+G_RED = "FF3B30"                        # 条形超出目标的部分
+G_NEUTRAL = "A6A6A6"                    # 留空段 / 未设目标段（灰条）
+G_TITLE_FILL = "D9E2F3"
+G_AXIS_FILL = "262626"
+G_THIN_BOTTOM = Border(bottom=Side(style="thin", color="BFBFBF"))
+
+
+def _g_fill(hex6):
+    return PatternFill("solid", start_color=hex6, end_color=hex6)
+
+
+def _g_judge_color(judge):
+    s = str(judge or "")
+    if s.startswith("✗"):
+        return "C00000"
+    if s.startswith("✓"):
+        return "1F7A1F"
+    if s.startswith("⚠"):
+        return "B36A00"
+    return "808080"
+
+
+def _g_left_text(dl):
+    """距超时天数的展示文案（与总表第 8 列同口径）。"""
+    if dl is None:
+        return "—"
+    if dl < 0:
+        return f"已超{-dl:.0f}天"
+    if dl == 0:
+        return "今日到期"
+    return f"剩{dl:.0f}天"
+
+
+def _gantt_sheet_inflight(ws, records, date_str):
+    """在研 SKU 甘特主入口：records = inflight_service._gantt_records() 产物。"""
+    try:
+        today = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        today = datetime.now().date()
+    ws.cell(1, 1, (
+        f"在研 SKU 流程甘特图（截至 {today:%Y-%m-%d} · 每格=1天 · "
+        "条形超出目标的部分=红色 · 未完成段延伸至今日）   "
+        "颜色：■产品部(蓝) ■运营部(绿) ■后勤部(橙) ■运输(紫) ■4国(金) "
+        "■留空/无目标(灰) · SKU 区块按新→旧排列")).font = Font(bold=True, size=11)
+
+    starts, ends = [], []
+    for rec in records:
+        for it in rec["rows"]:
+            if it.get("t0"):
+                starts.append(it["t0"])
+            if it.get("t1"):
+                ends.append(it["t1"])
+    if not starts or not ends:
+        ws.cell(3, 1, "（无可用时间轴：在研 SKU 均无节点时间）").font = CELL_FONT
+        return
+    axis_start = (min(starts) - timedelta(days=1)).date()
+    axis_end = max((max(ends) + timedelta(days=2)).date(), today)
+    n_days = (axis_end - axis_start).days + 1
+    last_col = G_CAL0 + n_days - 1
+
+    ws.column_dimensions["A"].width = 7
+    ws.column_dimensions["B"].width = 38
+    ws.column_dimensions["C"].width = 8.5
+    ws.column_dimensions["D"].width = 8.5
+    ws.column_dimensions["E"].width = 10
+    ws.column_dimensions["F"].width = 10
+    for i in range(n_days):
+        ws.column_dimensions[get_column_letter(G_CAL0 + i)].width = 3.0
+    for c in range(1, last_col + 1):
+        ws.cell(1, c).fill = _g_fill("FFF2CC")
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=last_col)
+    ws.row_dimensions[1].height = 20
+    ws.row_dimensions[2].height = 6
+    ws.freeze_panes = f"{get_column_letter(G_CAL0)}3"
+
+    row = 3
+    for rec in records:
+        row = _g_block(ws, row, rec, axis_start, n_days, last_col)
+
+
+def _g_block(ws, top, rec, axis_start, n_days, last_col):
+    """一个 SKU 区块：标题行 + 月份合并轴 + 日期行 + 条形行（部门纵向合并）。"""
+    title = (f"{rec['sku']} · {rec.get('model') or '—'}    "
+             f"状态: {rec.get('status') or '—'}    "
+             f"当前停留: {rec.get('staySeg') or '—'}    "
+             f"距超时: {_g_left_text(rec.get('stayDaysLeft'))}")
+    for c in range(1, last_col + 1):
+        ws.cell(top, c).fill = _g_fill(G_TITLE_FILL)
+    ws.cell(top, 1, title).font = Font(bold=True, size=10)
+    ws.cell(top, 1).alignment = Alignment(vertical="center")
+    ws.merge_cells(start_row=top, start_column=1, end_row=top, end_column=last_col)
+    ws.row_dimensions[top].height = 20
+
+    # 月份行（深色底白字，按自然月合并）
+    mrow = top + 1
+    c = 0
+    while c < n_days:
+        d = axis_start + timedelta(days=c)
+        nxt = (d.replace(day=28) + timedelta(days=4)).replace(day=1)
+        span = min((nxt - d).days, n_days - c)
+        for k in range(span):
+            ws.cell(mrow, G_CAL0 + c + k).fill = _g_fill(G_AXIS_FILL)
+        ws.cell(mrow, G_CAL0 + c, f"{d:%Y-%m}").font = Font(
+            bold=True, size=9, color="FFFFFF")
+        ws.cell(mrow, G_CAL0 + c).alignment = Alignment(
+            horizontal="center", vertical="center")
+        ws.merge_cells(start_row=mrow, start_column=G_CAL0 + c,
+                       end_row=mrow, end_column=G_CAL0 + c + span - 1)
+        c += span
+    ws.row_dimensions[mrow].height = 14
+
+    # 日期行（每月 1 日加粗）
+    drow = mrow + 1
+    for c in range(n_days):
+        d = axis_start + timedelta(days=c)
+        cell = ws.cell(drow, G_CAL0 + c, d.day)
+        cell.font = Font(bold=(d.day == 1), size=7,
+                         color="404040" if d.day == 1 else "909090")
+        cell.alignment = Alignment(horizontal="center")
+    ws.row_dimensions[drow].height = 12
+
+    # 条形行（部门分组，A 列纵向合并）
+    r = drow + 1
+    grp_from, prev_dept = r, None
+    for item in rec["rows"]:
+        dept = item.get("dept") or ""
+        if prev_dept is not None and dept != prev_dept:
+            _g_merge_dept(ws, grp_from, r - 1, prev_dept)
+            grp_from = r
+        prev_dept = dept
+        cost = item.get("days")
+        target = item.get("target")
+        judge = str(item.get("judge") or "-")
+        jc = _g_judge_color(judge)
+        ws.cell(r, 2, item.get("seg")).font = Font(size=9)
+        ws.cell(r, 3, cost if cost is not None else "—").font = Font(size=9)
+        ws.cell(r, 4, f"≤{target:g}" if target is not None else "—").font = Font(size=9)
+        ws.cell(r, 5, judge).font = Font(size=9, bold=judge.startswith(("✓", "✗")),
+                                         color=jc)
+        ws.cell(r, 6, item.get("owner") or "—").font = Font(size=9)
+        for cc in range(2, G_CAL0):
+            ws.cell(r, cc).border = G_THIN_BOTTOM
+            ws.cell(r, cc).alignment = Alignment(vertical="center", wrap_text=False)
+        base = (G_NEUTRAL if item.get("neutral")
+                else G_DEPT_FILL.get(dept, G_NEUTRAL))
+        _g_bar(ws, r, item, base, axis_start, n_days)
+        ws.row_dimensions[r].height = 16
+        r += 1
+    _g_merge_dept(ws, grp_from, r - 1, prev_dept)
+    return r + 1          # 区块间空行
+
+
+def _g_merge_dept(ws, r_from, r_to, dept):
+    if r_to < r_from or not dept:
+        return
+    for rr in range(r_from, r_to + 1):
+        ws.cell(rr, 1).fill = _g_fill(G_DEPT_HEAD.get(dept, "F2F2F2"))
+    ws.cell(r_from, 1, G_DEPT_LABEL.get(dept, f"{dept}部")).font = Font(
+        bold=True, size=9)
+    ws.cell(r_from, 1).alignment = Alignment(horizontal="center",
+                                             vertical="center", wrap_text=True)
+    ws.merge_cells(start_row=r_from, start_column=1, end_row=r_to, end_column=1)
+
+
+def _g_bar(ws, row, item, base_color, axis_start, n_days, cal0=G_CAL0):
+    """条形：起点→终点逐日填充；相对起点超出目标天的部分(≥ceil(目标天))红色。
+    同 gantt_sheet._draw_bar 口径：目标 0/空（留空段）不切红。"""
+    t0, t1 = item.get("t0"), item.get("t1")
+    if t0 is None or t1 is None:
+        return
+    d0 = (t0.date() - axis_start).days
+    d1 = (t1.date() - axis_start).days
+    if d1 < d0:
+        d0, d1 = d1, d0
+    cut = math.ceil(target) if (target := item.get("target")) else None
+    for c in range(max(d0, 0), min(d1, n_days - 1) + 1):
+        rel = c - d0               # 距条形起点的天数（0=起点当日）
+        over = cut is not None and rel >= cut and rel > 0
+        ws.cell(row, cal0 + c).fill = _g_fill(G_RED if over else base_color)

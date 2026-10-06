@@ -162,7 +162,94 @@ def test_prev_day_nodes_lookup(snap_file):
 
 
 # ---------------------------------------------------------------------------
-# 日报 xlsx（P0-4：5 sheets）
+# 当前停留判定（2026-10-06：总表「最差环节」改「当前停留」+ 距超时天数）
+# ---------------------------------------------------------------------------
+def test_pick_stay_latest_started_unfinished():
+    """进行中：最近启动未完成的段 = 当前停留；距超时 = 目标 − 已停留（负=已超期）。"""
+    rows = [
+        _row(seg="提案→取数", dept="产品",
+             t0=datetime(2026, 8, 1), t1=datetime(2026, 8, 20), target=75),
+        _row(seg="取数→签样", dept="运营",
+             t0=datetime(2026, 9, 1), t1=None, target=10),
+    ]
+    state_rows = [(r, svc.seg_state(r, today=TODAY)) for r in rows]
+    stay, st, dl = svc._pick_stay(state_rows)
+    assert stay["seg"] == "取数→签样"
+    assert st["state"] == svc.ST_OVER
+    # 2026-09-01 → 09-22 已 21 天，目标 10 → 已超 11 天
+    assert dl == -11.0
+
+
+def test_pick_stay_all_pending():
+    """全部未开始：停在第一段，已停留 0 天，距超时 = 目标天。"""
+    rows = [_row(seg="提案→取数", dept="产品", t0=None, t1=None, target=7)]
+    state_rows = [(r, svc.seg_state(r, today=TODAY)) for r in rows]
+    stay, st, dl = svc._pick_stay(state_rows)
+    assert stay["seg"] == "提案→取数"
+    assert st["state"] == svc.ST_PENDING
+    assert dl == 7.0
+
+
+def test_pick_stay_all_done_still_open():
+    """全部完成但仍未闭环（复盘口径缺终点）：取最晚完成段，距超时 = None。"""
+    rows = [
+        _row(seg="A", dept="产品", t0=datetime(2026, 8, 1),
+             t1=datetime(2026, 8, 5), target=10),
+        _row(seg="B", dept="运营", t0=datetime(2026, 8, 5),
+             t1=datetime(2026, 8, 9), target=7),
+    ]
+    state_rows = [(r, svc.seg_state(r, today=TODAY)) for r in rows]
+    stay, _st, dl = svc._pick_stay(state_rows)
+    assert stay["seg"] == "B"
+    assert dl is None
+
+
+def test_pick_stay_running_without_target():
+    """停留段未设目标天 → 距超时 = None（只报停留，不做到期判定）。"""
+    rows = [_row(seg="X", dept="后勤", t0=datetime(2026, 9, 1),
+                 t1=None, target=None)]
+    state_rows = [(r, svc.seg_state(r, today=TODAY)) for r in rows]
+    stay, _st, dl = svc._pick_stay(state_rows)
+    assert stay["seg"] == "X"
+    assert dl is None
+
+
+# ---------------------------------------------------------------------------
+# 甘特记录（_gantt_records：未完成段延伸至今日 / 未开始段跳过 / neutral 标记）
+# ---------------------------------------------------------------------------
+def test_gantt_records_extends_unfinished():
+    data = {
+        "items": [{"sku": "G1", "model": "M1", "status": "超期",
+                   "staySeg": "取数→签样", "stayDaysLeft": -11.0}],
+        "skuDetails": {"G1": {"segments": [
+            {"dept": "产品", "seg": "提案→取数", "t0": "2026-08-01 09:00:00",
+             "t1": "2026-08-20 10:00:00", "days": "19.0", "target": 75,
+             "state": "已完成", "judge": "✓", "executor": "张三",
+             "gap": False, "noShip": False},
+            {"dept": "运营", "seg": "取数→签样", "t0": "2026-09-01 09:00:00",
+             "t1": None, "days": None, "target": 10, "state": "超期",
+             "elapsed": 21, "warnLine": 8.5, "judge": "—缺时间",
+             "executor": "李四", "gap": False, "noShip": False},
+            {"dept": "__GAP__", "seg": "留空段", "t0": None, "t1": None,
+             "days": None, "target": None, "state": "留空", "judge": "—留空",
+             "executor": "", "gap": True, "noShip": False},
+        ]}},
+    }
+    recs = svc._gantt_records(data, today=date(2026, 10, 6))
+    assert len(recs) == 1
+    assert recs[0]["sku"] == "G1"
+    rows = recs[0]["rows"]
+    assert len(rows) == 2              # 未开始段（t0 空）不画，跳过
+    done, running = rows
+    assert done["days"] == "19.0" and done["neutral"] is False
+    # 未完成段：条形延伸至今日 12 点，判定改写为事中人话（不再是"—缺时间"）
+    assert running["t1"] == datetime(2026, 10, 6, 12, 0)
+    assert running["judge"].startswith("✗超期(已21天)")
+    assert running["days"] == 21
+
+
+# ---------------------------------------------------------------------------
+# 日报 xlsx（P0-4；2026-10-06 起 Sheet4 = 在研SKU甘特图）
 # ---------------------------------------------------------------------------
 def test_daily_report_sheets():
     alerts = {
@@ -177,24 +264,26 @@ def test_daily_report_sheets():
                       "owner": "赵六"}],
     }
     items = [{"sku": "G1", "model": "M1", "status": "超期",
-              "worstSeg": "取数→签样", "worstSegDept": "运营",
-              "worstElapsed": 12, "worstTarget": 10, "worstOverDays": 2,
+              "staySeg": "取数→签样", "staySegDept": "运营",
+              "stayElapsed": 12, "stayTarget": 10, "stayDaysLeft": -2,
               "warnSegs": [], "multiRound": False,
               "rootCause": {"type": "搁置", "seg": "取数→签样"}, "owner": "李四"}]
-    progress = [{"date": "2026-09-22",
-                 "newNodes": [{"sku": "G1", "node": "签样",
-                               "at": "2026-09-22 09:00:00"}]}]
     content = _daily_xlsx(category="手机膜", computed_at="2026-09-22 17:00",
                           date_str="2026-09-22", items=items, alerts=alerts,
-                          progress=progress)
+                          gantts=[])
     from openpyxl import load_workbook
     wb = load_workbook(io.BytesIO(content))
     assert wb.sheetnames == ["在研SKU状态总表", "超期明细", "风险预警",
-                             "今日进度变化", "异常上报清单"]
-    ws1, ws5 = wb["在研SKU状态总表"], wb["异常上报清单"]
+                             "在研SKU甘特图", "异常上报清单"]
+    ws1, ws4, ws5 = (wb["在研SKU状态总表"], wb["在研SKU甘特图"],
+                     wb["异常上报清单"])
     assert ws1.cell(row=4, column=1).value == "G1"
     assert ws1.cell(row=4, column=3).value == "超期"
-    assert ws1.cell(row=4, column=8).value == 2
+    # 第 8 列 = 距超时（负 → 「已超N天」人话，不再是裸数字）
+    assert ws1.cell(row=4, column=8).value == "已超2天"
+    assert "已超" in str(ws1.cell(row=4, column=8).value)
+    # 甘特 sheet：空记录也要有占位（不抛异常）
+    assert "甘特" in ws4.title
     # 上报清单：先当日新超期后持续超期，类型列可区分
     assert ws5.cell(row=4, column=1).value == "当日新超期"
     assert ws5.cell(row=4, column=2).value == "G1"
@@ -208,7 +297,7 @@ def test_daily_report_empty():
                           items=[], alerts={"todayNewOverdue": [],
                                             "ongoingOverdue": [],
                                             "warnings": []},
-                          progress=[])
+                          gantts=[])
     from openpyxl import load_workbook
     wb = load_workbook(io.BytesIO(content))
     assert len(wb.sheetnames) == 5
@@ -233,7 +322,7 @@ def test_provisional_warning_lands_on_sheet1():
 
     empty_alerts = {"todayNewOverdue": [], "ongoingOverdue": [], "warnings": []}
     content = _daily_xlsx(category="手机壳", computed_at="x", date_str="d",
-                          items=[], alerts=empty_alerts, progress=[],
+                          items=[], alerts=empty_alerts, gantts=[],
                           provisional=True,
                           targets_source="继承手机膜口径（待业务校准）")
     a2 = load_workbook(io.BytesIO(content))["在研SKU状态总表"]["A2"].value or ""
@@ -241,7 +330,7 @@ def test_provisional_warning_lands_on_sheet1():
 
     # 手机膜（provisional 缺省 False）不得出现该行，否则是真误报
     plain = _daily_xlsx(category="手机膜", computed_at="x", date_str="d",
-                        items=[], alerts=empty_alerts, progress=[])
+                        items=[], alerts=empty_alerts, gantts=[])
     assert load_workbook(io.BytesIO(plain))["在研SKU状态总表"]["A2"].value is None
 
 
@@ -300,8 +389,14 @@ def test_inflight_structure(inflight_data):
     for x in d["items"]:
         assert x["sku"] and x["status"] in (svc.ST_RUNNING, svc.ST_WARN,
                                             svc.ST_OVER)
-        if x["status"] == svc.ST_OVER:
-            assert x["worstOverDays"] and x["worstOverDays"] > 0
+        # 当前停留环节必须在；距超时=负 → 已超期，正 → 剩 N 天
+        assert x.get("staySeg")
+        if x.get("stayDaysLeft") is not None:
+            assert x["stayDaysLeft"] == round(x["stayDaysLeft"], 1)
+    # 排序：距超时升序（负=已超期最前、无目标沉底）——最紧急的排最前
+    lefts = [x["stayDaysLeft"] for x in d["items"]
+             if x["stayDaysLeft"] is not None]
+    assert lefts == sorted(lefts)
 
 
 def test_inflight_g506_still_in_research(inflight_data, review_g506_done):

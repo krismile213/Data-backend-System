@@ -109,18 +109,62 @@ def seg_state(row, today=None, ratio=0.85):
 
 
 def _seg_public(row, st):
-    """段行 → 对外结构（详情页/日报共用）。"""
+    """段行 → 对外结构（详情页/日报共用）。
+
+    t0/t1 以 ISO 字符串输出（datetime 过不了 JSON）；甘特图与前端时间轴都靠它。
+    days 为复盘侧算好的耗时展示串（_fmt_days 产物）。
+    """
+    t0, t1 = row.get("t0"), row.get("t1")
     return {
         "dept": row.get("dept"), "seg": row.get("seg"),
         "from": row.get("from"), "to": row.get("to"),
         "state": st["state"],
         "start": row.get("start"), "end": row.get("end"),
+        "days": row.get("days"),
+        "t0": (t0.strftime("%Y-%m-%d %H:%M:%S") if t0 else None),
+        "t1": (t1.strftime("%Y-%m-%d %H:%M:%S") if t1 else None),
         "elapsed": st["elapsed"], "target": st["target"],
         "warnLine": st["warnLine"], "over": st["over"],
         "judge": row.get("judge"),
         "owner": row.get("owner"), "executor": row.get("executor"),
         "gap": bool(row.get("gap")), "noShip": bool(row.get("noShip")),
     }
+
+
+def _pick_stay(state_rows):
+    """当前停留环节判定（2026-10-06：总表「最差环节」改判「当前停留」）。
+
+    state_rows：[(段行, seg_state 结果)]。
+    定义：**未完成段（进行中/预警/超期）里最近启动（t0 最新）的那一段**——
+    流程是顺序推进的，最近启动而没走完的段就是当前卡住的地方；
+      · 全部未开始 → 停在第一段（已停留 0 天，距超时 = 目标天）；
+      · 全部完成但仍未闭环（缺终点节点等复盘口径）→ 取最晚完成的段，
+        距超时 = None（没有"进行中"的时钟可算）。
+    返回 (段行|None, st|None, days_left|None)；days_left = 目标 − 已停留，
+    **负数 = 已超期 N 天**。
+    """
+    started = [(r.get("t0"), r, st) for r, st in state_rows
+               if st["state"] in (ST_RUNNING, ST_WARN, ST_OVER) and r.get("t0")]
+    if started:
+        _, row, st = max(started, key=lambda x: x[0])
+    else:
+        pend = [(r, st) for r, st in state_rows if st["state"] == ST_PENDING]
+        if pend:
+            row, st = pend[0]
+        else:
+            done = [(r.get("t1"), r, st) for r, st in state_rows
+                    if st["state"] == ST_DONE and r.get("t1")]
+            if done:
+                _, row, st = max(done, key=lambda x: x[0])
+            else:
+                row = st = None
+    days_left = None
+    if st is not None and st.get("target") is not None:
+        if st["state"] == ST_PENDING:
+            days_left = round(float(st["target"]), 1)
+        elif st["state"] in (ST_RUNNING, ST_WARN, ST_OVER):
+            days_left = round(float(st["target"]) - float(st["elapsed"] or 0), 1)
+    return row, st, days_left
 
 
 # ---------------------------------------------------------------------------
@@ -162,8 +206,11 @@ def compute_inflight(category=None):
 
     返回 {computedAt, **describe, inResearchCount, overdueSkuCount, warnCount,
           multiRoundCount, todayNewNodes, items, skuDetails, exemptCount, exempted}
-    items 项：{sku, model, worstSeg, worstSegDept, worstOverDays, warnSegs,
-               status, multiRound, rootCause, owner}
+    items 项：{sku, model, staySeg, staySegDept, stayElapsed, stayTarget,
+               stayDaysLeft, warnSegs, status, multiRound, rootCause, owner}
+      stayDaysLeft = 距超时天数（目标 − 已停留；负 = 已超期 N 天）。
+      2026-10-06 起总表主判定从「最差环节」（历史超得最狠的段）改为
+      「当前停留环节」（最近启动没走完的段）——催办要的是"现在卡在哪"。
     exempted 项：{sku, model, kind, reason} —— 被豁免移出追踪的 SKU（备查不吞数据）。
     结果按品类缓存（指纹 = 复盘指纹，规则热调/导入自动失效）。
     """
@@ -234,9 +281,10 @@ def compute_inflight(category=None):
                 multi_round, root_cause, part_stat = {}, None, {}
 
         # ---- 段状态机 + 汇总 ----
-        segs_out, warn_list, over_list = [], [], []
+        segs_out, warn_list, over_list, state_rows = [], [], [], []
         for r in seg_rows:
             st = seg_state(r, today=today, ratio=ratio)
+            state_rows.append((r, st))
             segs_out.append(_seg_public(r, st))
             if st["state"] == ST_OVER:
                 over_list.append((st["over"], r, st))
@@ -250,30 +298,27 @@ def compute_inflight(category=None):
         if not in_research:
             continue                # 已完结（三部门全完成且无审批中单据）→ 事后域
 
-        worst = None
-        worst_over = None
-        if over_list:
-            worst_over, r, st = over_list[0]
-            worst = {"dept": r.get("dept"), "seg": r.get("seg"),
-                     "elapsed": st["elapsed"], "target": st["target"],
-                     "over": st["over"], "owner": r.get("executor")
-                     or r.get("owner") or ""}
-        elif warn_list:
-            _dv, r, st = warn_list[0]
-            worst = {"dept": r.get("dept"), "seg": r.get("seg"),
-                     "elapsed": st["elapsed"], "target": st["target"],
-                     "over": None, "owner": r.get("executor")
-                     or r.get("owner") or ""}
+        # ---- 当前停留环节（总表主判定，2026-10-06 起替代「最差环节」）----
+        # 最差环节 = 历史上超得最狠的段，回答"哪一段烂过"；
+        # 当前停留 = 最近启动没走完的段，回答"现在卡在哪、还有几天到期"。
+        # 催办要的是后者。超期/预警计数仍用 over_list/warn_list（状态列与预警段数）。
+        stay_row, stay_st, stay_left = _pick_stay(state_rows)
+        stay_elapsed = None
+        if stay_st is not None:
+            stay_elapsed = stay_st.get("elapsed")
+            if stay_elapsed is None and stay_st["state"] == ST_PENDING:
+                stay_elapsed = 0            # 停在还没开始的段：已停留 0 天
 
         status = ST_OVER if over_list else (ST_WARN if warn_list else ST_RUNNING)
-        owner = (worst or {}).get("owner") or ""
+        owner = ((stay_row or {}).get("executor")
+                 or (stay_row or {}).get("owner") or "")
         items.append({
             "sku": sku, "model": info["model"],
-            "worstSeg": (worst or {}).get("seg"),
-            "worstSegDept": (worst or {}).get("dept"),
-            "worstElapsed": (worst or {}).get("elapsed"),
-            "worstTarget": (worst or {}).get("target"),
-            "worstOverDays": worst_over,
+            "staySeg": (stay_row or {}).get("seg"),
+            "staySegDept": (stay_row or {}).get("dept"),
+            "stayElapsed": stay_elapsed,
+            "stayTarget": (stay_st or {}).get("target"),
+            "stayDaysLeft": stay_left,      # 距超时天数（负 = 已超期 N 天）
             "warnSegs": [w[1].get("seg") for w in warn_list],
             "status": status, "multiRound": bool(multi_round.get("flag")),
             "rootCause": root_cause, "owner": owner,
@@ -298,8 +343,9 @@ def compute_inflight(category=None):
         }
         snap_nodes[sku] = {k: v for k, v in nodes_iso.items() if v}
 
-    # 在研最重的排前：超期天数 desc → 预警段数 desc → SKU
-    items.sort(key=lambda x: (-(x["worstOverDays"] or 0),
+    # 最紧急的排前：距超时升序（负=已超期最先），无目标的沉底；同分比预警段数
+    items.sort(key=lambda x: (x["stayDaysLeft"] is None,
+                              x["stayDaysLeft"] if x["stayDaysLeft"] is not None else 0,
                               -len(x["warnSegs"]), x["sku"]))
     return {
         "computedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -643,12 +689,83 @@ def cleanup_expired_reports():
     return {"removed": removed, "kept": len(kept), "retentionDays": keep}
 
 
+def _parse_iso(v):
+    """ISO 时间串 → datetime；解析不了返回 None（甘特画不了条的段跳过）。"""
+    if not v:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(str(v), fmt)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _gantt_records(data, today=None):
+    """事中日报甘特记录（画法 = 流程复盘 gantt_sheet.py 同款风格）。
+
+    每个在研 SKU 一条：{sku, model, status, staySeg, stayDaysLeft, rows}，
+    rows 项 {dept, seg, t0, t1, days, target, judge, owner, neutral}（t0/t1=datetime）。
+    与复盘甘特的两点差异（事中口径）：
+      · **未完成段（t1 空）条形延伸至今日** —— 当前停留一目了然，
+        判定列改写为 ⏳进行中 / ⚠预警 / ✗超期（复盘口径下这些段是"—缺时间"）；
+      · 只画在研 SKU（复盘是全部）。
+    SKU 区块按「新→旧」排列（最早节点时间降序，同 route_check_sys 甘特）。
+    """
+    today = today or date.today()
+    noon = datetime.combine(today, datetime.min.time()).replace(hour=12)
+    recs = []
+    for it in (data.get("items") or []):
+        det = (data.get("skuDetails") or {}).get(it["sku"]) or {}
+        rows = []
+        for s in det.get("segments") or []:
+            t0, t1 = _parse_iso(s.get("t0")), _parse_iso(s.get("t1"))
+            judge = s.get("judge")
+            days = s.get("days")
+            if t1 is None or s.get("noShip"):
+                if t0 is None:
+                    continue            # 未开始：起点无时间，无条形可画
+                t1 = noon               # 未完成段延伸至今日（事中口径）
+                if not s.get("noShip"):
+                    # noShip 行 judge 已是"✗超时未发货/⏳未发货"，保留
+                    st_name = s.get("state")
+                    if st_name == ST_OVER:
+                        judge = f"✗超期(已{s.get('elapsed')}天)"
+                    elif st_name == ST_WARN:
+                        judge = f"⚠预警(线{s.get('warnLine')}天)"
+                    else:
+                        judge = f"⏳进行中(已{s.get('elapsed')}天)"
+                days = s.get("elapsed")
+            rows.append({"dept": s.get("dept"), "seg": s.get("seg"),
+                         "t0": t0, "t1": t1, "days": days,
+                         "target": s.get("target"), "judge": judge,
+                         "owner": s.get("executor") or s.get("owner") or "",
+                         "neutral": bool(s.get("gap"))
+                         or str(judge or "").startswith("—")})
+        if not rows:
+            continue
+        recs.append({"sku": it["sku"], "model": it.get("model"),
+                     "status": it.get("status"),
+                     "staySeg": it.get("staySeg"),
+                     "stayDaysLeft": it.get("stayDaysLeft"),
+                     "rows": rows})
+
+    def _start(rec):
+        ts = [r["t0"] for r in rec["rows"] if r["t0"]]
+        return min(ts) if ts else datetime.min
+    recs.sort(key=_start, reverse=True)         # 新 → 旧
+    return recs
+
+
 def generate_daily_report(category=None, date_str=None):
     """生成当日日报 xlsx（幂等覆盖同名文件），返回 {path, sheets, ...}。
 
     落盘名 = `事中日报_YYYYMMDD.xlsx`（2026-09-24 起；旧名「复盘报告_」同日文件随迁删除）。
-    豁免 SKU（人工登记/换号/末端终止）2026-10-06 起移出在研追踪，明细单列
-    「豁免备查」sheet（无豁免时仍是 5 sheets，不产生空页）。
+    2026-10-06 起两处改版：
+      · 总表「最差环节」→「当前停留环节」+ 距超时天数（见 _pick_stay）；
+      · 「今日进度变化」→「在研SKU甘特图」（每在研 SKU 一块，未完成段延伸至今日）。
+    豁免 SKU（人工登记/换号/末端终止）移出在研追踪，明细单列「豁免备查」sheet
+    （无豁免时仍是 5 sheets，不产生空页）。
     """
     from .reporting import daily_report as _daily_xlsx
     from pathlib import Path
@@ -657,7 +774,6 @@ def generate_daily_report(category=None, date_str=None):
     cat = rs.key
     data = get_inflight_data(cat)
     alerts = compute_alerts_today(cat, data=data)
-    progress = progress_for(cat, days=1)
     today = (date_str or datetime.now().strftime("%Y-%m-%d"))
 
     batch_dir = _latest_batch_dir(cat)
@@ -671,13 +787,21 @@ def generate_daily_report(category=None, date_str=None):
     dropped = _drop_legacy_report(target, stamp)
 
     exempts = data.get("exempted") or None
+    gantts = _gantt_records(data)
     content = _daily_xlsx(
         category=cat, computed_at=data["computedAt"], date_str=today,
-        items=data["items"], alerts=alerts, progress=progress,
+        items=data["items"], alerts=alerts, gantts=gantts,
         provisional=rs.provisional, targets_source=rs.targets_source,
         exempts=exempts)
-    with open(path, "wb") as f:
-        f.write(content)
+    try:
+        with open(path, "wb") as f:
+            f.write(content)
+    except PermissionError as e:
+        # 日报是幂等覆盖，但 Excel/WPS 开着同名文件时会锁住写入
+        # （~$ 锁文件）。给一句人话，别甩裸 PermissionError 给定时任务日志。
+        raise RuntimeError(
+            f"日报文件被占用，写不进去：{path}\n"
+            "多半是 Excel/WPS 正开着它 —— 关闭后重跑即可（生成是幂等覆盖）。") from e
 
     entry = {
         "date": today, "category": cat, "path": str(path),

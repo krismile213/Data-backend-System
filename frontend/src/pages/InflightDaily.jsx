@@ -262,9 +262,9 @@ export default function InflightDaily() {
                   <TableRow>
                     <TableCell>SKU</TableCell>
                     <TableCell>机型</TableCell>
-                    <TableCell>最差段</TableCell>
+                    <TableCell>当前停留环节</TableCell>
                     <TableCell>部门</TableCell>
-                    <TableCell>超天数</TableCell>
+                    <TableCell>距超时</TableCell>
                     <TableCell>预警段</TableCell>
                     <TableCell>状态</TableCell>
                     <TableCell>多轮</TableCell>
@@ -277,11 +277,15 @@ export default function InflightDaily() {
                       onClick={() => setSelSku(it.sku)}>
                       <TableCell>{it.sku}</TableCell>
                       <TableCell>{it.model || '—'}</TableCell>
-                      <TableCell>{it.worstSeg || '—'}</TableCell>
-                      <TableCell>{it.worstSegDept || '—'}</TableCell>
-                      <TableCell sx={it.worstOverDays
-                        ? { color: SEMANTIC.danger } : undefined}>
-                        {it.worstOverDays ?? '—'}
+                      <TableCell>{it.staySeg || '—'}</TableCell>
+                      <TableCell>{it.staySegDept || '—'}</TableCell>
+                      <TableCell sx={it.stayDaysLeft != null && it.stayDaysLeft < 0
+                        ? { color: SEMANTIC.danger, fontWeight: 600 } : undefined}>
+                        {it.stayDaysLeft == null
+                          ? '—'
+                          : (it.stayDaysLeft < 0
+                            ? `已超${Math.round(-it.stayDaysLeft)}天`
+                            : `剩${Math.round(it.stayDaysLeft)}天`)}
                       </TableCell>
                       <TableCell>{(it.warnSegs || []).join('、') || '—'}</TableCell>
                       <TableCell><StateChip state={it.status} /></TableCell>

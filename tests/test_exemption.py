@@ -190,7 +190,7 @@ def test_daily_report_exempt_sheet(tmp_path):
     """exempts 非空 → 第 6 sheet「豁免备查」；空 → 保持 5 sheets。"""
     empty_alerts = {"todayNewOverdue": [], "ongoingOverdue": [], "warnings": []}
     base = dict(category="手机膜", computed_at="x", date_str="d",
-                items=[], alerts=empty_alerts, progress=[])
+                items=[], alerts=empty_alerts, gantts=[])
     from openpyxl import load_workbook
 
     with_ex = reporting.daily_report(**base, exempts=[
