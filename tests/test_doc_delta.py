@@ -370,16 +370,29 @@ def _has_data():
 
 @pytest.mark.skipif(not _has_data(), reason="无手机膜批次数据（未导入）")
 def test_build_docs_matches_review_open_skus():
-    """真实数据下：单据表的 SKU 集合必须与复盘未闭环集合逐一致，键里带审批编号。"""
-    from app.routers.review import get_review_data
+    """真实数据下：单据表的 SKU 集合必须与复盘未闭环集合（剔除豁免后）逐一致。
+
+    2026-10-06 口径合并：人工登记 / 换号 / 末端终止（作废单）的 SKU 从
+    未闭环追踪集合剔除（与事中日报·加急预警同口径，真源 app/exemption.py），
+    所以期望集合 = 复盘 valid=False 全集 − 豁免 SKU。
+    """
+    from app.exemption import classify
+    from app.routers.review import (_load_sku_docs, get_review_data)
 
     docs, open_skus = svc.build_docs("手机膜")
     rows = get_review_data("手机膜")["rows"]
     expect = {r["sku"] for r in rows if not r["valid"]}
+    parts_by_sku = {}
+    for d in _load_sku_docs("手机膜"):
+        if d.get("sku"):
+            parts_by_sku.setdefault(d["sku"], {}).setdefault(
+                d.get("part"), []).append(d)
+    expect -= {sku for sku, parts in parts_by_sku.items()
+               if classify(sku, parts)[0] != "active"}
     assert open_skus == expect
     if docs:
         got = {svc.split_key(k)[0] for k in docs}
-        assert got == expect, "单据表里不能混进已闭环 SKU"
+        assert got == expect, "单据表里不能混进已闭环或已豁免 SKU"
         assert all(k.count("|") >= 2 for k in docs)
         sample = next(iter(docs.values()))
         assert set(sample) == {"s", "c", "n"}

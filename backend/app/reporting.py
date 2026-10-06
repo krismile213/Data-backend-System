@@ -581,7 +581,7 @@ def route_limits(ruleset=None):
 # P0-4 · 事中日报（5 sheets：在研总表 / 超期明细 / 风险预警 / 今日进度 / 上报清单）
 # ---------------------------------------------------------------------------
 def daily_report(*, category, computed_at, date_str, items, alerts,
-                 progress, provisional=False, targets_source=""):
+                 progress, provisional=False, targets_source="", exempts=None):
     """生成事中日报 xlsx（bytes）。
 
     items    ：inflight overview 的在研 SKU 行；
@@ -590,6 +590,9 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
     provisional/targets_source：该品类的目标天/评级线是否仍是待校准的名义值
                 （手机壳 = True）。为 True 时在总表标题下打一条橙色口径警示——
                 日报是要拿去催办/上报的，口径不确定必须写在脸上。
+    exempts  ：被豁免移出追踪的 SKU 明细（compute_inflight 的 exempted，
+                [{sku, model, kind, reason}]）。非空时追加第 6 sheet「豁免备查」
+                ——移出追踪但不吞数据，谁被豁免、为什么豁免，日报里要能对上账。
     """
     wb = Workbook()
     dir_label = {"loss": "亏损", "gain": "增益", "none": "无"}
@@ -723,6 +726,27 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
         r += 1
     if r == 4:
         _put(ws5, 4, 1, "（无待上报异常）")
+
+    # ---- Sheet6 豁免备查（2026-10-06 口径合并：不进追踪的 SKU 单列备查） ----
+    if exempts:
+        ws6 = wb.create_sheet("豁免备查")
+        ws6["A1"] = ("已移出追踪的 SKU（人工登记 / 换号 / 末端终止作废）"
+                     "—— 与加急预警同口径，判定真源 app/exemption.py")
+        ws6["A1"].font = TITLE_FONT
+        _head_row(ws6, 3, ["SKU", "型号", "豁免类型", "原因"],
+                  widths=[14, 20, 12, 60])
+        kind_label = {"hold": "人工登记", "alias": "换号", "void": "末端终止"}
+        r = 4
+        for x in exempts:
+            _put(ws6, r, 1, x.get("sku"))
+            _put(ws6, r, 2, x.get("model") or "—")
+            c = _put(ws6, r, 3, kind_label.get(x.get("kind"), x.get("kind") or "—"),
+                     align=Alignment(horizontal="center"))
+            c.font = Font(size=10, color="9E9E9E")
+            _put(ws6, r, 4, x.get("reason") or "—")
+            r += 1
+        if r == 4:
+            _put(ws6, 4, 1, "（无豁免 SKU）")
 
     buf = io.BytesIO()
     wb.save(buf)

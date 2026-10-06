@@ -39,14 +39,14 @@ from sqlalchemy import select
 
 from ..category_rules import DEFAULT_CATEGORY, rules_for
 from ..db import SessionLocal
+from ..exemption import (OK_STATUS, VOID_TERMINATED, doc_running,
+                         last_part_with_docs, void_info)   # 豁免判定单一真源
 from ..models import ApprovalNode, Batch, PartDoc
 from ..review_rules import PART_ACTIONS, PART_LIST, PART_NAMES
 from ..rule_service import get_rules
 from .review import _cat_cond, _db_fingerprint, _fmt, _live_batch_ids, _parse_dt
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
-
-OK_STATUS = {"已结束", "结束", "已通过", "已完成"}
 
 # ---------------------------------------------------------------------------
 # 「末端终止（作废单）」判定 —— 2026-09-28 加急口径修正
@@ -65,7 +65,9 @@ OK_STATUS = {"已结束", "结束", "已通过", "已完成"}
 #   ① 该 SKU 没有任何「审批中」单据 —— 流程是真的停住了，不是在跑
 #   ② 最后一个有单据的 Part 里，单据状态**全部**为「终止」
 # 命中即判为作废：不进 P0/P1/P2 催办清单，改列 voidRows（不催办、仅备查，不吞数据）。
-VOID_TERMINATED = "终止"
+# ⚠️ 2026-10-06 起 OK_STATUS / VOID_TERMINATED / 判据函数全部收口到
+#    app/exemption.py（单一真源）——事中日报与单据增量追踪共用同一套豁免口径，
+#    改判据只改那边；本文件保留 `_doc_running` / `_void_info` 薄委托以兼容既有调用。
 VOID_NOTE = "流程已终止，不进入后续环节，不列入催办"
 
 # ---------------------------------------------------------------------------
@@ -358,32 +360,21 @@ def _pending_part(sku_data, today):
 
 
 # ---- 「末端终止（作废单）」实现（判据见文件头注释）----------------------------
+# 2026-10-06 起判据真源 = app/exemption.py；这里只做形状适配（本模块的单据表
+# 挂在 data["parts"] 下），逻辑一行不写，防止两处实现漂移。
 def _doc_running(d):
     """该单据是否「还在跑」：非已结束、也非终止。"""
-    return d["status"] not in OK_STATUS and d["status"] != VOID_TERMINATED
+    return doc_running(d)
 
 
 def _last_part_with_docs(data):
     """最后一个有单据的 Part（Part1→Part9 顺序里最靠后的那个）。"""
-    last = None
-    for pk in PART_LIST:
-        if data["parts"].get(pk):
-            last = pk
-    return last
+    return last_part_with_docs(data["parts"])
 
 
 def _void_info(data):
     """末端终止 → (True, part, 终止时刻)；否则 (False, None, None)。"""
-    if any(_doc_running(d) for docs in data["parts"].values() for d in docs):
-        return False, None, None                    # 还有在跑的单据 → 不当作废
-    pk = _last_part_with_docs(data)
-    if pk is None:
-        return False, None, None
-    docs = data["parts"][pk]
-    if any(d["status"] != VOID_TERMINATED for d in docs):
-        return False, None, None                    # 末尾 Part 不是全终止
-    at = max((d["finish"] or d["update"] or d["create"] for d in docs), default=None)
-    return True, pk, at
+    return void_info(data["parts"])
 
 
 def _first_doc_at(data):

@@ -24,7 +24,12 @@ inflight_service.py — 事中引擎（P0-4 数据面 / P0-7 清单 / P1-1 进�
   · 上报清单只针对**进行中**的超期段（终点没时间、elapsed > target）——
     已完成但 ✗ 的段属"事后未达标"，复盘页负责，上报了也没人能改历史；
   · 快照只存**在研 SKU** 的节点：已完结 SKU 不再有新完成节点，diff 永远为空；
-  · 全部单据都「终止」的 SKU 视作流程作废，不算在研。
+  · 「不再追踪」豁免（2026-10-06 与加急预警/单据增量合并口径）：
+    人工登记 > 换号 > 末端终止（作废单）> 正常追踪，判定单一真源 = app/exemption.py。
+    旧实现只有「全部单据都终止」才排除，导致人工登记（G495/G524~G528）、
+    已换号旧号、末端终止（前面 Part 已结束、末尾 Part 全终止）的 SKU
+    全部混进「在研 SKU 状态总表」——终止的单据也在被追踪。
+    豁免 SKU 移出追踪后不吞数据：items 之外单列 exempted 备查（日报出「豁免备查」sheet）。
 """
 
 import json
@@ -32,6 +37,7 @@ import os
 import threading
 from datetime import date, datetime, timedelta
 
+from . import exemption
 from .category_rules import rules_for
 from .config import STATE_DIR, list_batches
 
@@ -155,9 +161,10 @@ def compute_inflight(category=None):
     """事中全量计算。category 缺省 = 默认品类（手机膜）。
 
     返回 {computedAt, **describe, inResearchCount, overdueSkuCount, warnCount,
-          multiRoundCount, todayNewNodes, items, skuDetails}
+          multiRoundCount, todayNewNodes, items, skuDetails, exemptCount, exempted}
     items 项：{sku, model, worstSeg, worstSegDept, worstOverDays, warnSegs,
                status, multiRound, rootCause, owner}
+    exempted 项：{sku, model, kind, reason} —— 被豁免移出追踪的 SKU（备查不吞数据）。
     结果按品类缓存（指纹 = 复盘指纹，规则热调/导入自动失效）。
     """
     from .routers.review import (fingerprint_for, get_review_data,
@@ -172,14 +179,25 @@ def compute_inflight(category=None):
     details = review_data["skuDetails"]
     by_sku = _load_all(rs.key)
     today = date.today()
+    holds, aliases = exemption.load_registries()
 
     items = []
     inflight_details = {}          # 在研 SKU 的事中详情（sku/{code} 用）
     snap_nodes = {}                # 快照用：{sku: {node: iso}}
+    exempted = []                  # 豁免备查（不进追踪，也不吞数据）
 
     for sku, info in sorted(by_sku.items()):
         if info["all_terminated"]:
-            continue                # 全部单据终止 = 流程作废，不算在研
+            continue                # 全部单据终止 = 流程作废（exemption.void 的
+                                    # 超集短路，保留只为省一次 classify）
+        # ---- 豁免判定（单一真源 exemption.classify，与加急预警同口径）----
+        kind, ex_info = exemption.classify(sku, info["parts"], holds=holds,
+                                           aliases=aliases)
+        if kind != "active":
+            exempted.append({"sku": sku, "model": info["model"],
+                             "kind": kind,
+                             "reason": exemption.exempt_reason(kind, ex_info)})
+            continue
 
         detail = details.get(sku)
         if detail is not None:
@@ -293,6 +311,8 @@ def compute_inflight(category=None):
         "multiRoundCount": sum(1 for x in items if x["multiRound"]),
         "items": items,
         "skuDetails": inflight_details,
+        "exemptCount": len(exempted),
+        "exempted": exempted,
         "_snap_nodes": snap_nodes,      # 快照用（respond 时剔除，见 routers/inflight）
     }
 
@@ -627,6 +647,8 @@ def generate_daily_report(category=None, date_str=None):
     """生成当日日报 xlsx（幂等覆盖同名文件），返回 {path, sheets, ...}。
 
     落盘名 = `事中日报_YYYYMMDD.xlsx`（2026-09-24 起；旧名「复盘报告_」同日文件随迁删除）。
+    豁免 SKU（人工登记/换号/末端终止）2026-10-06 起移出在研追踪，明细单列
+    「豁免备查」sheet（无豁免时仍是 5 sheets，不产生空页）。
     """
     from .reporting import daily_report as _daily_xlsx
     from pathlib import Path
@@ -648,10 +670,12 @@ def generate_daily_report(category=None, date_str=None):
     path = target / fname
     dropped = _drop_legacy_report(target, stamp)
 
+    exempts = data.get("exempted") or None
     content = _daily_xlsx(
         category=cat, computed_at=data["computedAt"], date_str=today,
         items=data["items"], alerts=alerts, progress=progress,
-        provisional=rs.provisional, targets_source=rs.targets_source)
+        provisional=rs.provisional, targets_source=rs.targets_source,
+        exempts=exempts)
     with open(path, "wb") as f:
         f.write(content)
 
@@ -662,6 +686,7 @@ def generate_daily_report(category=None, date_str=None):
         "overdueCount": (len(alerts["todayNewOverdue"])
                          + len(alerts["ongoingOverdue"])),
         "warnCount": len(alerts["warnings"]),
+        "exemptCount": data.get("exemptCount", 0),
         "createdAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
     with _lock:
@@ -670,9 +695,10 @@ def generate_daily_report(category=None, date_str=None):
         entries.append(entry)
         _save_report_index(entries)
     cleanup_expired_reports()
-    return {"path": str(path), "sheets": 5, "date": today,
+    return {"path": str(path), "sheets": 6 if exempts else 5, "date": today,
             "skuCount": entry["skuCount"], "overdueCount": entry["overdueCount"],
-            "warnCount": entry["warnCount"], "category": cat,
+            "warnCount": entry["warnCount"],
+            "exemptCount": entry["exemptCount"], "category": cat,
             "targetsProvisional": rs.provisional,
             "legacyRemoved": dropped}
 

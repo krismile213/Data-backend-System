@@ -37,6 +37,10 @@ doc_delta_service.py — 未闭环 SKU 单据增量追踪模型（T10）
 口径与红线：
     · 「未闭环」= `review.get_review_data(cat)["rows"]` 里 `valid=False`，
       与复盘总览/预警页同源，不另立标准。
+    · 豁免（2026-10-06 与事中日报/加急预警合并口径）：人工登记 / 换号 /
+      末端终止（作废单）的 SKU 从未闭环集合里**剔除**——它们和已闭环一样
+      不会再推进，留在追踪集合里只会把终止单据当成增量噪声。
+      判定单一真源 = app/exemption.py。
     · 单据集合 = `review._load_sku_docs` + `review.dedupe_docs`，即全系统
       统一的那份（含已结束/终止单据；多批次重复单据只留最新一条）。
     · 节点时间优先级沿用复盘：系统业务时间列 > audit 上报 > 审批动作（本模块
@@ -55,11 +59,13 @@ import os
 import threading
 from datetime import datetime, timedelta
 
+from . import exemption
 from .category_rules import rules_for
 from .config import STATE_DIR
 
 #: 未闭环判定的口径说明（页面与导出都直接展示这一句，改口径只改这里）
-SCOPE_DESC = "未闭环 SKU（复盘口径 valid=False）"
+SCOPE_DESC = ("未闭环 SKU（复盘口径 valid=False；已剔除人工登记 / 换号 / "
+              "末端终止豁免，与事中日报·加急预警同口径）")
 
 #: 增量事件保留期（天）与条数上限：事件很小，留足一年多的排障纵深
 EVENT_RETENTION_DAYS = 400
@@ -142,7 +148,7 @@ def build_docs(category=None, review_data=None):
     """→ (docs, open_skus)：当前**未闭环 SKU** 的全部单据指纹表。
 
     docs      : {单据键: {"s": 审批状态, "c": 创建时间, "n": [节点指纹]}}
-    open_skus : {SKU}（复盘判定的未闭环集合）
+    open_skus : {SKU}（复盘判定的未闭环集合，已剔除豁免 SKU）
 
     ⚠️ 本函数会触发 review 重算（可能几秒），**调用方必须在锁外调用它**。
     """
@@ -154,7 +160,22 @@ def build_docs(category=None, review_data=None):
     open_skus = {r["sku"] for r in (data.get("rows") or [])
                  if not r.get("valid")}
 
-    docs, _ = dedupe_docs(_load_sku_docs(cat))
+    # 豁免剔除（2026-10-06 口径合并）：人工登记 / 换号 / 末端终止（作废单）的
+    # SKU 与已闭环一样不会再推进。⚠️ 判定用**去重前**的全量单据（与 alerts
+    # 的 _load_all_docs 同口径——dedupe 留最新会掩盖「终止新单 + 已结束旧单」
+    # 这类混合形态，导致误判作废）。
+    raw_docs = _load_sku_docs(cat)
+    parts_by_sku = {}
+    for d in raw_docs:
+        sku = d.get("sku")
+        if sku:
+            parts_by_sku.setdefault(sku, {}).setdefault(
+                d.get("part"), []).append(d)
+    exempt_skus = {sku for sku, parts in parts_by_sku.items()
+                   if exemption.classify(sku, parts)[0] != "active"}
+    open_skus -= exempt_skus
+
+    docs, _ = dedupe_docs(raw_docs)
     out = {}
     for d in docs:
         sku = d.get("sku")
