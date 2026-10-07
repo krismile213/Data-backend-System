@@ -81,18 +81,29 @@ def _step_snapshots_and_reports():
     from app.routers.review import get_review_data
 
     reports = {}
-    # 品类顺序：DATA_ROOTS 声明序（手机膜在前），只处理**目录里真有批次**的品类
+    failures = []                           # [(品类, 错误摘要)]
+    # 品类顺序：DATA_ROOTS 声明序（手机膜在前），只处理**目录里真有批次**的品类。
+    # 逐品类 try/except：一个品类挂掉（典型：Excel/WPS 开着该品类日报 → 写入
+    # PermissionError）不连累其他品类——各自尽力出报告，最后统一抛出，
+    # 保持 pipeline FAIL 告警语义（2026-10-07 实锤：手机膜撞锁 → 手机壳陪葬）。
     for cat in DATA_ROOTS:
         if not list_batches(cat):
             continue
-        get_review_data(cat)                    # 复盘重算内部会记 KPI 快照
-        maybe_inflight_snapshot(cat)            # 在研节点快照（进度 diff 用）
-        d = maybe_doc_snapshot(cat)             # T10 未闭环 SKU 单据增量基线
-        log_line(f"{'OK' if d.get('recorded') else 'SKIP'} doc-delta {cat}: "
-                 f"{d.get('reason')}")
-        r = generate_daily_report(cat)
-        reports[cat] = r
-        log_line(f"OK report {cat} -> {r.get('path')}")
+        try:
+            get_review_data(cat)                # 复盘重算内部会记 KPI 快照
+            maybe_inflight_snapshot(cat)        # 在研节点快照（进度 diff 用）
+            d = maybe_doc_snapshot(cat)         # T10 未闭环 SKU 单据增量基线
+            log_line(f"{'OK' if d.get('recorded') else 'SKIP'} doc-delta {cat}: "
+                     f"{d.get('reason')}")
+            r = generate_daily_report(cat)
+            reports[cat] = r
+            log_line(f"OK report {cat} -> {r.get('path')}")
+        except Exception as e:                  # noqa: BLE001
+            failures.append(f"{cat}: {type(e).__name__}: {e}")
+            log_line(f"FAIL category {cat}: {traceback.format_exc(limit=3)}")
+    if failures:
+        raise RuntimeError("部分品类未出日报（" + "；".join(failures) + "）——"
+                           "其余品类已正常落盘，未出的一般是被 Excel/WPS 占用")
     return reports
 
 
