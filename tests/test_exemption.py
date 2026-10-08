@@ -240,3 +240,42 @@ def test_build_docs_drops_exempt_skus(monkeypatch):
     assert "G495" not in open_skus and "G501" not in open_skus
     assert "G506" in open_skus
     assert {k.split("|")[0] for k in docs} == {"G506"}
+
+
+# ---------------------------------------------------------------------------
+# ④ 回归锁：既有三通道 kind 集合不变（「运输闭环」是**另一条**下游通道，
+#    不得混进 exemption.classify —— 否则豁免语义与判定次序被污染）
+# ---------------------------------------------------------------------------
+def test_exemption_kind_set_unchanged():
+    """exemption.classify 的返回值域恒为 {hold, alias, void, active}。"""
+    holds = {"G1": {"reason": "r"}}
+    aliases = {"G2": {"new": "G9"}}
+    running = {"Part1": [_doc("审批中", create=_dt("2026-01-01 09:00:00"))]}
+    void_parts = {"Part1": [_doc("已结束")],
+                  "Part2": [_doc("终止", finish=_dt("2026-01-02 09:00:00"))]}
+    assert exemption.classify("G1", running, holds=holds, aliases={})[0] == "hold"
+    assert exemption.classify("G2", running, holds={}, aliases=aliases)[0] == "alias"
+    assert exemption.classify("G3", void_parts, holds={}, aliases={})[0] == "void"
+    assert exemption.classify("G4", running, holds={}, aliases={})[0] == "active"
+    # 「运输闭环」绝不从 exemption 产出（它走 app/transport_closure.py）
+    for sku, parts in (("G1", running), ("G3", void_parts), ("G4", running)):
+        kind, _ = exemption.classify(sku, parts, holds=holds, aliases=aliases)
+        assert kind in ("hold", "alias", "void", "active"), kind
+    assert exemption.exempt_reason("运输闭环", {}) == ""
+
+
+def test_daily_report_transport_exempt_sheet():
+    """日报「豁免备查」sheet 接受 kind="运输闭环"（沿用 6 sheets 逻辑，不新增空 sheet）。"""
+    from openpyxl import load_workbook
+
+    empty_alerts = {"todayNewOverdue": [], "ongoingOverdue": [], "warnings": []}
+    base = dict(category="手机膜", computed_at="x", date_str="d",
+                items=[], alerts=empty_alerts, gantts=[])
+    content = reporting.daily_report(**base, exempts=[
+        {"sku": "G700", "model": "M7", "kind": "运输闭环",
+         "closure": "closed", "reason": "运输已闭环：已发货货件全部到货（免追踪）"}])
+    wb = load_workbook(io.BytesIO(content))
+    assert len(wb.sheetnames) == 6 and wb.sheetnames[-1] == "豁免备查"
+    ws6 = wb["豁免备查"]
+    assert ws6.cell(row=4, column=1).value == "G700"
+    assert ws6.cell(row=4, column=3).value == "运输闭环"

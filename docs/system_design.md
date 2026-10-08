@@ -1454,3 +1454,75 @@ analysis.detect_anomalies(l4_target=)      routers/review 段目标天 / 超时�
   仍需同步改离线件 `SEGS`（与 T16 同）。
 
 
+## T18 运输闭环 · 免追踪单一真源 + 段级时间轴起止 + 本地筛选（2026-10-06）
+
+**背景**：物流到货不是可催办动作。已发货货件**全部到货**（或**无可发货货件**）时，运输域若
+仍是唯一卡点，SKU 便会被误列为「加急 / 超期」。本轮把「运输是否闭环」抽成**单一真源纯函数**，
+在**豁免三通道之外的下游**统一判定，令事中日报、加急预警、日报 Excel 三个消费方**报同一个数**。
+
+### 判定次序（关键，`exemption.classify()` 签名/返回值一律不改）
+
+```
+人工登记 > 换号 > 末端终止 >（下游）运输闭环 > 催办
+```
+
+- 前三通道仍在 `exemption.classify()` 内短路（其返回值域恒为 `{hold, alias, void, active}`）。
+- **运输闭环判定在 `exemption` 之外的下游**：`inflight_service` / `alerts` 各自拿到 `classify()` 结果后，
+  再做运输闭环门。**不改** `classify()` 签名与返回，避免污染既有三通道口径。
+
+### 单一真源：`app/transport_closure.py`（新增·纯函数·零业务依赖）
+
+纯函数模块，**不 import** `review` / `exemption` / `inflight_service`（无反向依赖、可单测）：
+
+- `classify_transport(shipments)` → `{closure, shippedCount, arrivedCount, shippedHubs, pendingHubs, notShippedHubs, pendingCount}`
+  - `closure`：`closed`（已发货全部到货）/ `pending`（有已发货票未到货）/ `none`（无任何票已发货）。
+  - **字段名容错**：`_TRK_KEYS/_HUB_KEYS/_SHIP_KEYS/_ARR_KEYS/_NOSHIP_KEYS` 多候选键名，兼容货件构建器别名。
+  - **判定粒度 = 票级，展示粒度 = 按渠道仓/国家聚合**；`notShippedHubs` **不参与** `closure` 判定。
+- `is_transport_segment(dept, seg, l4_name)` → 命中 `dept ∈ ('运输','4国')` 或 `seg == l4_name`（`采购→发货末批`）或 `seg.endswith('·未发货')`。
+- `transport_exempt_reason(closure, pending_hubs, not_shipped_hubs)` → 三种 closure 的人读文案。
+
+### 仍在研边界（规格 C）
+
+`non_transport_pending` = 存在 `state ∈ {进行中,预警,超期}` 且 `is_transport_segment()` 为 **False** 的段。
+
+| 情形 | 处理 |
+| --- | --- |
+| `closure == 'pending'` | **保留追踪**，`items` 项标注 `pendingCountries`（未到货国家） |
+| `closure ∈ ('closed','none')` 且 **运输域是唯一卡点**（`non_transport_pending==False` 且 `has_transport_pending==True`） | **免追踪**，移出 `items`/在研计数/超期预警计数，进 `transportExempted` 备查 |
+| `closure ∈ ('closed','none')` 但 **有非运输在研段**（`non_transport_pending==True`） | **仍在研**：剔除运输域段后重算 `status`，`items` 项打标 `transportExempt=true`（运输闭环但素材/上架没做完的 SKU 仍要盯） |
+| 其它（运输域非卡点、各段无在研） | 原样保留（不误移） |
+
+> 关键修正：初版把 `elif not non_transport_pending:` 直接判免追踪，导致**纯闭环但运输域并非卡点**的
+> SKU（如 G506，运输段全部「已完成」、各段无在研）被误移出在研清单。补入 `has_transport_pending`
+> 条件（「运输域是唯一卡点」要求运输域**确实在卡**）后既有验收锚点恢复。
+
+### 两处消费方取同一个数（规格 D）
+
+- `inflight_service`：顶层新增 `transportExemptCount` / `transportExempted` / `transportDef`；`/api/inflight/sku/{code}` 增 `shipClosure` / `pendingCountries` / `transportExempt` / `transportReason`；日报 `exempts` 合并 `transportExempted`。
+- `alerts.py`：`_shipments` 委托 `review.build_shipments`（与 `inflight` **同源**，加 parity 测试）；新增 `shippedExemptRows` / `shippedExemptCount` / `transportDef`；`items` 行增 `pendingCountries`。
+- `reporting.py`：「豁免备查」sheet 接受 `kind="运输闭环"`（**沿用既有 5/6 sheet 逻辑，不新增空 sheet**）。
+
+### 前端（规格 E）
+
+- `SkuDialog` 段级时间轴：表头在「状态」后插 **「开始」「结束」** 两列，取值 `s.start` / `s.end`
+  （**不用** `t0`/`t1`）；空态 `colSpan` **7→9**；进行中 `end==null` 显「至今」、未开始/gap 显「—」、
+  `noShip` 字面量（`至今未发货`）**原样**。
+- 在研清单加**前端本地筛选**（部门/环节/状态下拉 + 搜索 + 「只看运输」Chip，`useMemo` 过滤，
+  **不与 KPI 联动**，附 caption「筛选仅影响本表，上方 KPI 为全量」）。
+- 两页共用新组件 `TransportClosure.jsx`（closure 徽标 + 未到货国家胶囊，**不复制两份**）；
+  各加「运输已闭环·免追踪」备查区。视觉走 `theme.js` 语义色板 + MUI `sx`（Tailwind 已移除）。
+- 前端校验用 esbuild `transformSync(loader:'jsx')`（**不跑 `npm run build`**）。
+
+### 本轮不改
+
+- **复盘（`流程复盘/`，在本项目仓库之外）与 `doc_delta` 本轮不动**：运输闭环仅从事中/催办口径侧接入。
+
+### 自验
+
+- 新增 `tests/test_transport_closure.py`（14 用例，覆盖票级/仓级、字段容错、顺序短路、parity、免追踪行）。
+- 扩展 `tests/test_inflight.py`（`_seg_public` 带 start/end、顶层运输键）、`tests/test_exemption.py`
+  （回归锁：**既有三通道 kind 集合恒为 `{hold,alias,void,active}`**，运输闭环不从 `classify()` 产出；
+  日报接受 `kind="运输闭环"` 仍 6 sheets）。
+- 全量 `pytest`：0 failed（详见验收报告）。
+
+

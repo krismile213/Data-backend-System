@@ -25,6 +25,7 @@ import { fetchAlerts, buildAlertsExportUrl } from '../api.js';
 import KpiCard from '../components/KpiCard.jsx';
 import PageHeader from '../components/PageHeader.jsx';
 import { LoadingState, ErrorState } from '../components/StateViews.jsx';
+import { ClosureBadge, PendingCountries } from '../components/TransportClosure.jsx';
 import { SEMANTIC } from '../theme.js';
 import useApi from '../hooks/useApi.js';
 
@@ -124,6 +125,11 @@ function AlertRow({ r }) {
           {r.countries}/{r.countryMin}
         </TableCell>
         <TableCell>
+          {(r.pendingCountries || []).length
+            ? <PendingCountries hubs={r.pendingCountries} size="small" />
+            : '—'}
+        </TableCell>
+        <TableCell>
           <Typography variant="caption"
             sx={{ display: 'block', maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {r.nextSteps.join('；')}
@@ -131,7 +137,7 @@ function AlertRow({ r }) {
         </TableCell>
       </TableRow>
       <TableRow>
-        <TableCell colSpan={13} sx={{ py: 0, bgcolor: SEMANTIC.neutralBg }}>
+        <TableCell colSpan={14} sx={{ py: 0, bgcolor: SEMANTIC.neutralBg }}>
           <Collapse in={open} unmountOnExit>
             <Box sx={{ p: 2 }}>
               <Grid container spacing={2}>
@@ -150,6 +156,12 @@ function AlertRow({ r }) {
                     <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
                       未到货渠道：{r.missingHubs.join('、')}
                     </Typography>
+                  )}
+                  {(r.pendingCountries || []).length > 0 && (
+                    <Box sx={{ mt: 0.5 }}>
+                      <PendingCountries hubs={r.pendingCountries} size="small"
+                        prefix="运输未闭环未到货国家" />
+                    </Box>
                   )}
                 </Grid>
                 <Grid item xs={12}>
@@ -215,28 +227,43 @@ export default function Alerts() {
   const { data, error } = useApi(() => fetchAlerts(), []);
   const [q, setQ] = useState('');
   const [prio, setPrio] = useState('');
+  const [fPart, setFPart] = useState('');
+  const [onlyMissing, setOnlyMissing] = useState(false);
+
+  // 卡点环节选项由数据动态汇总（不硬编码环节名）
+  const partOpts = useMemo(() => {
+    if (!data) return [];
+    return [...new Set((data.rows || [])
+      .map((r) => r.pendingPartName || r.pendingPart).filter(Boolean))].sort();
+  }, [data]);
 
   const rows = useMemo(() => {
     if (!data) return [];
+    const text = q.trim().toLowerCase();
     return data.rows.filter((r) => {
       if (prio && r.priority !== prio) return false;
-      if (q && !(r.sku.toLowerCase().includes(q.toLowerCase())
-        || (r.model || '').toLowerCase().includes(q.toLowerCase()))) return false;
+      if (fPart && (r.pendingPartName || r.pendingPart) !== fPart) return false;
+      if (onlyMissing && !((r.pendingCountries || []).length || (r.missingHubs || []).length)) {
+        return false;
+      }
+      if (text && !(r.sku.toLowerCase().includes(text)
+        || (r.model || '').toLowerCase().includes(text))) return false;
       return true;
     });
-  }, [data, q, prio]);
+  }, [data, q, prio, fPart, onlyMissing]);
 
   if (error) return <ErrorState prefix="加急预警加载失败" error={error} />;
   if (!data) return <LoadingState />;
 
   // 口径元信息来自后端（不硬编码）：产品段/运营段的边界串。缺失时退化为不追加。
   const segDef = data.segDef;
+  const shippedExemptRows = data.shippedExemptRows || [];
 
   return (
     <Box>
       <PageHeader
         title="加急预警与盯数清单"
-        subtitle={`口径：route_check_sys 系统口径 · 只列未闭环 SKU，停滞越久越靠前 · 末端终止（作废单）不催办、单列备案 · 已换号（旧号→新号）不催办、单列备案 · 已豁免（人工登记·业务上不需走完）不催办、单列备案 · 计算于 ${data.computedAt}${segDef ? ` · 产品段 ${segDef.prodSeg} · 运营段 ${segDef.opsSeg}` : ''}`}
+        subtitle={`口径：route_check_sys 系统口径 · 只列未闭环 SKU，停滞越久越靠前 · 末端终止（作废单）不催办、单列备案 · 已换号（旧号→新号）不催办、单列备案 · 已豁免（人工登记·业务上不需走完）不催办、单列备案 · 运输已闭环（运输域是唯一卡点）不催办、单列备案 · 计算于 ${data.computedAt}${segDef ? ` · 产品段 ${segDef.prodSeg} · 运营段 ${segDef.opsSeg}` : ''}`}
       />
 
       <Grid container spacing={2} sx={{ mb: 2 }}>
@@ -267,6 +294,10 @@ export default function Alerts() {
           <KpiCard label="已豁免·不催办" value={data.holdCount ?? 0}
             sub="人工登记：业务上已不需走完流程" color={SEMANTIC.neutral} />
         </Grid>
+        <Grid item xs={4} sm={4} md={3}>
+          <KpiCard label="运输已闭环·免追踪" value={data.shippedExemptCount ?? 0}
+            sub="运输域是唯一卡点，单列备查" color={SEMANTIC.neutral} />
+        </Grid>
         <Grid item xs={6} sm={4} md={3}>
           <KpiCard label="数据新鲜度" value={data.dataLagDays === null ? '—' : `滞后 ${data.dataLagDays} 天`}
             sub={`全库最新动态 ${data.latestDynamic || '—'}`}
@@ -276,17 +307,33 @@ export default function Alerts() {
 
       <Paper sx={{ mb: 2 }}>
         <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', p: 2, flexWrap: 'wrap' }}>
-          <Typography variant="subtitle2">加急明细（P0 → P2，点击行首箭头展开详情）</Typography>
+          <Typography variant="subtitle2">
+            加急明细（P0 → P2，点击行首箭头展开详情）
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            筛选仅影响本表：{rows.length}/{data.rows.length}
+          </Typography>
           <Box sx={{ flexGrow: 1 }} />
           <TextField size="small" label="搜索 SKU / 型号" value={q}
-            onChange={(e) => setQ(e.target.value)} sx={{ width: 220 }} />
+            onChange={(e) => setQ(e.target.value)} sx={{ width: 200 }} />
           <TextField size="small" select label="优先级" value={prio}
-            onChange={(e) => setPrio(e.target.value)} sx={{ width: 160 }}>
+            onChange={(e) => setPrio(e.target.value)} sx={{ width: 150 }}>
             <MenuItem value="">全部</MenuItem>
             <MenuItem value="P0">P0 立即处理</MenuItem>
             <MenuItem value="P1">P1 重点跟进</MenuItem>
             <MenuItem value="P2">P2 推进中</MenuItem>
           </TextField>
+          <TextField size="small" select label="卡点环节" value={fPart}
+            onChange={(e) => setFPart(e.target.value)} sx={{ width: 170 }}>
+            <MenuItem value="">全部</MenuItem>
+            {partOpts.map((p) => <MenuItem key={p} value={p}>{p}</MenuItem>)}
+          </TextField>
+          <Tooltip title="仅显示有空/海运未到货或渠道缺口的 SKU">
+            <Chip label="只看运输未到货" size="small"
+              color={onlyMissing ? 'primary' : 'default'}
+              variant={onlyMissing ? 'filled' : 'outlined'}
+              onClick={() => setOnlyMissing((v) => !v)} />
+          </Tooltip>
           <Button variant="outlined" size="small" startIcon={<DownloadIcon />}
             href={buildAlertsExportUrl(prio)}>
             导出 xlsx
@@ -316,6 +363,7 @@ export default function Alerts() {
                 <TableCell>海运</TableCell>
                 <TableCell align="right">提案(天)</TableCell>
                 <TableCell align="right">到货国</TableCell>
+                <TableCell>未到货国</TableCell>
                 <TableCell>下一步</TableCell>
               </TableRow>
             </TableHead>
@@ -323,7 +371,7 @@ export default function Alerts() {
               {rows.map((r) => <AlertRow key={r.sku} r={r} />)}
               {rows.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={13} align="center">
+                  <TableCell colSpan={14} align="center">
                     <Typography variant="body2" color="text.secondary" sx={{ py: 3 }}>
                       当前筛选条件下没有预警 SKU 🎉
                     </Typography>
@@ -496,6 +544,66 @@ export default function Alerts() {
                       <TableCell>
                         <Typography variant="caption" color="text.secondary">
                           {r.conclusion}
+                        </Typography>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </Box>
+        </Paper>
+      )}
+
+      {!!shippedExemptRows.length && (
+        <Paper sx={{ mb: 2 }}>
+          <Box sx={{ p: 2 }}>
+            <Typography variant="subtitle2" gutterBottom>
+              运输已闭环 · 免追踪（{shippedExemptRows.length} 个）
+            </Typography>
+            <Typography variant="caption" color="text.secondary"
+              sx={{ display: 'block', mb: 1 }}>
+              判据：已发货货件<strong>全部到货</strong>（或无可发货货件），运输域<strong>是唯一卡点</strong>
+              —— 物流到货不是可催办动作，故移出 P0/P1/P2，单列备查。
+              真源 = {data.transportDef?.source || 'app/transport_closure.classify_transport'}。
+            </Typography>
+            <TableContainer>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>SKU</TableCell>
+                    <TableCell>型号</TableCell>
+                    <TableCell>运输闭环</TableCell>
+                    <TableCell>卡点环节</TableCell>
+                    <TableCell align="right">停滞(天)</TableCell>
+                    <TableCell align="right">已发货</TableCell>
+                    <TableCell align="right">已到货</TableCell>
+                    <TableCell>未发货渠道</TableCell>
+                    <TableCell>结论</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {shippedExemptRows.map((r) => (
+                    <TableRow key={r.sku} hover>
+                      <TableCell sx={{ fontWeight: 600 }}>{r.sku}</TableCell>
+                      <TableCell>{r.model || '—'}</TableCell>
+                      <TableCell><ClosureBadge closure={r.closure} /></TableCell>
+                      <TableCell>
+                        {r.pendingPart
+                          ? `${r.pendingPart}·${r.pendingPartName || ''}`
+                          : '—'}
+                      </TableCell>
+                      <TableCell align="right">{r.stuckDays ?? '—'}</TableCell>
+                      <TableCell align="right">{r.shippedCount ?? '—'}</TableCell>
+                      <TableCell align="right">{r.arrivedCount ?? '—'}</TableCell>
+                      <TableCell>
+                        {(r.notShippedHubs || []).length
+                          ? r.notShippedHubs.join('、')
+                          : '—'}
+                      </TableCell>
+                      <TableCell>
+                        <Typography variant="caption" color="text.secondary">
+                          {r.conclusion || '—'}
                         </Typography>
                       </TableCell>
                     </TableRow>

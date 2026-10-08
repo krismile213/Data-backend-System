@@ -40,6 +40,8 @@ from datetime import date, datetime, timedelta
 from . import exemption
 from .category_rules import rules_for
 from .config import STATE_DIR, list_batches
+from .transport_closure import (classify_transport, is_transport_segment,
+                               transport_exempt_reason)
 
 _SNAP_FILE = STATE_DIR / "inflight_snapshots.json"
 _REPORT_INDEX = STATE_DIR / "daily_reports_index.json"
@@ -214,8 +216,9 @@ def compute_inflight(category=None):
     exempted 项：{sku, model, kind, reason} —— 被豁免移出追踪的 SKU（备查不吞数据）。
     结果按品类缓存（指纹 = 复盘指纹，规则热调/导入自动失效）。
     """
-    from .routers.review import (fingerprint_for, get_review_data,
-                         resolve_part1_rounds, review_sku_segments)
+    from .routers.review import (build_shipments, fingerprint_for,
+                         get_review_data, resolve_part1_rounds,
+                         review_sku_segments)
     from .causal import locate as _locate_root_cause
     from .rule_service import get_rules
 
@@ -232,12 +235,15 @@ def compute_inflight(category=None):
     inflight_details = {}          # 在研 SKU 的事中详情（sku/{code} 用）
     snap_nodes = {}                # 快照用：{sku: {node: iso}}
     exempted = []                  # 豁免备查（不进追踪，也不吞数据）
+    transport_exempted = []        # 运输闭环免追踪备查（不吞数据）
 
     for sku, info in sorted(by_sku.items()):
         if info["all_terminated"]:
             continue                # 全部单据终止 = 流程作废（exemption.void 的
                                     # 超集短路，保留只为省一次 classify）
         # ---- 豁免判定（单一真源 exemption.classify，与加急预警同口径）----
+        # 判定次序（2026-10）：人工登记 > 换号 > 末端终止 > 运输闭环 > 正常催办。
+        # 前三者在此短路；运输闭环在段状态算完后的下游判定（见下方「运输闭环」段）。
         kind, ex_info = exemption.classify(sku, info["parts"], holds=holds,
                                            aliases=aliases)
         if kind != "active":
@@ -246,6 +252,8 @@ def compute_inflight(category=None):
                              "reason": exemption.exempt_reason(kind, ex_info)})
             continue
 
+        # 去重后的全量单据（新算段级与货件配对共用一份，避免重复去重）
+        parts_docs = _dedupe_parts(info)
         detail = details.get(sku)
         if detail is not None:
             seg_rows = detail["segments"]
@@ -256,7 +264,6 @@ def compute_inflight(category=None):
             part_stat = detail.get("partStat") or {}
         else:
             # 无任何已结束单据：现算段级（这正是事中视角的主战场）
-            parts_docs = _dedupe_parts(info)
             if parts_docs:
                 _p1_base, _p1_rounds, multi_round = resolve_part1_rounds(
                     parts_docs.get("Part1") or [], ruleset=rs)
@@ -298,11 +305,65 @@ def compute_inflight(category=None):
         if not in_research:
             continue                # 已完结（三部门全完成且无审批中单据）→ 事后域
 
+        # ---- 运输闭环（新规则，判定在豁免三通道之外的下游）----
+        # 判定次序：人工登记 > 换号 > 末端终止（上面已短路）> 运输闭环 > 催办。
+        # 「运输闭环」= 已发货货件全部到货 / 无可发货货件；物流到货不是可催办动作，
+        # 若运输域是唯一卡点则免追踪，移出 items/在研计数/超期预警计数（单列备查）。
+        shipments = build_shipments(parts_docs, rs)
+        closure_info = classify_transport(shipments)
+        closure = closure_info["closure"]
+        l4_name = rs.l4[1]
+        # 非运输域的在研段（state ∈ 进行中/预警/超期 且不属运输域）
+        non_transport_pending = any(
+            st["state"] in (ST_RUNNING, ST_WARN, ST_OVER)
+            and not is_transport_segment(r.get("dept"), r.get("seg"), l4_name)
+            for r, st in state_rows)
+        pending_countries = []
+        transport_exempt = False
+        # 运输域是否确有一个在研卡点（"运输域是唯一卡点"要求运输域确实在卡）
+        has_transport_pending = any(
+            st["state"] in (ST_RUNNING, ST_WARN, ST_OVER)
+            and is_transport_segment(r.get("dept"), r.get("seg"), l4_name)
+            for r, st in state_rows)
+        if closure == "pending":
+            # 有已发货票未到货 → 保留追踪，并标注未到货国家（必须展示）
+            pending_countries = list(closure_info["pendingHubs"])
+        elif not non_transport_pending and has_transport_pending:
+            # 运输域是**唯一卡点**（运输已闭环 / 无可发货货件且无其它在研段）→ 免追踪
+            transport_exempted.append({
+                "sku": sku, "model": info["model"], "kind": "运输闭环",
+                "closure": closure,
+                "shippedCount": closure_info["shippedCount"],
+                "arrivedCount": closure_info["arrivedCount"],
+                "notShippedHubs": list(closure_info["notShippedHubs"]),
+                "reason": transport_exempt_reason(
+                    closure, closure_info["pendingHubs"],
+                    closure_info["notShippedHubs"]),
+            })
+            continue
+        elif non_transport_pending:
+            # 运输已闭环但仍有非运输在研段（素材/上架等仍在跑）→ 仍在研；
+            # 运输域段不再是卡点：从超期/预警中剔除后重算 status（行打标 transportExempt）。
+            over_list = [o for o in over_list
+                         if not is_transport_segment(o[1].get("dept"),
+                                                     o[1].get("seg"), l4_name)]
+            warn_list = [w for w in warn_list
+                         if not is_transport_segment(w[1].get("dept"),
+                                                     w[1].get("seg"), l4_name)]
+            transport_exempt = True
+        # else：closure 已闭环/无货件，但运输域并非卡点（各段无在研卡点）→ 原样保留。
+
         # ---- 当前停留环节（总表主判定，2026-10-06 起替代「最差环节」）----
         # 最差环节 = 历史上超得最狠的段，回答"哪一段烂过"；
         # 当前停留 = 最近启动没走完的段，回答"现在卡在哪、还有几天到期"。
         # 催办要的是后者。超期/预警计数仍用 over_list/warn_list（状态列与预警段数）。
-        stay_row, stay_st, stay_left = _pick_stay(state_rows)
+        # 运输已闭环时运输域段不再是卡点 → 停留也从非运输段里选。
+        stay_src = state_rows
+        if transport_exempt:
+            stay_src = [(r, st) for r, st in state_rows
+                        if not is_transport_segment(r.get("dept"),
+                                                    r.get("seg"), l4_name)]
+        stay_row, stay_st, stay_left = _pick_stay(stay_src or state_rows)
         stay_elapsed = None
         if stay_st is not None:
             stay_elapsed = stay_st.get("elapsed")
@@ -322,6 +383,8 @@ def compute_inflight(category=None):
             "warnSegs": [w[1].get("seg") for w in warn_list],
             "status": status, "multiRound": bool(multi_round.get("flag")),
             "rootCause": root_cause, "owner": owner,
+            "pendingCountries": pending_countries,   # 运输未闭环：未到货国家清单
+            "transportExempt": transport_exempt,      # 运输已闭环但仍盯其它段
         })
         inflight_details[sku] = {
             "sku": sku, "model": info["model"],
@@ -330,6 +393,12 @@ def compute_inflight(category=None):
             "rootCause": root_cause,
             "segments": segs_out, "nodes": nodes_iso,
             "partStat": part_stat,
+            "shipClosure": closure,
+            "pendingCountries": pending_countries,
+            "transportExempt": transport_exempt,
+            "transportReason": transport_exempt_reason(
+                closure, closure_info["pendingHubs"],
+                closure_info["notShippedHubs"]),
             "warnings": [{"dept": w[1].get("dept"), "seg": w[1].get("seg"),
                           "elapsed": w[2]["elapsed"], "target": w[2]["target"],
                           "ratio": ratio, "owner": w[1].get("executor")
@@ -359,6 +428,14 @@ def compute_inflight(category=None):
         "skuDetails": inflight_details,
         "exemptCount": len(exempted),
         "exempted": exempted,
+        # 运输闭环免追踪（不进 items/在研计数，单列备查；日报「豁免备查」sheet 同源）
+        "transportExemptCount": len(transport_exempted),
+        "transportExempted": transport_exempted,
+        "transportDef": {
+            "l4Name": rs.l4[1],
+            "note": "运输已闭环（已发货货件全部到货 / 无可发货货件）时，运输域不再是卡点",
+            "source": "app/transport_closure.classify_transport",
+        },
         "_snap_nodes": snap_nodes,      # 快照用（respond 时剔除，见 routers/inflight）
     }
 
@@ -786,7 +863,11 @@ def generate_daily_report(category=None, date_str=None):
     path = target / fname
     dropped = _drop_legacy_report(target, stamp)
 
-    exempts = data.get("exempted") or None
+    # 豁免备查 = 三通道豁免（人工登记/换号/末端终止）+ 运输闭环免追踪（kind="运输闭环"）。
+    # 无任何豁免时保持 5 sheets，不产生空页。
+    exempts = list(data.get("exempted") or [])
+    exempts.extend(data.get("transportExempted") or [])
+    exempts = exempts or None
     gantts = _gantt_records(data)
     content = _daily_xlsx(
         category=cat, computed_at=data["computedAt"], date_str=today,
@@ -811,6 +892,7 @@ def generate_daily_report(category=None, date_str=None):
                          + len(alerts["ongoingOverdue"])),
         "warnCount": len(alerts["warnings"]),
         "exemptCount": data.get("exemptCount", 0),
+        "transportExemptCount": data.get("transportExemptCount", 0),
         "createdAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
     with _lock:
@@ -822,7 +904,9 @@ def generate_daily_report(category=None, date_str=None):
     return {"path": str(path), "sheets": 6 if exempts else 5, "date": today,
             "skuCount": entry["skuCount"], "overdueCount": entry["overdueCount"],
             "warnCount": entry["warnCount"],
-            "exemptCount": entry["exemptCount"], "category": cat,
+            "exemptCount": entry["exemptCount"],
+            "transportExemptCount": entry.get("transportExemptCount", 0),
+            "category": cat,
             "targetsProvisional": rs.provisional,
             "legacyRemoved": dropped}
 

@@ -44,6 +44,7 @@ from ..exemption import (OK_STATUS, VOID_TERMINATED, doc_running,
 from ..models import ApprovalNode, Batch, PartDoc
 from ..review_rules import PART_ACTIONS, PART_LIST, PART_NAMES
 from ..rule_service import get_rules
+from ..transport_closure import classify_transport, transport_exempt_reason
 from .review import _cat_cond, _db_fingerprint, _fmt, _live_batch_ids, _parse_dt
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
@@ -301,49 +302,59 @@ def _generic_material(sku_data):
 
 
 def _shipments(sku_data, rs=None):
-    """Part5×Part8 按货件号关联的逐货件列表（route_check_sys 兜底路径）。
-    含渠道未发货占位条目（无货件号/时间，仅渠道仓，noShip=True）。
+    """Part5×Part8 按货件号关联的逐货件列表 —— **委托** `review.build_shipments`。
 
-    rs：品类规则集。运输方式/目标天与"空运|海运"归类都从规则集取，
-        避免两个品类共用一份硬编码口径（缺省仍用本模块的旧函数）。
+    2026-10 起与复盘/事中**同源**（统一货件构建器）：只认 `review.build_shipments` 一份
+    实现，避免本模块再各维护一套「货件配对」逻辑而漂移。参数形状适配：
+    review 收 `parts_docs`（{part: [docs]}），本模块的 sku_data 把单据挂在 `["parts"]` 下。
+
+    ⚠️ 消费方只取 trk/hub/ship/arr/mode/target/cls/noShip；逐票 `days` 由本模块
+    `_ship_detail` 自行重算（`_days`），与构建器的 days 无关 —— 故构建器换实现对
+    加急预警的**对外输出零影响**（见 tests/test_transport_closure.py 的 parity 用例）。
     """
-    mode_fn = rs.transport_mode if rs is not None else transport_mode
-    cls_fn = rs.ship_class if rs is not None else _ship_cls
-    p5, p8 = {}, {}
-    no_trk_hubs, hubs_with_trk = [], set()
-    for d in sku_data["parts"].get("Part5") or []:
-        raw = d["raw"]
-        trk = _clean(raw.get("货件号"))
-        hub = _clean(raw.get("发往渠道仓库"))
-        if not trk:
-            if hub and hub not in no_trk_hubs:
-                no_trk_hubs.append(hub)
-            continue
-        hubs_with_trk.add(hub)
-        sd = _parse_dt(_clean(raw.get("发货日期")))
-        if trk not in p5 or (sd and not p5[trk][1]):
-            p5[trk] = (hub, sd)
-    for d in sku_data["parts"].get("Part8") or []:
-        raw = d["raw"]
-        trk = _clean(raw.get("货件号"))
-        ad = _parse_dt(_clean(raw.get("渠道仓到货时间")))
-        if trk and (trk not in p8 or (ad and not p8[trk])):
-            p8[trk] = ad
-    items = []
-    for trk, (hub, sd) in p5.items():
-        arr = p8.get(trk)
-        mode, tgt = mode_fn(hub)
-        items.append({"trk": trk, "hub": hub, "ship": sd, "arr": arr,
-                      "days": _days(sd, arr), "mode": mode, "target": tgt,
-                      "cls": cls_fn(mode), "noShip": False})
-    for hub in no_trk_hubs:
-        if hub in hubs_with_trk:
-            continue
-        mode, tgt = mode_fn(hub)
-        items.append({"trk": "", "hub": hub, "ship": None, "arr": None,
-                      "days": None, "mode": mode, "target": tgt,
-                      "cls": cls_fn(mode), "noShip": True})
-    return items
+    from .review import build_shipments
+    return build_shipments(sku_data.get("parts") or {}, rs)
+
+
+# ---------------------------------------------------------------------------
+# 运输闭环门（2026-10）：运输已闭环时，运输域原因不再作为催办卡点
+# ---------------------------------------------------------------------------
+# 判据真源 = app/transport_closure.classify_transport（与事中日报共用同一份纯函数）。
+# 运输域原因清单（关"运输已闭环"门时从 reason 里剔除）：
+#   · 空运/海运超底线（「空运耗时…」「海运耗时…」）
+#   · 有发货未到货渠道（「有发货未到货渠道:…」）
+#   · 渠道未发货(超时)（「渠道未发货(超时):…」）
+#   · Part5 / Part8 卡点（「Part5停滞…」「Part8停滞…」）
+_TRANSPORT_REASON_PREFIX = ("空运耗时", "海运耗时", "有发货未到货渠道", "渠道未发货")
+_TRANSPORT_REASON_PARTS = ("Part5", "Part8")
+
+
+def _is_transport_reason(text):
+    """该加急原因是否属于「运输域」。"""
+    s = str(text or "")
+    if s.startswith(_TRANSPORT_REASON_PREFIX):
+        return True
+    return any(s.startswith(f"{p}停滞") for p in _TRANSPORT_REASON_PARTS)
+
+
+def _priority(*, transport_closed, air_bad, sea_bad, prop_stale, part7_stuck,
+              prod_bad, stuck_bad, stuck_transport, missing, no_ship_hubs):
+    """优先级（route_check_sys 口径 + 运输闭环门）。
+
+    transport_closed=True：运输域原因已被剔除 → 只用**非运输域**原因重算
+    （有剩余 reason 的保留并降级；air/sea/missing/no_ship 不再提级）。
+    """
+    if transport_closed:
+        if prop_stale or part7_stuck:
+            return "P0"
+        if prod_bad or (stuck_bad and not stuck_transport):
+            return "P1"
+        return "P2"
+    if air_bad or sea_bad or prop_stale or part7_stuck:
+        return "P0"
+    if prod_bad or stuck_bad or missing or no_ship_hubs:
+        return "P1"
+    return "P2"
 
 
 def _pending_part(sku_data, today):
@@ -512,6 +523,7 @@ def compute_alerts(category=None):
     void_rows = []
     alias_rows = []
     hold_rows = []
+    shipped_exempt_rows = []            # 运输已闭环·免追踪备查
     for sku, data in by_sku.items():
         if valid_map.get(sku, False):
             continue                       # 已闭环不列入（route_check_sys 口径）
@@ -638,6 +650,32 @@ def compute_alerts(category=None):
         if not reason:
             reason.append("流程未完成，需催办闭环")
 
+        # ---- 运输闭环门（判定次序：人工登记 > 换号 > 末端终止 > 运输闭环 > 催办）----
+        # 运输闭环判定真源 = app/transport_closure.classify_transport（与事中日报同源）。
+        # pending → 保留追踪并标注未到货国家；closed/none → 剔除运输域原因后重算优先级，
+        # 无剩余原因者移出 P0/P1/P2、单列 shippedExemptRows 备查；有剩余者保留并降级。
+        closure_info = classify_transport(items)
+        closure = closure_info["closure"]
+        transport_closed = closure in ("closed", "none")
+        pending_countries = (list(closure_info["pendingHubs"])
+                             if closure == "pending" else [])
+        if transport_closed:
+            reason = [s for s in reason if not _is_transport_reason(s)]
+            if not reason:
+                shipped_exempt_rows.append({
+                    "sku": sku, "model": data.get("model") or "",
+                    "closure": closure,
+                    "shippedCount": closure_info["shippedCount"],
+                    "arrivedCount": closure_info["arrivedCount"],
+                    "notShippedHubs": list(closure_info["notShippedHubs"]),
+                    "pendingPart": pP,
+                    "pendingPartName": PART_NAMES.get(pP, pP or "") if pP else "",
+                    "stuckDays": stuck, "lastDynamic": last_dyn,
+                    "conclusion": transport_exempt_reason(
+                        closure, [], closure_info["notShippedHubs"]),
+                })
+                continue
+
         # ---- 下一步 ----
         todo = []
         if pP and pP != "Part7" and pP in NEXT_BY_PART:
@@ -652,14 +690,15 @@ def compute_alerts(category=None):
         if not todo:
             todo.append(NEXT_BY_PART.get(pP, "推进闭环并重导钉钉单据核对"))
 
-        # ---- 优先级（route_check_sys 口径）----
-        if air_judge == "差" or sea_judge == "差" or prop_stale or part7_stuck:
-            prio = "P0"
-        elif (str(prod_judge).startswith("✗") or (stuck or 0) > stuck_t
-              or missing or no_ship_hubs):
-            prio = "P1"
-        else:
-            prio = "P2"
+        # ---- 优先级（route_check_sys 口径 + 运输闭环门）----
+        prio = _priority(
+            transport_closed=transport_closed,
+            air_bad=air_judge == "差", sea_bad=sea_judge == "差",
+            prop_stale=prop_stale, part7_stuck=part7_stuck,
+            prod_bad=str(prod_judge).startswith("✗"),
+            stuck_bad=(stuck or 0) > stuck_t,
+            stuck_transport=(stuck or 0) > stuck_t and pP in _TRANSPORT_REASON_PARTS,
+            missing=bool(missing), no_ship_hubs=bool(no_ship_hubs))
 
         rows.append({
             "priority": prio, "sku": sku, "model": data["model"],
@@ -683,6 +722,7 @@ def compute_alerts(category=None):
                     "detail": sea_detail},
             "countries": len(hubs8), "countryMin": country_min,
             "missingHubs": missing,
+            "pendingCountries": pending_countries,   # 运输未闭环：未到货国家清单
             "reasons": reason, "nextSteps": todo,
         })
 
@@ -691,6 +731,9 @@ def compute_alerts(category=None):
 
     # 作废单排序：「无承接单」在前（更可能真需要人确认是不是漏重开），再按 SKU
     void_rows.sort(key=lambda r: (r["successor"] is not None, r["sku"]))
+
+    # 运输免追踪排序：停滞越久越靠前
+    shipped_exempt_rows.sort(key=lambda r: (-(r["stuckDays"] or 0), r["sku"]))
 
     # 换号排序：新号没流程的在前（更需要人确认），再按 SKU
     alias_rows.sort(key=lambda r: (r["newHasFlow"], r["sku"]))
@@ -741,6 +784,14 @@ def compute_alerts(category=None):
             "source": "SKU登记表.xlsx · 人工登记 子表",
             "registered": len(holds),
             "hitInCategory": len(hold_rows),
+        },
+        # 运输已闭环·免追踪（移出 P0/P1/P2，单列备查；真源 app/transport_closure）
+        "shippedExemptCount": len(shipped_exempt_rows),
+        "shippedExemptRows": shipped_exempt_rows,
+        "transportDef": {
+            "note": "运输已闭环（已发货货件全部到货 / 无可发货货件）时，"
+                    "运输域原因不再作为催办卡点，单列备查",
+            "source": "app/transport_closure.classify_transport",
         },
         "dataLagDays": max((today - latest_dyn).days, 0) if latest_dyn else None,
         "latestDynamic": _fmt(latest_dyn),

@@ -437,3 +437,30 @@ def test_alerts_today_shape(inflight_data):
     new_keys = {(r["sku"], r["seg"]) for r in alerts["todayNewOverdue"]}
     ong_keys = {(r["sku"], r["seg"]) for r in alerts["ongoingOverdue"]}
     assert not (new_keys & ong_keys)
+
+
+# ---------------------------------------------------------------------------
+# 2026-10 增量：段级时间轴「开始/结束」两列 + 运输闭环免追踪顶层键
+# ---------------------------------------------------------------------------
+def test_seg_public_exposes_start_end():
+    """_seg_public 必带 start/end（前端段级时间轴「开始」「结束」两列取值，
+    前端**不用** t0/t1）。start/end 串尾已自带时间来源标注。"""
+    row = _row(seg="取数→签样", start="2026-09-01(系统)", end="2026-09-10(动作)",
+               t0=_dt("2026-09-01"), t1=_dt("2026-09-10"))
+    pub = svc._seg_public(row, svc.seg_state(row, today=TODAY))
+    assert pub["start"] == "2026-09-01(系统)"
+    assert pub["end"] == "2026-09-10(动作)"
+    assert pub["t0"] == "2026-09-01 00:00:00"
+    assert pub["t1"] == "2026-09-10 00:00:00"
+
+
+def test_inflight_exposes_transport_keys(inflight_data):
+    """顶层新增 transportExemptCount / transportExempted / transportDef（运输闭环免追踪）。"""
+    d = inflight_data
+    assert isinstance(d["transportExemptCount"], int)
+    assert isinstance(d["transportExempted"], list)
+    assert d["transportExemptCount"] == len(d["transportExempted"])
+    assert d["transportDef"]["l4Name"] == "采购→发货末批"
+    for x in d["transportExempted"]:
+        assert x["kind"] == "运输闭环" and x["sku"] and x["reason"]
+        assert x["closure"] in ("closed", "none")
