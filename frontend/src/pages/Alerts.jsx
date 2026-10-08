@@ -263,7 +263,7 @@ export default function Alerts() {
     <Box>
       <PageHeader
         title="加急预警与盯数清单"
-        subtitle={`口径：route_check_sys 系统口径 · 只列未闭环 SKU，停滞越久越靠前 · 末端终止（作废单）不催办、单列备案 · 已换号（旧号→新号）不催办、单列备案 · 已豁免（人工登记·业务上不需走完）不催办、单列备案 · 运输已闭环（运输域是唯一卡点）不催办、单列备案 · 计算于 ${data.computedAt}${segDef ? ` · 产品段 ${segDef.prodSeg} · 运营段 ${segDef.opsSeg}` : ''}`}
+        subtitle={`口径：route_check_sys 系统口径 · 只列未闭环 SKU，停滞越久越靠前 · 末端终止（作废单）不催办、单列备案 · 已换号（旧号→新号）不催办、单列备案 · 已豁免（人工登记·业务上不需走完）不催办、单列备案 · 运输已闭环且无其它催办原因不催办、单列备案 · 计算于 ${data.computedAt}${segDef ? ` · 产品段 ${segDef.prodSeg} · 运营段 ${segDef.opsSeg}` : ''}`}
       />
 
       <Grid container spacing={2} sx={{ mb: 2 }}>
@@ -296,7 +296,7 @@ export default function Alerts() {
         </Grid>
         <Grid item xs={4} sm={4} md={3}>
           <KpiCard label="运输已闭环·免追踪" value={data.shippedExemptCount ?? 0}
-            sub="运输域是唯一卡点，单列备查" color={SEMANTIC.neutral} />
+            sub="运输已闭环且无其它催办原因，单列备查" color={SEMANTIC.neutral} />
         </Grid>
         <Grid item xs={6} sm={4} md={3}>
           <KpiCard label="数据新鲜度" value={data.dataLagDays === null ? '—' : `滞后 ${data.dataLagDays} 天`}
@@ -563,7 +563,7 @@ export default function Alerts() {
             </Typography>
             <Typography variant="caption" color="text.secondary"
               sx={{ display: 'block', mb: 1 }}>
-              判据：已发货货件<strong>全部到货</strong>（或无可发货货件），运输域<strong>是唯一卡点</strong>
+              判据：已发货货件<strong>全部到货</strong>（或无可发货货件），且<strong>无其它催办原因</strong>
               —— 物流到货不是可催办动作，故移出 P0/P1/P2，单列备查。
               真源 = {data.transportDef?.source || 'app/transport_closure.classify_transport'}。
             </Typography>
