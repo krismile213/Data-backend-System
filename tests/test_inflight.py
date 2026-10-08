@@ -399,20 +399,23 @@ def test_inflight_structure(inflight_data):
     assert lefts == sorted(lefts)
 
 
-def test_inflight_g506_still_in_research(inflight_data, review_g506_done):
-    """验收锚点（设计 §7 T03）：/api/inflight/sku/G506 必须可查。
+def test_inflight_g506_queryable(inflight_data, review_g506_done):
+    """验收锚点（T18 业务口径取代旧 §7 T03「必须在研」）：G506 必须**可查**。
 
-    G506 三部门全完成（复盘有效），但 Part8 有 10 张、Part9 有 2 张单据
-    仍挂「审批中」→ 按设计口径「三部门未全完成 或 任一 Part 审批中」
-    它属于**在研**：文书未收尾恰恰是事中要催的事。
+    G506 三部门段级已全部完成（18 段：17 已完成 + 1 留空），已发货货件全部到货
+    → 按 T18 业务口径属**在售品**：移出在研清单（免追踪，单列 transportExempted）。
+    但「事中档案」GET /api/inflight/sku/{code} 必须仍能打开（用户明确要求可随时回查）。
+    保留原用例对 partStat.running 的覆盖意图：Part8/Part9 仍挂「审批中」单据（文书未收尾）。
     """
     if not review_g506_done:
         pytest.skip("G506 未导入或未完结，锚点不适用")
-    assert "G506" in {x["sku"] for x in inflight_data["items"]}
-    det = svc.get_inflight_data(None)["skuDetails"].get("G506")
-    assert det is not None
+    det = inflight_data["skuDetails"].get("G506")
+    assert det is not None, "G506 必须可查（在售品免追踪后仍进 skuDetails）"
     assert det["partStat"]["Part8"]["running"] >= 1 \
         or det["partStat"]["Part9"]["running"] >= 1
+    # 全段完成 + 运输已闭环 → 免追踪：不在 items，进 transportExempted
+    assert "G506" not in {x["sku"] for x in inflight_data["items"]}
+    assert "G506" in {x["sku"] for x in inflight_data["transportExempted"]}
 
 
 @pytest.fixture(scope="module")
@@ -455,7 +458,7 @@ def test_seg_public_exposes_start_end():
 
 
 def test_inflight_exposes_transport_keys(inflight_data):
-    """顶层新增 transportExemptCount / transportExempted / transportDef（运输闭环免追踪）。"""
+    """顶层运输键 + 在研 item 运输字段 + 运输在途·逐票（T18）。"""
     d = inflight_data
     assert isinstance(d["transportExemptCount"], int)
     assert isinstance(d["transportExempted"], list)
@@ -464,3 +467,27 @@ def test_inflight_exposes_transport_keys(inflight_data):
     for x in d["transportExempted"]:
         assert x["kind"] == "运输闭环" and x["sku"] and x["reason"]
         assert x["closure"] in ("closed", "none")
+        # 免追踪 SKU 仍须可查「事中档案」
+        assert x["sku"] in d["skuDetails"]
+    # 在研 item 的运输字段
+    for it in d["items"]:
+        assert it["shipClosure"] in ("closed", "pending", "none")
+        assert isinstance(it["pendingCountries"], list)
+        assert isinstance(it["notShippedHubs"], list)
+        sc = it["shipCounts"]
+        assert set(sc) == {"shipped", "arrived", "pending"}
+    # 运输在途·逐票：结构与「仅收有未到货票/有未发货渠道」约束
+    tit = d["transportInTransit"]
+    assert isinstance(tit, list)
+    for e in tit:
+        assert e["sku"] and e["closure"] in ("closed", "pending", "none")
+        assert isinstance(e["tickets"], list)
+        assert isinstance(e["unshippedHubs"], list)
+        assert e["closure"] == "pending" or e["unshippedHubs"], \
+            "仅收有未到货票 / 有未发货渠道的 SKU"
+        for t in e["tickets"]:
+            assert set(t) == {"hub", "trk", "ship", "arr", "state"}
+            assert t["state"] in ("已到货", "未到货")
+            # 日期已转字符串（不得泄漏 datetime）
+            assert t["ship"] is None or isinstance(t["ship"], str)
+            assert t["arr"] is None or isinstance(t["arr"], str)

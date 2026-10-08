@@ -133,6 +133,64 @@ def _seg_public(row, st):
     }
 
 
+def _iso_date(v):
+    """datetime/date → 'YYYY-MM-DD'；字符串原样；None/'' → None。
+
+    进 JSON 前统一转字符串，**绝不**让 datetime 泄漏进响应。
+    """
+    if v is None or v == "":
+        return None
+    if isinstance(v, (datetime, date)):
+        return v.strftime("%Y-%m-%d")
+    return str(v)
+
+
+def _iso_ticket(t):
+    """运输在途票 → 可 JSON 化结构（日期转字符串，其余原值）。"""
+    return {
+        "hub": t.get("hub"),
+        "trk": t.get("trk"),
+        "ship": _iso_date(t.get("ship")),
+        "arr": _iso_date(t.get("arr")),
+        "state": t.get("state"),
+    }
+
+
+def _build_detail(sku, info, *, detail, segs_out, nodes_iso, part_stat,
+                  multi_round, root_cause, status, closure, closure_info,
+                  pending_countries, transport_exempt, over_list, warn_list,
+                  ratio):
+    """构造单 SKU 的事中详情（**在研与免追踪共用同一形状**，供「事中档案」回查）。
+
+    ⚠️ over_list / warn_list 由调用方在「剔除运输域卡点」之后再传入 ——
+    运输已闭环时运输域段不得出现在超期/预警里。
+    """
+    return {
+        "sku": sku, "model": info["model"],
+        "firstProposalAt": detail.get("firstProposalAt") if detail else None,
+        "status": status, "multiRound": multi_round,
+        "rootCause": root_cause,
+        "segments": segs_out, "nodes": nodes_iso,
+        "partStat": part_stat,
+        "shipClosure": closure,
+        "pendingCountries": pending_countries,
+        "transportExempt": transport_exempt,
+        "transportReason": transport_exempt_reason(
+            closure, closure_info["pendingHubs"],
+            closure_info["notShippedHubs"]),
+        "warnings": [{"dept": w[1].get("dept"), "seg": w[1].get("seg"),
+                      "elapsed": w[2]["elapsed"], "target": w[2]["target"],
+                      "ratio": ratio, "owner": w[1].get("executor")
+                      or w[1].get("owner") or ""}
+                     for w in warn_list],
+        "overdues": [{"dept": o[1].get("dept"), "seg": o[1].get("seg"),
+                      "elapsed": o[2]["elapsed"], "target": o[2]["target"],
+                      "overDays": o[2]["over"], "owner": o[1].get("executor")
+                      or o[1].get("owner") or ""}
+                     for o in over_list],
+    }
+
+
 def _pick_stay(state_rows):
     """当前停留环节判定（2026-10-06：总表「最差环节」改判「当前停留」）。
 
@@ -236,6 +294,7 @@ def compute_inflight(category=None):
     snap_nodes = {}                # 快照用：{sku: {node: iso}}
     exempted = []                  # 豁免备查（不进追踪，也不吞数据）
     transport_exempted = []        # 运输闭环免追踪备查（不吞数据）
+    transport_in_transit = []      # 运输在途·逐票（前端④：有未到货票 / 有未发货渠道的 SKU）
 
     for sku, info in sorted(by_sku.items()):
         if info["all_terminated"]:
@@ -305,31 +364,62 @@ def compute_inflight(category=None):
         if not in_research:
             continue                # 已完结（三部门全完成且无审批中单据）→ 事后域
 
-        # ---- 运输闭环（新规则，判定在豁免三通道之外的下游）----
+        # ---- 运输闭环（判定在豁免三通道之外的下游）----
         # 判定次序：人工登记 > 换号 > 末端终止（上面已短路）> 运输闭环 > 催办。
-        # 「运输闭环」= 已发货货件全部到货 / 无可发货货件；物流到货不是可催办动作，
-        # 若运输域是唯一卡点则免追踪，移出 items/在研计数/超期预警计数（单列备查）。
+        # 业务口径（2026-10 用户逐字确认）：**在售品** —— 所有段都已推进到位（无任何在研段，
+        # 运输域也算）+ 运输无未到货（closure != "pending"）→ 物流到货不是可催办动作，
+        # 移出 items/在研计数/超期预警计数（单列备查）。
+        # ⚠️ 反向边界（必须守住）：只要还有任一段处在「未开始 / 进行中 / 预警 / 超期」——
+        # 尤其是运输域「·未发货」占位段（Part5 已立项渠道但压根没发货）——就**不是**在售品，
+        # 必须保留追踪（G597 那种"发货期限没过、都还没发货"的，绝不能丢开在研）。
         shipments = build_shipments(parts_docs, rs)
         closure_info = classify_transport(shipments)
         closure = closure_info["closure"]
         l4_name = rs.l4[1]
-        # 非运输域的在研段（state ∈ 进行中/预警/超期 且不属运输域）
-        non_transport_pending = any(
-            st["state"] in (ST_RUNNING, ST_WARN, ST_OVER)
+
+        _active_states = (ST_RUNNING, ST_WARN, ST_OVER, ST_PENDING)
+        # 非运输域的在研段（state ∈ 未开始/进行中/预警/超期 且不属运输域）
+        non_transport_active = any(
+            st["state"] in _active_states
             and not is_transport_segment(r.get("dept"), r.get("seg"), l4_name)
             for r, st in state_rows)
-        pending_countries = []
-        transport_exempt = False
-        # 运输域是否确有一个在研卡点（"运输域是唯一卡点"要求运输域确实在卡）
-        has_transport_pending = any(
-            st["state"] in (ST_RUNNING, ST_WARN, ST_OVER)
+        # 运输域的在研段（含「·未发货」占位段：它"在跑"就说明还没发货）
+        transport_active = any(
+            st["state"] in _active_states
             and is_transport_segment(r.get("dept"), r.get("seg"), l4_name)
             for r, st in state_rows)
+        any_active = non_transport_active or transport_active
+
+        pending_countries = []
+        transport_exempt = False
+
+        # 运输在途·逐票（前端④）：有未到货票 / 有未发货渠道的 SKU，供催物流
+        if closure == "pending" or closure_info["notShippedHubs"]:
+            transport_in_transit.append({
+                "sku": sku, "model": info["model"], "closure": closure,
+                "tickets": [_iso_ticket(t) for t in closure_info["tickets"]],
+                "unshippedHubs": list(closure_info["notShippedHubs"]),
+            })
+
         if closure == "pending":
             # 有已发货票未到货 → 保留追踪，并标注未到货国家（必须展示）
             pending_countries = list(closure_info["pendingHubs"])
-        elif not non_transport_pending and has_transport_pending:
-            # 运输域是**唯一卡点**（运输已闭环 / 无可发货货件且无其它在研段）→ 免追踪
+        elif state_rows and not any_active:
+            # 在售品：所有段已完成 + 运输无未到货 → 免追踪（移出 items/在研计数/
+            # 超期预警计数，单列备查）。⚠️ detail **仍存进 skuDetails**，
+            # 保证「事中档案」GET /api/inflight/sku/{code} 可随时回查（用户明确要求）。
+            # 不进 _snap_nodes（快照只针对在研 SKU）。
+            # ⚠️ state_rows 非空守卫：拿不到任何段（段模板缺失）时无法判定"全段完成"，
+            # 保守起见**不免** —— 绝不把"没有段信息"当成"在售品"而静默丢弃。
+            det = _build_detail(
+                sku, info, detail=detail, segs_out=segs_out, nodes_iso=nodes_iso,
+                part_stat=part_stat, multi_round=multi_round,
+                root_cause=root_cause, status=ST_DONE, closure=closure,
+                closure_info=closure_info, pending_countries=pending_countries,
+                transport_exempt=True, over_list=over_list, warn_list=warn_list,
+                ratio=ratio)
+            det["exemptKind"] = "运输闭环"
+            inflight_details[sku] = det
             transport_exempted.append({
                 "sku": sku, "model": info["model"], "kind": "运输闭环",
                 "closure": closure,
@@ -341,7 +431,7 @@ def compute_inflight(category=None):
                     closure_info["notShippedHubs"]),
             })
             continue
-        elif non_transport_pending:
+        elif non_transport_active:
             # 运输已闭环但仍有非运输在研段（素材/上架等仍在跑）→ 仍在研；
             # 运输域段不再是卡点：从超期/预警中剔除后重算 status（行打标 transportExempt）。
             over_list = [o for o in over_list
@@ -351,7 +441,8 @@ def compute_inflight(category=None):
                          if not is_transport_segment(w[1].get("dept"),
                                                      w[1].get("seg"), l4_name)]
             transport_exempt = True
-        # else：closure 已闭环/无货件，但运输域并非卡点（各段无在研卡点）→ 原样保留。
+        # else：transport_active 且无其它在研段 → 运输域是卡点（如 G597 未发货）→
+        # 原样保留追踪，transport_exempt 保持 False。
 
         # ---- 当前停留环节（总表主判定，2026-10-06 起替代「最差环节」）----
         # 最差环节 = 历史上超得最狠的段，回答"哪一段烂过"；
@@ -383,33 +474,22 @@ def compute_inflight(category=None):
             "warnSegs": [w[1].get("seg") for w in warn_list],
             "status": status, "multiRound": bool(multi_round.get("flag")),
             "rootCause": root_cause, "owner": owner,
-            "pendingCountries": pending_countries,   # 运输未闭环：未到货国家清单
+            "shipClosure": closure,                   # 运输闭环态（closed/pending/none）
+            "pendingCountries": pending_countries,    # 运输未闭环：未到货国家清单
+            "notShippedHubs": list(closure_info["notShippedHubs"]),  # 未发货渠道
+            "shipCounts": {                           # 已发/到货/在途票数
+                "shipped": closure_info["shippedCount"],
+                "arrived": closure_info["arrivedCount"],
+                "pending": closure_info["pendingCount"],
+            },
             "transportExempt": transport_exempt,      # 运输已闭环但仍盯其它段
         })
-        inflight_details[sku] = {
-            "sku": sku, "model": info["model"],
-            "firstProposalAt": detail.get("firstProposalAt") if detail else None,
-            "status": status, "multiRound": multi_round,
-            "rootCause": root_cause,
-            "segments": segs_out, "nodes": nodes_iso,
-            "partStat": part_stat,
-            "shipClosure": closure,
-            "pendingCountries": pending_countries,
-            "transportExempt": transport_exempt,
-            "transportReason": transport_exempt_reason(
-                closure, closure_info["pendingHubs"],
-                closure_info["notShippedHubs"]),
-            "warnings": [{"dept": w[1].get("dept"), "seg": w[1].get("seg"),
-                          "elapsed": w[2]["elapsed"], "target": w[2]["target"],
-                          "ratio": ratio, "owner": w[1].get("executor")
-                          or w[1].get("owner") or ""}
-                         for w in warn_list],
-            "overdues": [{"dept": o[1].get("dept"), "seg": o[1].get("seg"),
-                          "elapsed": o[2]["elapsed"], "target": o[2]["target"],
-                          "overDays": o[2]["over"], "owner": o[1].get("executor")
-                          or o[1].get("owner") or ""}
-                         for o in over_list],
-        }
+        inflight_details[sku] = _build_detail(
+            sku, info, detail=detail, segs_out=segs_out, nodes_iso=nodes_iso,
+            part_stat=part_stat, multi_round=multi_round, root_cause=root_cause,
+            status=status, closure=closure, closure_info=closure_info,
+            pending_countries=pending_countries, transport_exempt=transport_exempt,
+            over_list=over_list, warn_list=warn_list, ratio=ratio)
         snap_nodes[sku] = {k: v for k, v in nodes_iso.items() if v}
 
     # 最紧急的排前：距超时升序（负=已超期最先），无目标的沉底；同分比预警段数
@@ -428,12 +508,15 @@ def compute_inflight(category=None):
         "skuDetails": inflight_details,
         "exemptCount": len(exempted),
         "exempted": exempted,
-        # 运输闭环免追踪（不进 items/在研计数，单列备查；日报「豁免备查」sheet 同源）
+        # 运输闭环免追踪（在售品：全段完成且运输无未到货；不进 items/在研计数，
+        # 单列备查；日报「豁免备查」sheet 同源）
         "transportExemptCount": len(transport_exempted),
         "transportExempted": transport_exempted,
+        # 运输在途·逐票（前端④催物流）：有未到货票 / 有未发货渠道的 SKU
+        "transportInTransit": transport_in_transit,
         "transportDef": {
             "l4Name": rs.l4[1],
-            "note": "运输已闭环（已发货货件全部到货 / 无可发货货件）时，运输域不再是卡点",
+            "note": "在售品（所有段已完成且运输无未到货）→ 运输域不再是卡点，免追踪",
             "source": "app/transport_closure.classify_transport",
         },
         "_snap_nodes": snap_nodes,      # 快照用（respond 时剔除，见 routers/inflight）

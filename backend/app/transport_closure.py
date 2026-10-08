@@ -2,9 +2,13 @@
 """
 transport_closure.py — 运输闭环判定单一真源（纯函数 · 零业务依赖）
 ================================================================================
-背景（2026-10 需求）：不少 SKU 三部门节点都已推进到位、只差「已发货货件到货」这一件
-物流事实；而物流到货与否**不是人可催办的动作**（等船/等航班），继续把它当卡点会让
-「在研清单 / 加急预警」长期挂着一批其实已经闭环、只等物流的 SKU，把真正的人为卡点淹没。
+业务口径（2026-10 用户逐字确认，**在售品免追踪**）：
+  「所有段都已推进到位（无任何在研段，运输域也算）+ 运输无未到货」的 SKU 属**在售品**，
+  物流到货与否**不是人可催办的动作**（等船/等航班），故免追踪（移出在研清单，单列备查）。
+  ⚠️ 反向边界（必须守住）：只要还有任一段处在「未开始 / 进行中 / 预警 / 超期」——
+  尤其是运输域里「·未发货」占位段（Part5 已立项渠道但压根没发货）——就**不是**在售品，
+  必须保留追踪。判定由消费方（inflight_service）用 `is_transport_segment` + 段状态完成，
+  本模块只负责「一票货件闭环没有」这一件事。
 
 本模块把「一票货件到底闭环没有」抽成**纯函数**，供两个消费方共用（同源）：
   · `inflight_service.compute_inflight`（事中日报「在研清单 / 免追踪备查」）；
@@ -70,10 +74,14 @@ def classify_transport(shipments):
       shippedHubs   : 已发货票涉及的渠道仓/国家（去重，按首现顺序）；
       pendingHubs   : 存在已发货未到货票的渠道仓/国家（去重，按首现顺序）；
       notShippedHubs: Part5 已立项但无货件号（noShip 占位）的渠道仓（去重）；
-      pendingCount  : 未到货票数（= shippedCount − arrivedCount）。
+      pendingCount  : 未到货票数（= shippedCount − arrivedCount）；
+      tickets       : 已发货票明细 [{hub, trk, ship, arr, state}]（state ∈ 已到货/未到货；
+                      取 `_pick` 到的**原值**，datetime 也照传 —— 供前端「运输在途·逐票」展示）；
+      unshippedHubs : = notShippedHubs 的别名（供前端②④统一取用）。
     """
     shipped = arrived = 0
     shipped_hubs, pending_hubs, not_shipped_hubs = [], [], []
+    tickets = []
     for it in shipments or []:
         trk = _pick(it, _TRK_KEYS)
         hub = _pick(it, _HUB_KEYS)
@@ -95,8 +103,13 @@ def classify_transport(shipments):
             shipped_hubs.append(hub)
         if _has(arr):
             arrived += 1
-        elif _has(hub) and hub not in pending_hubs:
-            pending_hubs.append(hub)
+            tickets.append({"hub": hub, "trk": trk, "ship": ship, "arr": arr,
+                            "state": "已到货"})
+        else:
+            if _has(hub) and hub not in pending_hubs:
+                pending_hubs.append(hub)
+            tickets.append({"hub": hub, "trk": trk, "ship": ship, "arr": arr,
+                            "state": "未到货"})
 
     if shipped == 0:
         closure = "none"
@@ -113,6 +126,8 @@ def classify_transport(shipments):
         "pendingHubs": pending_hubs,
         "notShippedHubs": not_shipped_hubs,
         "pendingCount": max(shipped - arrived, 0),
+        "tickets": tickets,
+        "unshippedHubs": list(not_shipped_hubs),
     }
 
 

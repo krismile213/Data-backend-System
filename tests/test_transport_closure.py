@@ -8,9 +8,10 @@ inflight / 加急预警 alerts）共用。本文件钉住三件事：
 
   ① 纯函数 —— classify_transport 四分支（none/closed/pending + 多票聚合）、
      is_transport_segment 三种命中、字段名容错、notShippedHubs 不参与 closure；
-  ② 事中引擎 —— 运输闭环 + 无其它在研段 → 移出 items 进 transportExempted；
+  ② 事中引擎 —— 在售品（全段已完成 + 运输无未到货）→ 移出 items 进 transportExempted
+     （但 detail 仍可查、不进快照）；
      运输闭环 + 有非运输在研段 → 仍在研（剔除运输域卡点重算 status）；
-     运输未闭环 → 保留并标注未到货国家；人工登记仍最先短路；
+     运输未发货 / 未闭环 → **保留**并标注（G597 回归锁）；人工登记仍最先短路；
   ③ 加急预警 —— `_shipments` 委托 `review.build_shipments` 后与旧实现 parity；
      运输闭环门把「只剩运输域原因」的行移入 shippedExemptRows。
 """
@@ -166,17 +167,22 @@ _P8 = {"Part8": [_idoc("Part8", {"货件号": "T1", "到货渠道仓": "美国",
 # GC：已发货未到货（单号 T2 无 Part8 记录）
 _P5P = {"Part5": [_idoc("Part5", {"货件号": "T2", "发往渠道仓库": "美国",
                                "发货日期": "2026-03-01 00:00:00"}, "P5-2")]}
+# GN：渠道未发货（Part5 已立项渠道但无货件号 → noShip 占位 → closure=none）
+_P5N = {"Part5": [_idoc("Part5", {"发往渠道仓库": "东南亚仓"}, "P5-N")]}
 
 _SEGS_BY_SKU = {
-    # GA：运输域是唯一卡点
-    "GA": [_seg("运输", "空运·运输", _PAST)],
-    # GB：运输闭环 + 非运输在研段（素材→上架，进行中）
+    # GA：所有段已完成 + 运输已闭环 → 在售品（免追踪）
+    "GA": [_seg("运输", "空运·运输", _PAST, t1=_dt("2025-02-01 09:00:00"))],
+    # GB：运输域有在跑段（超期）+ 非运输在研段（素材→上架，进行中）→ 保留，
+    #     运输域卡点被剔除、行打标 transportExempt
     "GB": [_seg("运输", "空运·运输", _PAST),
            _seg("运营", "素材加工→上架", _RECENT, target=60)],
-    # GC：运输未闭环（pending）
+    # GC：运输未闭环（pending）→ 保留 + 标注未到货国家
     "GC": [_seg("运营", "素材加工→上架", _RECENT, target=60)],
     # GH：人工登记（最先短路）
     "GH": [_seg("运输", "空运·运输", _PAST)],
+    # GN：渠道未发货（closure=none + 「·未发货」在跑段）→ **必须保留**（本次 bug 回归锁）
+    "GN": [_seg("后勤", "东南亚仓·未发货", _PAST, no_ship=True)],
 }
 
 _HOLDS = {"GH": {"reason": "渠道取消", "registeredAt": "2026-09-28"}}
@@ -190,6 +196,7 @@ def patch_inflight(monkeypatch):
         "GB": _mk_info("M-GB", {**_P5, **_P8}),
         "GC": _mk_info("M-GC", dict(_P5P)),
         "GH": _mk_info("M-GH", {**_P5, **_P8}),
+        "GN": _mk_info("M-GN", dict(_P5N)),
     }
     monkeypatch.setattr(svc_inflight, "_load_all", lambda cat: by_sku)
     monkeypatch.setattr("app.routers.review.get_review_data",
@@ -206,17 +213,35 @@ def patch_inflight(monkeypatch):
 
 
 def test_inflight_transport_exempt_removed(patch_inflight):
-    """运输闭环 + 无其它在研段 → 移出 items，进 transportExempted（备查不吞数据）。"""
+    """在售品（全段已完成 + 运输无未到货）→ 移出 items 进 transportExempted；
+    ⚠️ 但 detail **仍须可查**（skuDetails）—— 用户要求被免追踪的 SKU 仍能打开「事中档案」
+    （随时回查 G487）；只是不进 items / 不进 _snap_nodes / 不进 KPI。"""
     data = svc_inflight.compute_inflight("手机膜")
     skus = {x["sku"] for x in data["items"]}
-    assert "GA" not in skus, "运输闭环且无其它卡点的 SKU 应免追踪"
-    assert "GA" not in data["skuDetails"]
-    assert "GA" not in data["_snap_nodes"]
+    assert "GA" not in skus, "在售品（全段完成）应免追踪"
+    assert "GA" in data["skuDetails"], "免追踪 SKU 仍须可查「事中档案」"
+    det = data["skuDetails"]["GA"]
+    assert det["transportExempt"] is True and det["exemptKind"] == "运输闭环"
+    assert "GA" not in data["_snap_nodes"], "免追踪 SKU 不进快照"
     tex = {x["sku"]: x for x in data["transportExempted"]}
     assert "GA" in tex and tex["GA"]["kind"] == "运输闭环"
     assert tex["GA"]["closure"] == "closed"
     assert data["transportExemptCount"] == len(data["transportExempted"]) >= 1
     assert all(x["reason"] for x in data["transportExempted"])
+
+
+def test_inflight_keeps_unshipped(patch_inflight):
+    """回归锁（本次 bug 的核心）：运输未发货 —— closure=none + 一条「·未发货」在跑段 ——
+    **必须保留追踪**，绝不能被当成"在售品"免掉。
+    业务实况（G597）：发货期限没过、压根没发货，凭什么丢开在研。"""
+    data = svc_inflight.compute_inflight("手机膜")
+    items = {x["sku"]: x for x in data["items"]}
+    assert "GN" in items, "渠道未发货（有在跑段）→ 不得免追踪"
+    gn = items["GN"]
+    assert gn["shipClosure"] == "none"
+    assert gn["notShippedHubs"] == ["东南亚仓"]
+    assert gn["transportExempt"] is False
+    assert all(x["sku"] != "GN" for x in data["transportExempted"])
 
 
 def test_inflight_keeps_when_nontransport_pending(patch_inflight):

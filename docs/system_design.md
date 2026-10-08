@@ -1454,11 +1454,12 @@ analysis.detect_anomalies(l4_target=)      routers/review 段目标天 / 超时�
   仍需同步改离线件 `SEGS`（与 T16 同）。
 
 
-## T18 运输闭环 · 免追踪单一真源 + 段级时间轴起止 + 本地筛选（2026-10-08）
+## T18 运输闭环 · 在售品免追踪单一真源 + 段级时间轴起止 + 运输可视化四项（2026-10-08）
 
-**背景**：物流到货不是可催办动作。已发货货件**全部到货**（或**无可发货货件**）时，运输域若
-仍是唯一卡点，SKU 便会被误列为「加急 / 超期」。本轮把「运输是否闭环」抽成**单一真源纯函数**，
-在**豁免三通道之外的下游**统一判定，令事中日报、加急预警、日报 Excel 三个消费方**报同一个数**。
+**背景**：物流到货不是可催办动作。业务口径（2026-10 用户逐字确认）：**在售品** ——
+**所有段都已推进到位（无任何在研段，运输域也算）+ 运输无未到货（closure != `pending`）**
+时，运输域不再是卡点，SKU 免追踪。本轮把「运输是否闭环」抽成**单一真源纯函数**，
+在**豁免三通道之外的下游**统一判定，令事中日报、加急预警两个消费方**报同一个数**。
 
 ### 判定次序（关键，`exemption.classify()` 签名/返回值一律不改）
 
@@ -1474,27 +1475,41 @@ analysis.detect_anomalies(l4_target=)      routers/review 段目标天 / 超时�
 
 纯函数模块，**不 import** `review` / `exemption` / `inflight_service`（无反向依赖、可单测）：
 
-- `classify_transport(shipments)` → `{closure, shippedCount, arrivedCount, shippedHubs, pendingHubs, notShippedHubs, pendingCount}`
+- `classify_transport(shipments)` → `{closure, shippedCount, arrivedCount, shippedHubs, pendingHubs, notShippedHubs, pendingCount, tickets, unshippedHubs}`
   - `closure`：`closed`（已发货全部到货）/ `pending`（有已发货票未到货）/ `none`（无任何票已发货）。
+  - `tickets`：已发货票明细 `[{hub, trk, ship, arr, state}]`（`state ∈ 已到货/未到货`；原值照传，供前端「运输在途·逐票」）；
+    `unshippedHubs` = `notShippedHubs` 的别名。
   - **字段名容错**：`_TRK_KEYS/_HUB_KEYS/_SHIP_KEYS/_ARR_KEYS/_NOSHIP_KEYS` 多候选键名，兼容货件构建器别名。
   - **判定粒度 = 票级，展示粒度 = 按渠道仓/国家聚合**；`notShippedHubs` **不参与** `closure` 判定。
 - `is_transport_segment(dept, seg, l4_name)` → 命中 `dept ∈ ('运输','4国')` 或 `seg == l4_name`（`采购→发货末批`）或 `seg.endswith('·未发货')`。
 - `transport_exempt_reason(closure, pending_hubs, not_shipped_hubs)` → 三种 closure 的人读文案。
 
-### 仍在研边界（规格 C）
+### 仍在研边界（**T18-bis 修正后**）
 
-`non_transport_pending` = 存在 `state ∈ {进行中,预警,超期}` 且 `is_transport_segment()` 为 **False** 的段。
+`_active_states = {未开始, 进行中, 预警, 超期}`（**未开始也算在研**：段没走完就不是在售品）；
+`non_transport_active` / `transport_active` = 上述状态且（不）属运输域的段；`any_active` = 两者或。
 
 | 情形 | 处理 |
 | --- | --- |
 | `closure == 'pending'` | **保留追踪**，`items` 项标注 `pendingCountries`（未到货国家） |
-| `closure ∈ ('closed','none')` 且 **运输域是唯一卡点**（`non_transport_pending==False` 且 `has_transport_pending==True`） | **免追踪**，移出 `items`/在研计数/超期预警计数，进 `transportExempted` 备查 |
-| `closure ∈ ('closed','none')` 但 **有非运输在研段**（`non_transport_pending==True`） | **仍在研**：剔除运输域段后重算 `status`，`items` 项打标 `transportExempt=true`（运输闭环但素材/上架没做完的 SKU 仍要盯） |
-| 其它（运输域非卡点、各段无在研） | 原样保留（不误移） |
+| `state_rows` 非空 且 **`not any_active`**（所有段完成 + 运输无未到货） | **免追踪（在售品）**：移出 `items`/在研计数/超期预警计数，进 `transportExempted`；**但 detail 仍存入 `skuDetails`** → `GET /api/inflight/sku/{code}` 可随时回查；**不进** `_snap_nodes` |
+| `non_transport_active` | **仍在研**：剔除运输域段后重算 `status`，`items` 项打标 `transportExempt=true`（运输闭环但素材/上架没做完的 SKU 仍要盯） |
+| `transport_active` 且无其它在研段（如 G597 渠道未发货） | **原样保留**（不是在售品，绝不丢开在研），`transportExempt=false` |
+| `state_rows` 为空（段模板缺失） | 保守**不免**（拿不到段信息不能当"在售品"静默丢弃） |
 
-> 关键修正：初版把 `elif not non_transport_pending:` 直接判免追踪，导致**纯闭环但运输域并非卡点**的
-> SKU（如 G506，运输段全部「已完成」、各段无在研）被误移出在研清单。补入 `has_transport_pending`
-> 条件（「运输域是唯一卡点」要求运输域**确实在卡**）后既有验收锚点恢复。
+> **T18-bis 关键修正（方向反了，2026-10-06）**：初版条件是「运输域**恰好是**在研卡点」
+> （`not non_transport_pending and has_transport_pending`）——方向**反了**，导致：
+> G487/G506（运输段也全完成 → `has_transport_pending=False`）**漏免**（其实是在售品）；
+> G597（`·未发货` 段在跑 → `has_transport_pending=True`）反而**被免**（明明没发货）。
+> 改成 `not any_active`（+ `state_rows` 守卫）后两者同时修正。加急预警侧**本就正确**，无需改。
+
+### 运输可视化（前端四项的数据源）
+
+- `items` 项增 `shipClosure` / `notShippedHubs` / `shipCounts:{shipped,arrived,pending}`
+  （与既有 `pendingCountries` / `transportExempt` 一起，供在研清单「运输」列）。
+- 顶层增 `transportInTransit`：`[{sku, model, closure, tickets:[{hub,trk,ship,arr,state}], unshippedHubs}]`，
+  仅收 `closure=='pending'` 或 `unshippedHubs` 非空的 SKU（前端④「运输在途·逐票」催物流）。
+  所有日期进 JSON 前一律 `strftime` 转字符串（**不得**泄漏 datetime）。
 
 ### 两处消费方取同一个数（规格 D）
 
@@ -1507,22 +1522,38 @@ analysis.detect_anomalies(l4_target=)      routers/review 段目标天 / 超时�
 - `SkuDialog` 段级时间轴：表头在「状态」后插 **「开始」「结束」** 两列，取值 `s.start` / `s.end`
   （**不用** `t0`/`t1`）；空态 `colSpan` **7→9**；进行中 `end==null` 显「至今」、未开始/gap 显「—」、
   `noShip` 字面量（`至今未发货`）**原样**。
-- 在研清单加**前端本地筛选**（部门/环节/状态下拉 + 搜索 + 「只看运输」Chip，`useMemo` 过滤，
+- 在研清单加**前端本地筛选**（部门/环节/状态/运输状态下拉 + 搜索 + 「只看运输」Chip，`useMemo` 过滤，
   **不与 KPI 联动**，附 caption「筛选仅影响本表，上方 KPI 为全量」）。
 - 两页共用新组件 `TransportClosure.jsx`（closure 徽标 + 未到货国家胶囊，**不复制两份**）；
   各加「运输已闭环·免追踪」备查区。视觉走 `theme.js` 语义色板 + MUI `sx`（Tailwind 已移除）。
 - 前端校验用 esbuild `transformSync(loader:'jsx')`（**不跑 `npm run build`**）。
 
+### 运输可视化四项（T18-bis）
+
+1. **在研清单「运输」列**：优先 未到货国胶囊 → 未发货渠道（warning）→ `已发N·到M（·在途K）` →
+   闭环徽标 → 「—」。
+2. **筛选区「运输状态」下拉**：全部 / 已闭环(`shipClosure=='closed'`) / 有未到货(`pendingCountries` 非空) /
+   有未发货(`notShippedHubs` 非空)（参与 `filtered`，不与 KPI 联动）。
+3. **KPI 第 6 卡「运输未闭环」** = `items` 里 `pendingCountries` 非空的 SKU 数（warning）。
+4. **SectionCard「运输在途·逐票」**：摊平 `transportInTransit`（tickets + unshippedHubs），
+   列 = SKU/机型/渠道(国家)/票号/发货/到货/状态（未到货|未发货），用于催物流。
+
 ### 本轮不改
 
 - **复盘（`流程复盘/`，在本项目仓库之外）与 `doc_delta` 本轮不动**：运输闭环仅从事中/催办口径侧接入。
+- **加急预警（`alerts.py` / `Alerts.jsx`）本轮不动**：实测其口径本就正确（G487/G506 早已不在 rows、
+  G597 早已 P1 保留）。
 
 ### 自验
 
-- 新增 `tests/test_transport_closure.py`（14 用例，覆盖票级/仓级、字段容错、顺序短路、parity、免追踪行）。
-- 扩展 `tests/test_inflight.py`（`_seg_public` 带 start/end、顶层运输键）、`tests/test_exemption.py`
-  （回归锁：**既有三通道 kind 集合恒为 `{hold,alias,void,active}`**，运输闭环不从 `classify()` 产出；
-  日报接受 `kind="运输闭环"` 仍 6 sheets）。
-- 全量 `pytest`：0 failed（详见验收报告）。
+- 新增 `tests/test_transport_closure.py`（15 用例：票级/仓级、字段容错、顺序短路、parity、免追踪行、
+  **`test_inflight_keeps_unshipped` 未发货保留回归锁**）。
+- 扩展 `tests/test_inflight.py`（`_seg_public` 带 start/end、顶层运输键 + `transportInTransit` 结构 +
+  item 运输字段；G506 用例改 `test_inflight_g506_queryable`：在售品免追踪但**可查**）、
+  `tests/test_exemption.py`（回归锁：**既有三通道 kind 集合恒为 `{hold,alias,void,active}`**，
+  运输闭环不从 `classify()` 产出；日报接受 `kind="运输闭环"` 仍 6 sheets）。
+- 真实数据探针：`transportExempted` 全量 69 个 SKU 均为「全段已完成+留空」、无一是含在研段的误免；
+  G487/G506 在 `transportExempted` 且 `GET /api/inflight/sku/{code}` 返回 200、G597/G538 在 `items`。
+- 全量 `pytest`：**429 passed / 1 skipped / 0 failed**（基线 T18 428+1，净增 1 测试，无回归）。
 
 

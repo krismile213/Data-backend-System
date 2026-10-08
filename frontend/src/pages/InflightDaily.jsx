@@ -72,6 +72,38 @@ function segEndText(s) {
   return RUNNING_STATES.includes(s.state) ? '至今' : '—';
 }
 
+/**
+ * 在研清单「运输」列单元格（结构化展示，优先级）：
+ *   ① 未到货国（pendingCountries）→ 黄色胶囊（催物流第一优先）
+ *   ② 未发货渠道（notShippedHubs）→ warning 文字
+ *   ③ 已发/到票数（shipCounts）→ 「已发N·到M（·在途K）」
+ *   ④ 运输已闭环（transportExempt，但仍在盯其它段）→ 绿色闭环徽标
+ *   ⑤ 都没有 → 「—」
+ * 颜色全部走 theme.js 语义色板（禁硬编码）。
+ */
+function TransportCell({ it }) {
+  const pend = it.pendingCountries || [];
+  const unshipped = it.notShippedHubs || [];
+  const sc = it.shipCounts || {};
+  if (pend.length) return <PendingCountries hubs={pend} />;
+  if (unshipped.length) {
+    return (
+      <Box component="span" sx={{ fontSize: 12, color: SEMANTIC.warning }}>
+        未发货：{unshipped.join('、')}
+      </Box>
+    );
+  }
+  if (sc.shipped) {
+    return (
+      <Box component="span" sx={{ fontSize: 12, color: SEMANTIC.neutral }}>
+        已发{sc.shipped}·到{sc.arrived}{sc.pending ? `·在途${sc.pending}` : ''}
+      </Box>
+    );
+  }
+  if (it.transportExempt) return <ClosureBadge closure="closed" />;
+  return '—';
+}
+
 function SkuDialog({ sku, onClose }) {
   const { data: det, loading, error } = useApi(
     () => fetchInflightSku(sku), [sku], { enabled: !!sku });
@@ -174,6 +206,7 @@ export default function InflightDaily() {
   const [fDept, setFDept] = useState('');
   const [fSeg, setFSeg] = useState('');
   const [fStatus, setFStatus] = useState('');
+  const [fTransport, setFTransport] = useState('');
   const [fQ, setFQ] = useState('');
   const [onlyTransport, setOnlyTransport] = useState(false);
 
@@ -186,6 +219,22 @@ export default function InflightDaily() {
   const warns = alerts.data?.warnings || [];
   const repItems = reports.data?.items || [];
   const latest = repItems[0];
+
+  // 运输在途·逐票（前端④）：把 transportInTransit 的 tickets + unshippedHubs 摊平成行
+  const transitRows = useMemo(() => {
+    const out = [];
+    (data?.transportInTransit || []).forEach((e) => {
+      (e.tickets || []).forEach((t) => {
+        out.push({ sku: e.sku, model: e.model, hub: t.hub, trk: t.trk,
+          ship: t.ship, arr: t.arr, state: t.state });
+      });
+      (e.unshippedHubs || []).forEach((h) => {
+        out.push({ sku: e.sku, model: e.model, hub: h, trk: '',
+          ship: '', arr: '', state: '未发货' });
+      });
+    });
+    return out;
+  }, [data]);
 
   // 筛选选项从当前清单动态汇总（不硬编码部门/环节名）
   const deptOpts = useMemo(
@@ -202,17 +251,26 @@ export default function InflightDaily() {
       if (fDept && it.staySegDept !== fDept) return false;
       if (fSeg && it.staySeg !== fSeg) return false;
       if (fStatus && it.status !== fStatus) return false;
+      if (fTransport === 'closed' && it.shipClosure !== 'closed') return false;
+      if (fTransport === 'pending' && !(it.pendingCountries || []).length) return false;
+      if (fTransport === 'unshipped' && !(it.notShippedHubs || []).length) return false;
       if (onlyTransport && !isTransportSeg(it.staySegDept, it.staySeg)) return false;
       if (q && !(String(it.sku || '').toLowerCase().includes(q)
         || String(it.model || '').toLowerCase().includes(q))) return false;
       return true;
     });
-  }, [items, fDept, fSeg, fStatus, fQ, onlyTransport, l4Name]);
+  }, [items, fDept, fSeg, fStatus, fTransport, fQ, onlyTransport, l4Name]);
 
-  const hasFilter = Boolean(fDept || fSeg || fStatus || fQ.trim() || onlyTransport);
+  const hasFilter = Boolean(fDept || fSeg || fStatus || fTransport || fQ.trim()
+    || onlyTransport);
   const clearFilters = () => {
-    setFDept(''); setFSeg(''); setFStatus(''); setFQ(''); setOnlyTransport(false);
+    setFDept(''); setFSeg(''); setFStatus(''); setFTransport('');
+    setFQ(''); setOnlyTransport(false);
   };
+
+  // KPI：运输未闭环 = 有未到货渠道的在研 SKU 数（不与筛选联动）
+  const pendingTransportCount = items.filter(
+    (it) => (it.pendingCountries || []).length).length;
 
   const makeReport = async () => {
     setBusy(true);
@@ -255,7 +313,7 @@ export default function InflightDaily() {
       {data && !error && (
         <>
           <Box sx={{ display: 'grid',
-            gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(5, 1fr)' },
+            gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(6, 1fr)' },
             gap: 2, mb: 2 }}>
             <KpiCard label="在研 SKU" value={kpi.inResearchCount ?? 0}
               accent={SEMANTIC.brand} />
@@ -268,9 +326,12 @@ export default function InflightDaily() {
             <KpiCard label="多轮提交" value={kpi.multiRoundCount ?? 0}
               color={SEMANTIC.caution} accent={SEMANTIC.caution}
               sub="同一单据被撤回重提" />
+            <KpiCard label="运输未闭环" value={pendingTransportCount}
+              color={SEMANTIC.warning} accent={SEMANTIC.warning}
+              sub="有已发货未到货渠道" />
             <KpiCard label="运输已闭环·免追踪" value={kpi.transportExemptCount ?? 0}
               color={SEMANTIC.success} accent={SEMANTIC.success}
-              sub="运输域是唯一卡点，不催办" />
+              sub="所有段已完成且运输无未到货（在售品）" />
           </Box>
 
           <SectionCard title="风险预警区" sx={{ mb: 2 }}
@@ -367,8 +428,15 @@ export default function InflightDaily() {
                 <MenuItem value="">全部</MenuItem>
                 {statusOpts.map((s) => <MenuItem key={s} value={s}>{s}</MenuItem>)}
               </TextField>
+              <TextField size="small" select label="运输状态" value={fTransport}
+                onChange={(e) => setFTransport(e.target.value)} sx={{ width: 140 }}>
+                <MenuItem value="">全部</MenuItem>
+                <MenuItem value="closed">已闭环</MenuItem>
+                <MenuItem value="pending">有未到货</MenuItem>
+                <MenuItem value="unshipped">有未发货</MenuItem>
+              </TextField>
               <TextField size="small" label="搜索 SKU / 机型" value={fQ}
-                onChange={(e) => setFQ(e.target.value)} sx={{ width: 200 }} />
+                onChange={(e) => setFQ(e.target.value)} sx={{ width: 190 }} />
               <Tooltip title="仅显示当前停留环节属于运输域（运输 / 4国 / 采购→发货末批 / 未发货异常）的 SKU">
                 <Chip label="只看运输" size="small"
                   color={onlyTransport ? 'primary' : 'default'}
@@ -417,13 +485,7 @@ export default function InflightDaily() {
                       </TableCell>
                       <TableCell>{(it.warnSegs || []).join('、') || '—'}</TableCell>
                       <TableCell><StateChip state={it.status} /></TableCell>
-                      <TableCell>
-                        {(it.pendingCountries || []).length
-                          ? <PendingCountries hubs={it.pendingCountries} />
-                          : (it.transportExempt
-                            ? <ClosureBadge closure="closed" />
-                            : '—')}
-                      </TableCell>
+                      <TableCell><TransportCell it={it} /></TableCell>
                       <TableCell>{it.multiRound ? '⚠ 多轮' : '—'}</TableCell>
                       <TableCell>{it.owner || '—'}</TableCell>
                     </TableRow>
@@ -442,13 +504,61 @@ export default function InflightDaily() {
             </TableContainer>
           </SectionCard>
 
+          <SectionCard title={`运输在途 · 逐票（${transitRows.length}）`} sx={{ mb: 2 }}
+            subtitle="有已发货未到货的票 / 有已立项未发货的渠道 —— 用于催物流（数据 = 逐货件同源）">
+            <TableContainer component={Paper} variant="outlined">
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>SKU</TableCell>
+                    <TableCell>机型</TableCell>
+                    <TableCell>渠道（国家）</TableCell>
+                    <TableCell>票号</TableCell>
+                    <TableCell>发货</TableCell>
+                    <TableCell>到货</TableCell>
+                    <TableCell>状态</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {transitRows.map((r, i) => (
+                    <TableRow key={`${r.sku}-${r.trk || r.hub}-${i}`} hover
+                      sx={{ cursor: 'pointer' }}
+                      onClick={() => setSelSku(r.sku)}>
+                      <TableCell sx={{ fontWeight: 600 }}>{r.sku}</TableCell>
+                      <TableCell>{r.model || '—'}</TableCell>
+                      <TableCell>{r.hub || '—'}</TableCell>
+                      <TableCell sx={{ fontFamily: 'monospace' }}>{r.trk || '—'}</TableCell>
+                      <TableCell>{r.ship || '—'}</TableCell>
+                      <TableCell>{r.arr || '—'}</TableCell>
+                      <TableCell>
+                        <Chip size="small" label={r.state}
+                          variant={r.state === '已到货' ? 'outlined' : 'filled'}
+                          sx={r.state === '已到货'
+                            ? { color: SEMANTIC.success, borderColor: SEMANTIC.success }
+                            : { bgcolor: SEMANTIC.warning, color: SEMANTIC.onColor }} />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  {!transitRows.length && (
+                    <TableRow>
+                      <TableCell colSpan={7}>
+                        无在途运输（无未到货票 / 无未发货渠道）
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </SectionCard>
+
           <SectionCard title={`运输已闭环 · 免追踪（${transportExempted.length}）`} sx={{ mb: 2 }}
             subtitle={data.transportDef?.note
-              || '运输已闭环（已发货货件全部到货 / 无可发货货件）时，运输域不再是卡点'}>
+              || '在售品（所有段已完成且运输无未到货）→ 运输域不再是卡点，免追踪'}>
             <Typography variant="caption" color="text.secondary"
               sx={{ display: 'block', mb: 1 }}>
-              判据：运输域是<strong>唯一卡点</strong>（已发货货件全部到货或无可发货货件，且无其它在研段）
-              —— 物流到货不是可催办动作，故移出在研清单，单列备查。
+              判据：<strong>所有段都已推进到位</strong>（无任何在研段，运输域也算）且运输无未到货
+              （已发货货件全部到货 / 无可发货货件）—— 属<strong>在售品</strong>，
+              物流到货不是可催办动作，故移出在研清单，单列备查。
               真源 = {data.transportDef?.source || 'app/transport_closure.classify_transport'}。
             </Typography>
             <TableContainer component={Paper} variant="outlined">
