@@ -11,7 +11,7 @@
   3. 跨实现对齐（真实登记表：后端 ↔ 离线 逐键逐字段一致）
   4. 同源常量四者逐字相等（+ LEGACY / CATALOG 不漂移）
   5. 离线脚本可独立运行（无后端包 import）+ 缺文件时**打印**告警（非静默 {}）
-  6. 原事故端到端复现（旧逻辑 0 条 / 新逻辑 2+6 条）+ 8 个 SKU 判定入口核对
+  6. 原事故端到端复现（旧逻辑 0 条 / 新逻辑读取独立登记表，数据无关）+ 8 个 SKU 判定入口核对
   7. 边角攻击（改名移走 / 子表名写错 / 表头在第 3 行 / 标题行防护 / 全角空格大小写）
   8. 全量回归由外部命令完成（本文件只负责前 7 条的可复现固化）
 """
@@ -312,31 +312,42 @@ def test_02_branch4_partial_only_one_empty(sqlite_env):
 # 检查 3 —— 跨实现对齐（真实登记表）
 # ===========================================================================
 def test_03_cross_impl_alias_on_real_file(offline):
+    """后端 ↔ 离线读**同一真实登记表**：条数相等 + 逐键一致 + 已知稳定集合 ⊆ 实际。
+
+    数据无关判据（不写死绝对条数）：登记表是**业务持续维护**的文件，用户随时会
+    增删行；写死「== N」会在下次维护后无端变红。故改为「两实现条数相等（互证同源）
+    + 逐键一致（值也对得上）+ 已知稳定集合 ⊆ 实际集合（兜底防两实现一起读空）」。
+    """
     if not REAL_REGISTRY.is_file():
         pytest.skip(f"登记表不存在：{REAL_REGISTRY}")
     be_rows, be_notes = sku_alias.read_alias_sheet(REAL_REGISTRY)
     off = offline.read_alias_map(REAL_REGISTRY)
     assert not be_notes, f"真实登记表读到告警：{be_notes}"
-    assert len(be_rows) == 2, f"后端换号应 2 条，实得 {len(be_rows)}"
-    assert len(off) == 2, f"离线换号应 2 条，实得 {len(off)}"
     be = {r["old"]: (r["new"], r["note"], r["effectiveAt"]) for r in be_rows}
     off_m = {k: (v["新号"], v["说明"], v["生效日期"]) for k, v in off.items()}
+    assert len(be_rows) == len(off), f"两实现条数不等：后端 {len(be_rows)} / 离线 {len(off)}"
     assert be == off_m, f"逐键不一致：\n后端 {be}\n离线 {off_m}"
-    assert set(be) == REGISTRY_ALIAS_KEYS
+    assert REGISTRY_ALIAS_KEYS <= set(be), \
+        f"已知稳定换号 SKU 缺失：{sorted(REGISTRY_ALIAS_KEYS - set(be))}"
 
 
 def test_03_cross_impl_hold_on_real_file(offline):
+    """后端 ↔ 离线读**同一真实登记表**：条数相等 + 逐键一致 + 已知稳定集合 ⊆ 实际。
+
+    见上：不写死「== 6」（真实文件 2026-10-07 已被用户加入 aaa/aaaa 两条测试单，
+    从 6→8 条）。判据改为「两实现条数相等 + 逐键一致 + 已知稳定集合 ⊆ 实际集合」。
+    """
     if not REAL_REGISTRY.is_file():
         pytest.skip(f"登记表不存在：{REAL_REGISTRY}")
     be_rows, be_notes = sku_hold.read_hold_sheet(REAL_REGISTRY)
     off = offline.read_hold_map(REAL_REGISTRY)
     assert not be_notes, f"真实登记表读到告警：{be_notes}"
-    assert len(be_rows) == 6, f"后端人工登记应 6 条，实得 {len(be_rows)}"
-    assert len(off) == 6, f"离线人工登记应 6 条，实得 {len(off)}"
     be = {r["sku"]: (r["reason"], r["registeredAt"]) for r in be_rows}
     off_m = {k: (v["说明"], v["登记日期"]) for k, v in off.items()}
+    assert len(be_rows) == len(off), f"两实现条数不等：后端 {len(be_rows)} / 离线 {len(off)}"
     assert be == off_m, f"逐键不一致：\n后端 {be}\n离线 {off_m}"
-    assert set(be) == REGISTRY_HOLD_KEYS
+    assert REGISTRY_HOLD_KEYS <= set(be), \
+        f"已知稳定人工登记 SKU 缺失：{sorted(REGISTRY_HOLD_KEYS - set(be))}"
 
 
 # ===========================================================================
@@ -420,27 +431,37 @@ def test_06_old_logic_reads_zero_from_catalog(offline):
     assert a_rows == [] and h_rows == []
 
 
-def test_06_new_logic_reads_two_and_six(offline):
-    """新逻辑（独立登记表）→ 换号 2 条 / 人工登记 6 条。"""
+def test_06_new_logic_reads_registry(offline):
+    """新逻辑（独立登记表）：后端 ↔ 离线读到**同一份**内容 —— 逐键集合一致 + 已知稳定集合 ⊆ 实际。
+
+    数据无关：不写死「换号 2 / 人工登记 6」（真实文件 2026-10-07 已增至 8 条人工登记）。
+    """
     if not REAL_REGISTRY.is_file():
         pytest.skip(f"登记表不存在：{REAL_REGISTRY}")
     # 离线（默认无参 → 独立登记表）
     amap = offline.read_alias_map()
     hmap = offline.read_hold_map()
-    assert set(amap) == REGISTRY_ALIAS_KEYS, set(amap)
-    assert set(hmap) == REGISTRY_HOLD_KEYS, set(hmap)
     # 后端（默认无参 → 独立登记表；notes 为空说明**不是**走了商品资料回退）
     a_rows, a_notes = sku_alias.read_alias_sheet()
     h_rows, h_notes = sku_hold.read_hold_sheet()
-    assert {r["old"] for r in a_rows} == REGISTRY_ALIAS_KEYS
-    assert {r["sku"] for r in h_rows} == REGISTRY_HOLD_KEYS
     assert not a_notes and not h_notes, f"默认读不应有告警（说明走了回退）：{a_notes} {h_notes}"
+    # 换号：两实现键集合相等 + 已知稳定集合 ⊆ 实际
+    be_a = {r["old"] for r in a_rows}
+    assert be_a == set(amap), f"换号两实现不一致：后端 {be_a} / 离线 {set(amap)}"
+    assert REGISTRY_ALIAS_KEYS <= be_a, \
+        f"已知换号 SKU 缺失：{sorted(REGISTRY_ALIAS_KEYS - be_a)}"
+    # 人工登记：两实现键集合相等 + 已知稳定集合 ⊆ 实际
+    be_h = {r["sku"] for r in h_rows}
+    assert be_h == set(hmap), f"人工登记两实现不一致：后端 {be_h} / 离线 {set(hmap)}"
+    assert REGISTRY_HOLD_KEYS <= be_h, \
+        f"已知人工登记 SKU 缺失：{sorted(REGISTRY_HOLD_KEYS - be_h)}"
 
 
 def test_06_swapping_catalog_no_longer_affects_registry(offline, monkeypatch, tmp_path):
     """证明：换一个不含子表的商品资料，**不再影响**登记表读数。
 
-    做法：把"默认商品资料路径"指向一个不含子表的临时文件；默认登记表读数仍 2/6。
+    做法：把"默认商品资料路径"指向一个不含子表的临时文件；默认登记表读数仍能
+    读到已知稳定集合（不写死绝对条数）。
     """
     if not REAL_REGISTRY.is_file():
         pytest.skip(f"登记表不存在：{REAL_REGISTRY}")
@@ -451,7 +472,11 @@ def test_06_swapping_catalog_no_longer_affects_registry(offline, monkeypatch, tm
     monkeypatch.delenv("SKU_REGISTRY_XLSX", raising=False)
     a_rows, _ = sku_alias.read_alias_sheet()
     h_rows, _ = sku_hold.read_hold_sheet()
-    assert len(a_rows) == 2 and len(h_rows) == 6
+    # 数据无关：换回退源**不影响**独立登记表读数 —— 仍能读到已知稳定集合
+    assert REGISTRY_ALIAS_KEYS <= {r["old"] for r in a_rows}, \
+        f"换商品资料后换号读数异常：{sorted(r['old'] for r in a_rows)}"
+    assert REGISTRY_HOLD_KEYS <= {r["sku"] for r in h_rows}, \
+        f"换商品资料后人工登记读数异常：{sorted(r['sku'] for r in h_rows)}"
 
 
 def _mini_sku_result(sku):
