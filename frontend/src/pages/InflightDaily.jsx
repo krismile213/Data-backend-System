@@ -74,22 +74,43 @@ function segEndText(s) {
 
 /**
  * 在研清单「运输」列单元格（结构化展示，优先级）：
- *   ① 未到货国（pendingCountries）→ 黄色胶囊（催物流第一优先）
+ *   ① 未到货国（pendingCountries）→ 未闭环徽标 + 黄色国家胶囊（催物流第一优先）
  *   ② 未发货渠道（notShippedHubs）→ warning 文字
- *   ③ 已发/到票数（shipCounts）→ 「已发N·到M（·在途K）」
- *   ④ 运输已闭环（transportExempt，但仍在盯其它段）→ 绿色闭环徽标
- *   ⑤ 都没有 → 「—」
+ *   ③ shipClosure='closed' → 「已发N·到M」+ 绿色闭环徽标
+ *   ④ 其它已发货形态（个别 pending 无国家）→ 「已发N·到M·在途K」文字
+ *   ⑤ 未涉及运输（closure='none' 且无未发货渠道）→ 「—」
+ * ⚠️ 判定一律以 **shipClosure** 为准；**绝不可**用 transportExempt —— 它只表示
+ *    「运输域不参与卡点判定」，对「一件都没发」的在研 SKU 同样为 True，
+ *    据它显示会把未开发/未发货的 SKU 误标成「运输已闭环」。
  * 颜色全部走 theme.js 语义色板（禁硬编码）。
  */
 function TransportCell({ it }) {
   const pend = it.pendingCountries || [];
   const unshipped = it.notShippedHubs || [];
   const sc = it.shipCounts || {};
-  if (pend.length) return <PendingCountries hubs={pend} />;
+  const closure = it.shipClosure;
+  if (pend.length) {
+    return (
+      <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, flexWrap: 'wrap' }}>
+        <ClosureBadge closure="pending" />
+        <PendingCountries hubs={pend} />
+      </Box>
+    );
+  }
   if (unshipped.length) {
     return (
       <Box component="span" sx={{ fontSize: 12, color: SEMANTIC.warning }}>
         未发货：{unshipped.join('、')}
+      </Box>
+    );
+  }
+  if (closure === 'closed') {
+    return (
+      <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+        <Box component="span" sx={{ fontSize: 12, color: SEMANTIC.neutral }}>
+          已发{sc.shipped}·到{sc.arrived}
+        </Box>
+        <ClosureBadge closure="closed" />
       </Box>
     );
   }
@@ -100,7 +121,7 @@ function TransportCell({ it }) {
       </Box>
     );
   }
-  if (it.transportExempt) return <ClosureBadge closure="closed" />;
+  // closure === 'none'：尚未涉及运输 —— 不得据 transportExempt 误标「已闭环」
   return '—';
 }
 
@@ -126,7 +147,7 @@ function SkuDialog({ sku, onClose }) {
                 <TransportClosure closure={det.shipClosure}
                   pendingCountries={det.pendingCountries} />
               )}
-              {det.transportExempt && (
+              {det.transportExempt && det.shipClosure === 'closed' && (
                 <Chip size="small" variant="outlined"
                   sx={{ color: SEMANTIC.success, borderColor: SEMANTIC.success }}
                   label="运输已闭环 · 运输域免追踪" />

@@ -1538,6 +1538,24 @@ analysis.detect_anomalies(l4_target=)      routers/review 段目标天 / 超时�
 4. **SectionCard「运输在途·逐票」**：摊平 `transportInTransit`（tickets + unshippedHubs），
    列 = SKU/机型/渠道(国家)/票号/发货/到货/状态（未到货|未发货），用于催物流。
 
+### T18-ter 显示口径修正（2026-10-08，用户实测）
+
+**症状**：在研清单「运输」把 **未开发、一件未发** 的 SKU（G591/G599/G600/G601，
+`shipClosure='none'`）显示成绿色 **「运输已闭环」** 徽标。
+
+**根因**：展示层误用 `transportExempt` 判闭环。该标志语义 = **「运输域不参与卡点判定」**，
+在 `elif non_transport_active:` 分支（仍有非运输在研段）**无条件**为 `True`，
+与「是否已发货 / 已闭环」无关 → 未发货 SKU 也被打 `True`。
+
+**修正**：
+- `TransportCell`（`InflightDaily.jsx`）**禁用 `transportExempt`**；闭环分支一律
+  `shipClosure === 'closed'`；`closure='none'` 且无未发货渠道 → 「—」（尚未涉及运输，不误标）。
+- 事中档案「运输已闭环 · 运输域免追踪」chip 条件加 `&& det.shipClosure === 'closed'`。
+- 后端**补注释澄清 `transportExempt` 语义**（字段名保留，**不改签名、不动 `elif` 剔除逻辑**，
+  避免影响 staySeg 选取等既有行为）。
+- 🔴 **通用规则**：闭环/在研展示**一律以 `shipClosure` 为准**，`transportExempt` 只可用于
+  「是否从卡点里剔除运输域」，**绝不可**当作「运输已闭环」。
+
 ### 本轮不改
 
 - **复盘（`流程复盘/`，在本项目仓库之外）与 `doc_delta` 本轮不动**：运输闭环仅从事中/催办口径侧接入。
@@ -1554,6 +1572,10 @@ analysis.detect_anomalies(l4_target=)      routers/review 段目标天 / 超时�
   运输闭环不从 `classify()` 产出；日报接受 `kind="运输闭环"` 仍 6 sheets）。
 - 真实数据探针：`transportExempted` 全量 69 个 SKU 均为「全段已完成+留空」、无一是含在研段的误免；
   G487/G506 在 `transportExempted` 且 `GET /api/inflight/sku/{code}` 返回 200、G597/G538 在 `items`。
-- 全量 `pytest`：**429 passed / 1 skipped / 0 failed**（基线 T18 428+1，净增 1 测试，无回归）。
+- 全量 `pytest`：**433 passed / 1 skipped / 0 failed**（T18 428+1 → T18-bis 429+1 → T18-ter 433+1，无回归）。
+- **T18-ter 显示回归锁**（`tests/test_inflight_transport_display.py`）：源码守卫（`TransportCell`
+  不得引用 `transportExempt`）+ 纯函数（`classify_transport([])` 为 `'none'`、其 reason 不含「已闭环」）。
+  真实数据探针：`closure='none'` 的在研 SKU 一律不再出现「已闭环」（G591/G599/G600/G601 → 「—」，
+  G538 `closed` 仍显徽标，G597 显未发货）；变异测试（写回旧 `transportExempt→closed`）必红。
 
 

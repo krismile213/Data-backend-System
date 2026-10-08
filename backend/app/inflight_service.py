@@ -163,7 +163,8 @@ def _build_detail(sku, info, *, detail, segs_out, nodes_iso, part_stat,
     """构造单 SKU 的事中详情（**在研与免追踪共用同一形状**，供「事中档案」回查）。
 
     ⚠️ over_list / warn_list 由调用方在「剔除运输域卡点」之后再传入 ——
-    运输已闭环时运输域段不得出现在超期/预警里。
+    运输域不参与卡点判定时，运输域段不得出现在超期/预警里。
+    ⚠️ transportExempt 只表示「运输域不计卡点」，**闭环态一律看 shipClosure**。
     """
     return {
         "sku": sku, "model": info["model"],
