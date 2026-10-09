@@ -318,3 +318,23 @@ def test_upstream_unreachable_returns_json_502_503(proxy_server, monkeypatch):
     assert resp.headers.get("content-type", "").startswith("application/json")
     body = resp.json()
     assert "error" in body and "detail" in body
+
+
+def test_invalid_upstream_path_is_json_not_500(proxy_server, stub_server, monkeypatch):
+    """非法路径（含 CR/LF，%0d%0a）→ JSON 400/502，**绝不 500**（F1）。
+
+    根因：httpx.InvalidURL 不继承 RequestError/HTTPError，非法路径在 build_request()
+    处抛出后若不显式捕获，会穿透成 500（违反「绝不穿成 500」）。
+    """
+    monkeypatch.setenv("AGENT_BASE_URL", stub_server)
+    monkeypatch.setenv("AGENT_TOKEN", "tok-abc-123")
+
+    resp = httpx.get(f"{proxy_server}/api/agent/foo%0d%0a", timeout=15,
+                     trust_env=False)
+    assert resp.status_code != 500, f"不得穿成 500（实际 {resp.status_code}）"
+    assert resp.status_code in (400, 502), f"实际 {resp.status_code}"
+    assert resp.headers.get("content-type", "").startswith("application/json"), \
+        f"必须是 JSON，实际 {resp.headers.get('content-type')!r}"
+    body = resp.json()
+    assert "error" in body and "detail" in body
+

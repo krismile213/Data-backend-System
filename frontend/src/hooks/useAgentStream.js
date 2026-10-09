@@ -14,27 +14,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { agentEventsUrl } from '../api.js';
-
-/**
- * 解析单个 SSE 帧文本 → { id, data }；无 `data:` 行时返回 null。
- * 兼容 `:` 注释/心跳行；`data:` 后一个空格按 SSE 规范去掉。
- */
-export function parseSseFrame(raw) {
-  const lines = String(raw).split('\n');
-  let id = null;
-  const dataLines = [];
-  for (const line of lines) {
-    if (!line || line.startsWith(':')) continue;
-    if (line.startsWith('id:')) {
-      id = line.slice(3).trim();
-    } else if (line.startsWith('data:')) {
-      const v = line.slice(5);
-      dataLines.push(v.startsWith(' ') ? v.slice(1) : v);
-    }
-  }
-  if (dataLines.length === 0) return null;
-  return { id, data: dataLines.join('\n') };
-}
+import { createSseParser } from './sseParser.js';
 
 /**
  * @param {object}   opts
@@ -91,29 +71,29 @@ export function useAgentStream({ session, onEvent, onError }) {
       setConnected(true);
       const reader = res.body.getReader();
       const decoder = new TextDecoder('utf-8');
-      let buffer = '';
+      const parser = createSseParser();
+
+      // 一个解析出的帧 → 交给上层：先记 id（供重连），再 JSON.parse 派发
+      const dispatch = (frame) => {
+        if (frame.id) lastIdRef.current = frame.id;
+        let payload;
+        try {
+          payload = JSON.parse(frame.data);
+        } catch (e) {
+          payload = { kind: 'raw', text: frame.data };
+        }
+        onEventRef.current?.(payload);
+      };
 
       try {
         for (;;) {
           const { value, done } = await reader.read();
           if (done) break;
-          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
-          let sep;
-          while ((sep = buffer.indexOf('\n\n')) >= 0) {
-            const rawFrame = buffer.slice(0, sep);
-            buffer = buffer.slice(sep + 2);
-            const frame = parseSseFrame(rawFrame);
-            if (!frame) continue;
-            if (frame.id) lastIdRef.current = frame.id;
-            let payload = null;
-            try {
-              payload = JSON.parse(frame.data);
-            } catch (e) {
-              payload = { kind: 'raw', text: frame.data };
-            }
-            onEventRef.current?.(payload);
-          }
+          const text = decoder.decode(value, { stream: true });
+          for (const frame of parser.push(text)) dispatch(frame);
         }
+        // 流正常结束：把残留缓冲当最后一帧（无结尾空行时）
+        for (const frame of parser.flush()) dispatch(frame);
       } catch (err) {
         if (err && err.name !== 'AbortError') onErrorRef.current?.(err);
       } finally {

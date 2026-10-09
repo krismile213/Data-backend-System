@@ -78,11 +78,12 @@ def _build_upstream_headers(request: Request) -> dict:
     return headers
 
 
-def _error_response(detail: str, status_code: int) -> JSONResponse:
+def _error_response(detail: str, status_code: int,
+                    error: str = "Agent 上游不可用") -> JSONResponse:
     """上游不可达/异常时的统一降级响应：明确的状态码 + JSON（非 500）。"""
     return JSONResponse(
         status_code=status_code,
-        content={"error": "Agent 上游不可用", "detail": detail},
+        content={"error": error, "detail": detail},
     )
 
 
@@ -123,6 +124,15 @@ async def agent_proxy(path: str, request: Request):
         )
         # stream=True：不预读正文；连接类错误在此处抛出，可被捕获成 JSON 降级。
         upstream_resp = await client.send(upstream_req, stream=True)
+    except httpx.InvalidURL as exc:
+        # ⚠️ httpx.InvalidURL **不继承** RequestError/HTTPError（直接继承 Exception，
+        #    见 `python -c "import httpx; httpx.InvalidURL.__mro__"`）—— 非法路径会在
+        #    build_request() 处抛它；若漏捕会穿透成 500（违反「绝不穿成 500」）。
+        #    客户端请求路径非法 → 400 + JSON。
+        await client.aclose()
+        return _error_response(
+            f"请求路径非法（{exc.__class__.__name__}）", 400,
+            error="请求路径非法")
     except httpx.ConnectError as exc:
         await client.aclose()
         return _error_response(f"Agent 未启动（{exc.__class__.__name__}）", 503)
@@ -130,6 +140,11 @@ async def agent_proxy(path: str, request: Request):
         await client.aclose()
         return _error_response(f"连接 Agent 超时（{exc.__class__.__name__}）", 503)
     except httpx.RequestError as exc:
+        await client.aclose()
+        return _error_response(
+            f"转发 Agent 失败（{exc.__class__.__name__}: {exc}）", 502)
+    except httpx.HTTPError as exc:
+        # 兜底：RequestError 之外的 HTTPError 子类（防未来 httpx 版本新增异常类型穿透成 500）
         await client.aclose()
         return _error_response(
             f"转发 Agent 失败（{exc.__class__.__name__}: {exc}）", 502)

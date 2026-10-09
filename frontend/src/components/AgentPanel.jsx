@@ -227,7 +227,12 @@ export default function AgentPanel({ open, onClose }) {
       open={open}
       onClose={onClose}
       ModalProps={{ keepMounted: true }}
-      sx={{ '& .MuiDrawer-paper': { width: PANEL_WIDTH, maxWidth: '100vw' } }}
+      sx={{
+        // 临时抽屉默认 zIndex = theme.zIndex.drawer(1200)，会被 App.jsx 的
+        // AppBar（drawer+1 = 1201）压住顶部；提到 modal(1300) 保证标题与关闭按钮可点。
+        zIndex: (t) => t.zIndex.modal,
+        '& .MuiDrawer-paper': { width: PANEL_WIDTH, maxWidth: '100vw' },
+      }}
     >
       <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1.5, py: 1 }}>
