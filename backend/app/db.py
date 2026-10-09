@@ -2,35 +2,31 @@
 """
 db.py — MySQL 数据库连接层（企业化数据层）
 ==========================================
-- 连接参数优先读环境变量，其次依次尝试 .env 文件：
+- 连接参数优先读环境变量，其次尝试 .env 文件（候选 / 顺序 / override 语义统一在
+  app/env_loader.py，本模块仅薄封装，**不再自带候选逻辑**）：
     1) DATA_ADMIN_ENV_FILE 指定的路径
-    2) D:\\apps\\data-admin\\.env   （生产部署目录，C 盘外）
-    3) 仓库根目录 .env             （开发默认）
+    2) D:\\apps\\data-admin\\.env   （生产部署目录，C 盘外；本机实际生效文件）
+    3) 仓库根目录 .env
+    4) backend/.env
 - 表结构定义见 models.py；ETL 导入见 etl/import_excel.py
 """
 
 import os
-from pathlib import Path
 from urllib.parse import quote_plus
 
-from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from .env_loader import load_project_env
+
 
 def _load_env():
-    """按优先级加载 .env，返回实际加载的文件路径（未找到返回 None）"""
-    candidates = [
-        os.environ.get("DATA_ADMIN_ENV_FILE"),
-        r"D:\apps\data-admin\.env",
-        Path(__file__).resolve().parents[2] / ".env",
-        Path(__file__).resolve().parents[1] / ".env",
-    ]
-    for c in candidates:
-        if c and Path(c).is_file():
-            load_dotenv(c, override=False)
-            return Path(c)
-    return None
+    """薄封装：.env 加载统一到单一真源 ``app.env_loader``（候选/顺序/override）。
+
+    返回值语义**保持不变**：首个实际加载的 ``.env`` 的 ``Path``；一个都没命中返回 ``None``。
+    幂等：重复调用直接返回首次结果（底层哨兵保证只真正加载一次）。
+    """
+    return load_project_env()
 
 
 ENV_FILE = _load_env()

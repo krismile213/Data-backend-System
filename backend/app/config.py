@@ -279,6 +279,8 @@ def get_batch_dir(batch_name: str, category=None) -> Path:
 #
 # 约定：默认值只是「开箱即用」的兜底，企业化部署/测试一律用环境变量覆盖；
 #       与 snapshot_path 同思路——读取函数每次重读 env，便于测试逐用例覆盖。
+# 值的实际来源：本地 .env 的 AGENT_TOKEN / AGENT_BASE_URL / AGENT_TIMEOUT
+#       （加载时机与候选顺序见 app/env_loader.py——包导入最早时机，单一真源）。
 AGENT_DEFAULT_BASE_URL = "http://127.0.0.1:8765"
 #: 默认 token 为空：未配置时不注入 Authorization（交给 Agent 的本机/无鉴权模式）。
 AGENT_DEFAULT_TOKEN = ""
