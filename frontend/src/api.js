@@ -392,3 +392,79 @@ export function buildDeltasExportUrl({ days = 30, sku = '' } = {}) {
   if (sku) qs.set('sku', sku);
   return appendCategory(`${BASE}/deltas/export${qs.toString() ? `?${qs}` : ''}`);
 }
+
+/* ------------------ AI 助手（BFF 反向代理 /api/agent/*） ------------------
+ * 拓扑 B：前端只走**相对路径** `/api/agent/*`（同源，dev 由 vite 代理到 8000，
+ * 平台后端 BFF 再转发到 Agent 上游并注入 Bearer token）。前端**永不接触** Agent token。
+ * 详见 docs/AI助手嵌入实现方案.md §4（接口契约）。
+ */
+
+const AGENT_BASE = '/api/agent';
+
+/** 助手端点的通用请求（不做品类注入；BFF 前缀已在路径里） */
+async function agentRequest(path, { method = 'GET', body } = {}) {
+  const res = await fetch(`${AGENT_BASE}${path}`, {
+    method,
+    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const b = await res.json();
+      if (b && (b.detail || b.error)) detail = b.detail || b.error;
+    } catch (e) { /* 忽略解析失败 */ }
+    const err = new Error(detail);
+    err.status = res.status;
+    throw err;
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
+}
+
+/** SSE 事件流 URL（供 useAgentStream 用 fetch 打开；带 Last-Event-ID 时由 hook 加头） */
+export function agentEventsUrl(session) {
+  return `${AGENT_BASE}/api/events?session=${encodeURIComponent(session)}`;
+}
+
+/** 助手健康检查：{status, model, sessions, running} */
+export function fetchAgentHealth() {
+  return agentRequest('/api/health');
+}
+
+/** 发起一次提问（真正的结果走 SSE 事件流） */
+export function sendAgentChat({ session, message, reflect = false, plan = false, stepwise = false }) {
+  return agentRequest('/api/chat', {
+    method: 'POST',
+    body: { session, message, reflect, plan, stepwise },
+  });
+}
+
+/** 任务运行中追加指令（不打断执行） */
+export function enqueueAgent(session, text) {
+  return agentRequest('/api/enqueue', { method: 'POST', body: { session, text } });
+}
+
+/** 停止当前会话任务 */
+export function stopAgent(session) {
+  return agentRequest('/api/stop', { method: 'POST', body: { session } });
+}
+
+/** 审批一个待决请求（permission / plan / step） */
+export function approveAgent({ session, id, approve, always = false, text = '' }) {
+  return agentRequest('/api/approve', {
+    method: 'POST',
+    body: { session, id, approve, always, text },
+  });
+}
+
+/** 当前会话未决审批清单（刷新/换会话后重建审批卡） */
+export function fetchAgentPending(session) {
+  return agentRequest(`/api/pending?session=${encodeURIComponent(session)}`);
+}
+
+/** 会话列表 */
+export function fetchAgentSessions() {
+  return agentRequest('/api/sessions');
+}
+

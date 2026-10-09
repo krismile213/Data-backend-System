@@ -6,10 +6,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .routers import (alerts, anomalies, batches, compare, dataadmin, deltas,
-                      diag, fillins, history, inflight, manual, overview,
-                      records, review, routes, rules, scenarios, skus,
-                      timeliness, transport, watch)
+from .routers import (agent_proxy, alerts, anomalies, batches, compare,
+                      dataadmin, deltas, diag, fillins, history, inflight,
+                      manual, overview, records, review, routes, rules,
+                      scenarios, skus, timeliness, transport, watch)
 
 
 @asynccontextmanager
@@ -74,6 +74,9 @@ app.include_router(rules.router)
 app.include_router(dataadmin.router)
 app.include_router(manual.router)
 app.include_router(diag.router)
+# AI 助手 BFF 反向代理（拓扑 B）：/api/agent/* → Agent 上游，注入 Bearer + SSE 透传。
+# ⚠️ 本路由只代理，不引入任何压缩中间件 —— 平台全局无 Gzip，SSE 才不会被缓冲。
+app.include_router(agent_proxy.router)
 
 
 @app.get("/api/health")

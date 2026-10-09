@@ -268,3 +268,38 @@ def get_batch_dir(batch_name: str, category=None) -> Path:
             raise FileNotFoundError(batch_name)
         return d
     return locate_batch(batch_name)[1]
+
+
+# ---------------------------------------------------------------------------
+# AI 助手 BFF 反向代理配置（T02）
+# ---------------------------------------------------------------------------
+# 平台后端把 /api/agent/* 反向代理到用户自研 Agent（server.py）的 HTTP 适配器，
+# 由**服务端**注入 Authorization: Bearer <静态 token>，前端只走相对路径、永不接触 token。
+# 详见 docs/AI助手嵌入实现方案.md §2.2（拓扑 B）/ §4（接口契约）/ §8.2（SSE 坑）。
+#
+# 约定：默认值只是「开箱即用」的兜底，企业化部署/测试一律用环境变量覆盖；
+#       与 snapshot_path 同思路——读取函数每次重读 env，便于测试逐用例覆盖。
+AGENT_DEFAULT_BASE_URL = "http://127.0.0.1:8765"
+#: 默认 token 为空：未配置时不注入 Authorization（交给 Agent 的本机/无鉴权模式）。
+AGENT_DEFAULT_TOKEN = ""
+#: 转发读取超时（秒）。SSE 是长连接，必须给足；普通请求也会用到这个上限。
+AGENT_DEFAULT_TIMEOUT = 300.0
+
+
+def agent_base_url() -> str:
+    """Agent 上游地址（去尾部斜杠）。环境变量 AGENT_BASE_URL 覆盖。"""
+    return (os.environ.get("AGENT_BASE_URL") or AGENT_DEFAULT_BASE_URL).rstrip("/")
+
+
+def agent_token() -> str:
+    """BFF 注入的静态 Bearer token（对应 Agent config.json→auth.tokens）。空=不注入。"""
+    return (os.environ.get("AGENT_TOKEN") or AGENT_DEFAULT_TOKEN).strip()
+
+
+def agent_timeout_seconds() -> float:
+    """转发超时（秒）；非法值回退默认，绝不让配置错误把转发变成 500。"""
+    try:
+        value = float(os.environ.get("AGENT_TIMEOUT", AGENT_DEFAULT_TIMEOUT))
+    except (TypeError, ValueError):
+        return AGENT_DEFAULT_TIMEOUT
+    return value if value > 0 else AGENT_DEFAULT_TIMEOUT

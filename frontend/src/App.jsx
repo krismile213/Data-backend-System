@@ -11,6 +11,8 @@ import {
   ListItemText,
   Divider,
   CircularProgress,
+  Button,
+  Tooltip,
 } from '@mui/material';
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import TableChartIcon from '@mui/icons-material/TableChart';
@@ -32,8 +34,10 @@ import MenuBookIcon from '@mui/icons-material/MenuBook';
 import PendingActionsIcon from '@mui/icons-material/PendingActions';
 import FactCheckIcon from '@mui/icons-material/FactCheck';
 import DifferenceIcon from '@mui/icons-material/Difference';
+import SmartToyIcon from '@mui/icons-material/SmartToy';
 import BatchSelector from './components/BatchSelector.jsx';
 import CategorySelector from './components/CategorySelector.jsx';
+import AgentPanel from './components/AgentPanel.jsx';
 import { getCategory, setCategory } from './category';
 
 // 按页面懒加载：首屏只加载看板，避免把 15 个页面（含 2.6MB ECharts）一次性打进首包
@@ -139,6 +143,7 @@ export default function App() {
   const [batches, setBatches] = useState([]);
   const [category, setCategoryState] = useState(getCategory());
   const [categories, setCategories] = useState([]);
+  const [agentOpen, setAgentOpen] = useState(false);
 
   // 初次加载：拉**当前品类**的批次列表；URL 指定的批次无效时回退到最新批次
   useEffect(() => {
@@ -207,6 +212,17 @@ export default function App() {
           <Typography variant="h6" noWrap sx={{ flexGrow: 1 }}>
             新品售前流程数据后台系统
           </Typography>
+          <Tooltip title="打开 / 关闭 AI 助手">
+            <Button
+              color="inherit"
+              size="small"
+              startIcon={<SmartToyIcon />}
+              onClick={() => setAgentOpen((v) => !v)}
+              sx={{ mr: 1, whiteSpace: 'nowrap' }}
+            >
+              AI 助手
+            </Button>
+          </Tooltip>
           <CategorySelector
             categories={categories}
             category={category}
@@ -261,6 +277,8 @@ export default function App() {
           <Current batch={batch} batches={batches} />
         </Suspense>
       </Box>
+
+      <AgentPanel open={agentOpen} onClose={() => setAgentOpen(false)} />
     </Box>
   );
 }
