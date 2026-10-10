@@ -32,15 +32,38 @@ import re
 from urllib.parse import quote, unquote
 
 # ---------------------------------------------------------------------------
-# 敏感键词典：与 Agent 侧 ``plugins/workmain.py::_SENS_SUBSTR`` 对齐（本轮为**超集**，只增不减）
+# 敏感键词典：与 Agent 侧 ``plugins/workmain.py::_SENS_SUBSTR`` 对齐（**超集，只增不减**）
 # 命中即**整键剔除**（大小写不敏感：统一 ``str(key).lower()`` 后做子串匹配）。
+#
+# ⚠️ 两条扩容纪律（2026-10-10 用**真实数据**取证后钉死；依据
+#    ``docs/AI助手脱敏词典扩容-20261010.md``）：
+#   1) **只增不减**：删任何一条都可能让「一整类字段名」裸奔（子串匹配没有兜底）。
+#   2) **禁止加入裸 ``name`` / 裸 ``addr`` 之类的通用词干**：真实响应里
+#      ``name / l4Name / partName / pendingPartName / _partName`` 是**合法业务键**
+#      （批次名 / Part 名 / 节点名），加裸 ``name`` 会一次误伤 5 个键。
+#      name 族只收**具体复合词**（``username``/``customername``/``realname``/``fullname``）。
 # ---------------------------------------------------------------------------
 SENSITIVE_KEY_SUBSTR: tuple = (
     # —— 逐字对齐 Agent 侧 workmain.py::_SENS_SUBSTR（必须包含，不得删减）——
     "负责人", "操作人", "创建人", "姓名", "手机", "电话", "联系方式",
     "备注", "owner", "creator", "operator", "phone", "mobile", "remark",
-    # —— 本轮新增（宁可保守、不可漏挡；已核对不与上下文白名单键冲突）——
+    # —— T10 上轮新增（2026-10-10 `dc9816b`）——
     "联系", "邮箱", "email", "mail", "微信", "wechat", "身份证", "idcard", "contact",
+    # —— T10-b 扩容（2026-10-10，真实数据取证）——
+    # 【真实命中·必加】`executor`（inflight / review_sku 的「执行人」）、`审批人`（records 的「历史审批人」）
+    "executor",
+    # 中文职务 / 身份：钉钉审批·物流表单的高频字段名（本系统数据源即钉钉审批导出）
+    "申请人", "审核人", "审批人", "经办人", "对接人", "主管",
+    "收货人", "收件人", "寄件人", "处理人", "提交人", "跟进人", "执行人",
+    # 主体标识（人名 / 客户名）
+    "用户", "客户",
+    # 联系方式（地址 / 固话 / 传真；11 位手机号另有**值级**正则掩码兜底）
+    "地址", "座机", "固话", "传真",
+    # 英文对应（职务 / 物流角色 / 联系方式）——不含裸 name
+    "handler", "approver", "applicant", "receiver", "consignee", "shipper",
+    "addr", "tel", "fax", "qq",
+    # name 族：只收具体复合词（**禁用裸 name**，见上方纪律 2）
+    "username", "customername", "realname", "fullname",
 )
 
 #: ``X-Plat-Context`` 头**只保留**这些键（任务书 §4.1 约定；「白名单 6 键」）。

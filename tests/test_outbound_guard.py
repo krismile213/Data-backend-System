@@ -314,3 +314,82 @@ def test_oversize_thresholds_sanity():
                                     "selected_sku", "filters")
     assert CONTEXT_VALUE_MAX == 80
     assert CONTEXT_HEADER_MAX == 2048
+
+
+# ===========================================================================
+# T10-b 词典扩容（2026-10-10，**真实数据取证**）
+# 依据：docs/AI助手脱敏词典扩容-20261010.md
+# 证据来源：起 :8000 后逐个 platform_* 端点取真实响应、递归收集 499 个 dict 键。
+# ===========================================================================
+
+#: 真实响应里**确实出现过**的人员类键（探针实测）
+REAL_PERSON_KEYS = ["executor", "owner", "operator",
+                    "当前负责人", "创建人", "创建人部门", "历史审批人"]
+
+#: 真实响应里的**合法业务键** —— 绝不能被剔除（防「扩词扩大化」把助手问瞎）
+REAL_BUSINESS_KEYS = [
+    "name", "l4Name", "partName", "pendingPartName", "_partName",
+    "sku", "model", "batch", "status", "total", "count", "part", "node",
+    "page", "pageSize", "approvalNo", "computedAt", "segDef", "byMode",
+    "arrived", "overDays", "shipClosure", "transportExempt",
+    "审批编号", "审批状态", "审批结果", "审批记录", "审批单标题",
+    "新机型号", "参考型号", "序号", "目标区域", "站点需求收集",
+]
+
+
+def _survivors(keys):
+    """把 ``keys`` 每个键配一个无害值送进 sanitize_obj，返回**存活**的键集合。"""
+    cleaned, _ = sanitize_obj({k: "v" for k in keys})
+    return set(cleaned.keys())
+
+
+def test_expansion_forbids_bare_name_token():
+    """扩容纪律：**禁止裸 ``name``**（实测会一次误伤 name/l4Name/partName/... 5 个合法键）。"""
+    assert "name" not in SENSITIVE_KEY_SUBSTR
+
+
+def test_expansion_has_no_duplicates_and_grew():
+    """词典无重复条目，且确实扩容（≥ 57 条）。"""
+    assert len(SENSITIVE_KEY_SUBSTR) == len(set(SENSITIVE_KEY_SUBSTR))
+    assert len(SENSITIVE_KEY_SUBSTR) >= 57
+
+
+def test_expansion_covers_real_person_keys():
+    """真实数据里出现过的人员类键必须**全被剔除**（含本轮新发现的 executor / 历史审批人）。"""
+    left = _survivors(REAL_PERSON_KEYS)
+    assert left == set(), f"真实人员键未剔除: {sorted(left)}"
+
+
+def test_expansion_covers_chinese_role_words():
+    """中文职务 / 身份 / 联系方式类字段名（钉钉审批·物流表单高频）。"""
+    words = ["申请人", "审核人", "经办人", "对接人", "主管",
+             "收货人", "收件人", "寄件人", "处理人", "提交人", "跟进人", "执行人",
+             "用户", "客户", "地址", "座机", "固话", "传真"]
+    left = _survivors(words)
+    assert left == set(), f"未剔除: {sorted(left)}"
+
+
+def test_expansion_covers_english_variants():
+    """英文职务 / 物流角色 / 联系方式 / name 族复合词。"""
+    words = ["handler", "approver", "applicant", "receiver", "consignee", "shipper",
+             "addr", "tel", "fax", "qq", "username", "customername", "realname",
+             "fullname"]
+    left = _survivors(words)
+    assert left == set(), f"未剔除: {sorted(left)}"
+
+
+def test_expansion_does_not_touch_real_business_keys():
+    """**误伤守卫**：真实业务键一个都不能被剔除。"""
+    left = set(REAL_BUSINESS_KEYS) - _survivors(REAL_BUSINESS_KEYS)
+    assert left == set(), f"误伤合法业务键: {sorted(left)}"
+
+
+def test_known_overblock_by_bare_mobile_substring_documented():
+    """⚠️ **已知误伤（既有行为，非本轮引入，尚未修）**：词典含裸 ``手机``，
+    会把「手机膜类型 / 手机数据取得日期」这类**业务字段**一并剔除。
+
+    已记入扩容文档「待决策（需要显式同意才改）」。若将来把 ``手机`` 收紧为 ``手机号``，
+    本用例须同步改为断言「保留」。此用例存在的意义：让这个缺陷**不可能被遗忘**。
+    """
+    over_blocked = ["手机膜类型", "手机数据取得日期", "手机数据取得时间", "手机壳确样日期"]
+    assert _survivors(over_blocked) == set(), "若此断言失败说明缺陷已被修复，请更新本用例"
