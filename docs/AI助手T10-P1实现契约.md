@@ -63,7 +63,7 @@ def sanitize_request_body(body: bytes, content_type: str) -> tuple[bytes, dict]:
 |---|---|---|---|
 | 1 | dict 含键名命中 `SENSITIVE_KEY_SUBSTR`（如 `当前负责人`、`owner`、`备注`） | **整键剔除** | 大小写不敏感（`str(k).lower()`） |
 | 2 | 嵌套 dict / list / list[dict] | 递归同样处理 | 深度不设限 |
-| 3 | 字符串值含 11 位手机号 | 掩码为 `138****8000` | 前后不夹数字（`(?<!\d)…(?!\d)`） |
+| 3 | 字符串值含 11 位手机号 | 掩码 = **首 3 位 + `****` + 末 4 位**（`13812345678 → 138****5678`），与 Agent 侧 `_plat_sanitize` 逐字对齐 | 前后不夹数字（`(?<!\d)…(?!\d)`） |
 | 4 | 其它类型（int/float/bool/None） | 原样 | 不改数值 |
 | 5 | 顶层非 dict（如 list） | 仍递归处理 | — |
 | 6 | 上下文头缺失/空串 | 返回 `(None, {"reason":"absent"})`，**不添加该头** | 向后兼容 |
@@ -85,8 +85,8 @@ def sanitize_request_body(body: bytes, content_type: str) -> tuple[bytes, dict]:
 
 - `_sanitize_outbound(body, headers)` **签名与返回值不变** `-> (body, headers)`，调用点（第 109 行）不改。
 - content-type 从 `headers` 里取（`_build_upstream_headers` 只过滤逐跳头，`content-type` 会被保留）——**不要**改函数签名。
-- 顺序：先 `sanitize_request_body(body, ct)`，再 `sanitize_context(headers.get("x-plat-context"))` →
-  有值则 `headers["X-Plat-Context"] = <编码值>`，为 `None` 则 `headers.pop("X-Plat-Context", None)`。
+- 顺序：先 `sanitize_request_body(body, ct)`，再取上下文头 → 有值则写回 `X-Plat-Context`，为 `None` 则**删除**该头。
+- ⚠️ **头名大小写不敏感**（客户端可能发 `x-plat-context`，uvicorn/httpx 各环节大小写不保证一致）：读取与删除都必须**大小写不敏感**，且**保证出站只有一个** `X-Plat-Context`（先删旧键再写新键，防 httpx 收到重复头）。
 - 命中任何脱敏时 `print("[agent-guard] ...", flush=True)` 打一行**摘要**（键名/计数/理由）——**禁止打印明文值**。日志用 `print`（与 `prewarm.py:130` 一致，本项目无 logging 约定）。
 
 ---
@@ -118,7 +118,7 @@ export function scanSensitiveText(text) -> { hit: boolean, kinds: string[] }
 
 ### 3.3 `frontend/src/App.jsx`
 
-- 新增 `getPlatContext()`（用 `useCallback`）：取当前 `page / category / batch` 三个 state + 从本文件既有的 `PAGES` 取 `page_label`（**不得另建一份标签表**——那就是口径漂移）+ 读 `window.location.search` 的 `?sku=` 作为 `selected_sku`（现在恒为空，见 §6）。
+- 新增 `getPlatContext()`（用 `useCallback`）：取当前 `page / category / batch` 三个 state + 从本文件既有的 **`NAV_ITEMS`（68–90 行，`{key, label}`）** 取 `page_label`（**不得另建一份标签表**——那就是口径漂移；注意 `PAGES`（92–113 行）是 `key → 组件` 映射，**不含 label**）+ 读 `window.location.search` 的 `?sku=` 作为 `selected_sku`（现在恒为空，见 §6）。
 - 传给 `<AgentPanel open onClose getPlatContext={getPlatContext} />`。
 - ⚠️ 切品类会整页 reload（既有行为）→ 上下文天然跟随。
 
