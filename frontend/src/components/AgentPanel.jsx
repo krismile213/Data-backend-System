@@ -2,7 +2,13 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Box,
+  Button,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
   Divider,
   Drawer,
   IconButton,
@@ -14,6 +20,7 @@ import SmartToyIcon from '@mui/icons-material/SmartToy';
 
 import { SEMANTIC } from '../theme.js';
 import useAgentStream from '../hooks/useAgentStream.js';
+import { scanSensitiveText } from '../agentContext.js';
 import AgentMessageList from './AgentMessageList.jsx';
 import AgentComposer from './AgentComposer.jsx';
 import {
@@ -52,7 +59,7 @@ function getSessionId() {
   }
 }
 
-export default function AgentPanel({ open, onClose }) {
+export default function AgentPanel({ open, onClose, getPlatContext }) {
   const sessionRef = useRef(null);
   if (sessionRef.current === null) sessionRef.current = getSessionId();
   const session = sessionRef.current;
@@ -64,6 +71,8 @@ export default function AgentPanel({ open, onClose }) {
   const [usage, setUsage] = useState(null);
   const [error, setError] = useState('');
   const [showNotice, setShowNotice] = useState(false);
+  //: 出网敏感内容确认框的状态：{ text, kinds } | null（null = 不显示）
+  const [riskDialog, setRiskDialog] = useState(null);
   const uidRef = useRef(0);
 
   // 首次打开给一条「数据出网告知」（T10）
@@ -181,11 +190,17 @@ export default function AgentPanel({ open, onClose }) {
     return undefined;
   }, [open, start, stop, session]);
 
-  const handleSend = useCallback(async (text) => {
+  /**
+   * 真正执行发送/追加（已通过敏感内容确认，或本就没命中）。
+   *
+   * P1：随请求带上 `X-Plat-Context`（从 App 注入的 getPlatContext 取）。
+   */
+  const doSend = useCallback(async (text) => {
+    const platContext = getPlatContext ? getPlatContext() : undefined;
     setError('');
     if (running) {
       try {
-        await enqueueAgent(session, text);
+        await enqueueAgent(session, text, platContext);
       } catch (err) {
         setError(err?.message || String(err));
       }
@@ -193,12 +208,36 @@ export default function AgentPanel({ open, onClose }) {
     }
     setItems((prev) => [...prev, { type: 'user', text }]);
     try {
-      await sendAgentChat({ session, message: text });
+      await sendAgentChat({ session, message: text, platContext });
     } catch (err) {
       setError(err?.message || String(err));
       setItems((prev) => [...prev, { type: 'notice', text: `发送失败：${err?.message || err}` }]);
     }
-  }, [running, session]);
+  }, [running, session, getPlatContext]);
+
+  /**
+   * 发送入口：先做**UX 层**敏感内容提示（T10-b）。
+   *
+   * ⚠️ 前端 `scanSensitiveText` 只是 UX 提醒层，真正的强制保障是 BFF `_sanitize_outbound()`
+   * 与 Agent 侧 `_plat_sanitize()`——前端检测挡不住任何东西，命中只影响「是否多问一句」。
+   * 命中 → 弹确认框（取消=不发送）；未命中 → 直接发送，不打扰。
+   */
+  const handleSend = useCallback((text) => {
+    const scan = scanSensitiveText(text);
+    if (scan.hit) {
+      setRiskDialog({ text, kinds: scan.kinds });
+      return;
+    }
+    doSend(text);
+  }, [doSend]);
+
+  const confirmRiskSend = useCallback(() => {
+    const pending = riskDialog;
+    setRiskDialog(null);
+    if (pending) doSend(pending.text);
+  }, [riskDialog, doSend]);
+
+  const cancelRiskSend = useCallback(() => setRiskDialog(null), []);
 
   const handleStop = useCallback(async () => {
     try {
@@ -289,6 +328,23 @@ export default function AgentPanel({ open, onClose }) {
             {usage ? ` · 用量 ${JSON.stringify(usage)}` : ''}
           </Typography>
         </Box>
+
+        {/* T10-b：出网敏感内容确认框（UX 层提示，非安全边界 —— 见 handleSend 注释） */}
+        <Dialog open={Boolean(riskDialog)} onClose={cancelRiskSend}>
+          <DialogTitle>内容可能包含个人信息</DialogTitle>
+          <DialogContent>
+            <DialogContentText>
+              检测到：{riskDialog ? riskDialog.kinds.join('、') : ''}。本次消息将发送至
+              <strong>云端模型</strong>（z.ai）处理。是否继续？
+            </DialogContentText>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={cancelRiskSend}>取消</Button>
+            <Button color="warning" variant="contained" onClick={confirmRiskSend}>
+              仍然发送
+            </Button>
+          </DialogActions>
+        </Dialog>
       </Box>
     </Drawer>
   );

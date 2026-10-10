@@ -8,6 +8,7 @@
  */
 
 import { appendCategory, getCategory } from './category';
+import { CONTEXT_HEADER, encodePlatContext } from './agentContext.js';
 
 const BASE = '/api';
 
@@ -401,11 +402,19 @@ export function buildDeltasExportUrl({ days = 30, sku = '' } = {}) {
 
 const AGENT_BASE = '/api/agent';
 
-/** 助手端点的通用请求（不做品类注入；BFF 前缀已在路径里） */
-async function agentRequest(path, { method = 'GET', body } = {}) {
+/**
+ * 助手端点的通用请求（不做品类注入；BFF 前缀已在路径里）。
+ *
+ * `headers` 为**可选**附加头（P1：用于携带 `X-Plat-Context`）；不传时行为与历史完全一致
+ * （有 body 才带 `Content-Type: application/json`，否则不带任何头）。
+ */
+async function agentRequest(path, { method = 'GET', body, headers } = {}) {
+  const finalHeaders = {};
+  if (body !== undefined) finalHeaders['Content-Type'] = 'application/json';
+  if (headers) Object.assign(finalHeaders, headers);
   const res = await fetch(`${AGENT_BASE}${path}`, {
     method,
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+    headers: Object.keys(finalHeaders).length ? finalHeaders : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
@@ -432,17 +441,29 @@ export function fetchAgentHealth() {
   return agentRequest('/api/health');
 }
 
-/** 发起一次提问（真正的结果走 SSE 事件流） */
-export function sendAgentChat({ session, message, reflect = false, plan = false, stepwise = false }) {
+/**
+ * 发起一次提问（真正的结果走 SSE 事件流）。
+ *
+ * 提供 `platContext` 时，额外带 `X-Plat-Context`（percent-encoded 纯 ASCII）——
+ * Agent 侧 `/api/chat` 会读取它作为「当前页面/品类/批次」上下文（任务书 §4.1）。
+ */
+export function sendAgentChat({ session, message, reflect = false, plan = false, stepwise = false, platContext }) {
+  const headers = platContext ? { [CONTEXT_HEADER]: encodePlatContext(platContext) } : undefined;
   return agentRequest('/api/chat', {
     method: 'POST',
     body: { session, message, reflect, plan, stepwise },
+    headers,
   });
 }
 
-/** 任务运行中追加指令（不打断执行） */
-export function enqueueAgent(session, text) {
-  return agentRequest('/api/enqueue', { method: 'POST', body: { session, text } });
+/**
+ * 任务运行中追加指令（不打断执行）。
+ *
+ * 同样支持 `platContext`（Agent 目前在 `/api/chat` 读该头，这里带上无害且向前兼容）。
+ */
+export function enqueueAgent(session, text, platContext) {
+  const headers = platContext ? { [CONTEXT_HEADER]: encodePlatContext(platContext) } : undefined;
+  return agentRequest('/api/enqueue', { method: 'POST', body: { session, text }, headers });
 }
 
 /** 停止当前会话任务 */

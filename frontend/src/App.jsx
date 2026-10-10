@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useEffect, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import {
   Box,
   AppBar,
@@ -39,6 +39,7 @@ import BatchSelector from './components/BatchSelector.jsx';
 import CategorySelector from './components/CategorySelector.jsx';
 import AgentPanel from './components/AgentPanel.jsx';
 import { getCategory, setCategory } from './category';
+import { buildPlatContext } from './agentContext.js';
 
 // 按页面懒加载：首屏只加载看板，避免把 15 个页面（含 2.6MB ECharts）一次性打进首包
 const Dashboard = lazy(() => import('./pages/Dashboard.jsx'));
@@ -113,6 +114,17 @@ const PAGES = {
 };
 
 const PAGE_KEYS = NAV_ITEMS.map((i) => i.key);
+
+/**
+ * 页面 key → 中文标签。
+ *
+ * ⚠️ 唯一真源 = 本文件既有的 `NAV_ITEMS`（`{key, label}`，见其定义）。
+ * **禁止**另建一份标签表——两份表迟早漂移（口径漂移）。AI 助手的 `page_label` 即取自此。
+ */
+function pageLabelOf(key) {
+  const item = NAV_ITEMS.find((i) => i.key === key);
+  return item ? item.label : '';
+}
 
 /** 从 URL 读取页面与批次（非法 page 回退到看板） */
 function readUrlState() {
@@ -202,6 +214,28 @@ export default function App() {
 
   const Current = PAGES[page] || Dashboard;
 
+  /**
+   * 组装「当前平台上下文」给 AI 助手（P1，任务书 §4.1）：
+   * 页面 key + 页面对应中文标签（取自既有 NAV_ITEMS）+ 当前品类 + 当前批次；
+   * `selected_sku` 从 URL 的 `?sku=` 读（**本轮恒为空**：全前端无页面把 sku 写进 URL，
+   * 属已知缺口，见契约 §6）。切品类会整页 reload，上下文天然跟随。
+   */
+  const getPlatContext = useCallback(() => {
+    let selectedSku = '';
+    try {
+      selectedSku = new URLSearchParams(window.location.search).get('sku') || '';
+    } catch (e) {
+      selectedSku = '';
+    }
+    return buildPlatContext({
+      page,
+      pageLabel: pageLabelOf(page),
+      category,
+      batch,
+      selectedSku,
+    });
+  }, [page, category, batch]);
+
   return (
     <Box sx={{ display: 'flex', height: '100vh' }}>
       <AppBar
@@ -278,7 +312,11 @@ export default function App() {
         </Suspense>
       </Box>
 
-      <AgentPanel open={agentOpen} onClose={() => setAgentOpen(false)} />
+      <AgentPanel
+        open={agentOpen}
+        onClose={() => setAgentOpen(false)}
+        getPlatContext={getPlatContext}
+      />
     </Box>
   );
 }

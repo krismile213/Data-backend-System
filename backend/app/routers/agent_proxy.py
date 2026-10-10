@@ -5,7 +5,10 @@
 本模块是「**唯一出站收口**」，职责四件事：
 
   1. 鉴权收口：由**服务端**注入 `Authorization: Bearer <AGENT_TOKEN>`，前端永不接触 token（§8.1）；
-  2. 数据出站收口：所有出站内容都经 `_sanitize_outbound()`（分级/脱敏，§9.1，本轮骨架）；
+  2. **上行**出站收口：**上行内容**（用户消息体 + `X-Plat-Context` 上下文头）都经
+     `_sanitize_outbound()` 脱敏（T10-a，实装于 `app/outbound_guard.py`）。
+     ⚠️ 工具结果是 Agent 自己调平台 `:8000` 拿的，**不经过 BFF**，其下行脱敏由 Agent 侧
+     `plugins/workmain.py::_plat_sanitize` 负责——本层**不做**也**做不到**「洗工具结果」；
   3. SSE 透传：`GET /api/agent/api/events` 逐块转发 `text/event-stream`，保头、透传 `Last-Event-ID`；
   4. 降级：上游不可达 → 502/503 + JSON，绝不让异常穿成 500。
 
@@ -20,6 +23,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from ..config import agent_base_url, agent_timeout_seconds, agent_token
+from ..outbound_guard import sanitize_context, sanitize_request_body
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
@@ -36,26 +40,73 @@ _HOP_BY_HOP = frozenset({
 _METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
 
 
+def _header_get(headers: dict, name: str):
+    """大小写不敏感地取头值（入站头名大小写不保证）。缺失返回 ``None``。"""
+    target = name.lower()
+    for key, value in headers.items():
+        if key.lower() == target:
+            return value
+    return None
+
+
+def _header_del(headers: dict, name: str) -> None:
+    """大小写不敏感地删除全部同名头（就地修改）。"""
+    target = name.lower()
+    for key in [k for k in headers if k.lower() == target]:
+        headers.pop(key, None)
+
+
 def _sanitize_outbound(body: bytes, headers: dict):
-    """出站唯一收口：分级 → 脱敏 → 才转发（T10 / docs …§9.1）。
+    """出站唯一收口：脱敏 → 才转发（T10-a / docs/AI助手T10-P1实现契约.md §2）。
 
-    本轮（P0）为**骨架：直通**，不做任何改写（先把钩子/收口位置钉死）。
+    收口的是**上行**：请求体（用户消息）+ `X-Plat-Context` 上下文头。
 
-    TODO(T10)：在此实现字段/实体级白名单：
-      - 放行：批次号 / SKU / 机型 / 统计值 / 页面名；
-      - 剔除或掩码：负责人姓名·手机号 / 内部备注 / 联系方式类字段；
-      - 命中「将上云」时回传分级结果，供面板显式提示
-        「本次将发送【X 类】数据至云端模型，是否继续」（需用户确认后才发送）。
+    为什么钩子落在这里、而不是各调用方：BFF 是**上行**内容（P1 的 `X-Plat-Context` 上下文头 +
+    用户消息体）的唯一必经之路。⚠️ 工具结果回灌**不经过 BFF**（Agent 自己调平台 `:8000` 拿数据后
+    直接发云端模型），其脱敏由 Agent 侧 `plugins/workmain.py::_plat_sanitize` 负责——本层只收上行。
 
-    为什么钩子落在这里、而不是各调用方：BFF 是所有出站内容
-    （P1 的 `X-Plat-Context` 上下文头 + 用户消息 + 工具结果回灌）的唯一必经之路 ——
-    脱敏只有落在这唯一收口上才绕不过去。
+    具体行为：
+      - `sanitize_request_body(body, ct)`：仅 `application/json` 且可解析时才改写（剔敏感键 + 掩手机号）；
+        ct 从 `headers` 里取（`_build_upstream_headers` 只过滤逐跳头，`content-type` 会被保留）；
+      - `sanitize_context(headers.get("x-plat-context"))`：白名单 6 键 + 掩码 + 重新 percent-encode；
+        有值写回 `headers["X-Plat-Context"]`，为 `None` 则 `pop` 掉该头（含「没带」的情形）；
+      - 命中任何脱敏时 `print("[agent-guard] ...")` 打一行**摘要**（只打计数/理由，**禁止明文值**）。
+
+    安全兜底：脱敏失败一律「保可用」——`outbound_guard` 任何路径都不抛异常，解析失败即原样转发。
+
+    ⚠️ 前端 `scanSensitiveText` 只是 UX 提醒层，真正的强制保障是这里（`_sanitize_outbound`）
+    与 Agent 侧 `_plat_sanitize`。
 
     :param body:    即将转发给 Agent 的请求体字节（UTF-8）。
     :param headers: 即将转发给 Agent 的请求头（已含注入的 Authorization）。
-    :return:        清洗后的 ``(body, headers)``；本轮原样返回。
+    :return:        清洗后的 ``(body, headers)``。
     """
-    return body, headers
+    content_type = _header_get(headers, "content-type")
+    new_body, body_stats = sanitize_request_body(body, content_type)
+
+    raw_ctx = _header_get(headers, "x-plat-context")
+    new_ctx, ctx_info = sanitize_context(raw_ctx)
+    if new_ctx is not None:
+        _header_del(headers, "x-plat-context")
+        headers["X-Plat-Context"] = new_ctx
+    else:
+        _header_del(headers, "x-plat-context")
+
+    # 摘要日志（本项目无 logging 约定，沿用 prewarm.py 的 print；**只打计数/理由，禁止明文值**）。
+    # 何时打：请求体真的被改写、或上下文真的被改写、或上下文被拒（畸形/超长，值得留痕）。
+    if (body_stats.get("changed") or ctx_info.get("changed")
+            or ctx_info.get("reason") in ("malformed", "toolong")):
+        print(
+            "[agent-guard] outbound sanitize: "
+            f"body{{dropped={body_stats.get('dropped_keys', 0)},"
+            f"masked={body_stats.get('masked_values', 0)},"
+            f"reason={body_stats.get('reason', 'ok')}}} "
+            f"ctx{{dropped={ctx_info.get('dropped_keys', 0)},"
+            f"masked={ctx_info.get('masked_values', 0)},"
+            f"reason={ctx_info.get('reason', 'ok')}}}",
+            flush=True,
+        )
+    return new_body, headers
 
 
 def _build_upstream_headers(request: Request) -> dict:
