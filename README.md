@@ -221,6 +221,29 @@ set "NPM=%USERPROFILE%\.workbuddy\binaries\node\versions\%NODE_VER%\npm.cmd"
 
 > 详细模型定义见 `docs/SKU单据增量追踪模型.md`，页面怎么读见 `docs/单据增量使用说明.md`。
 
+### 14. AI 助手（右上角 · 对话式问答）
+
+顶栏的 **AI 助手**按钮打开右侧抽屉，可直接用自然语言问库里的业务数据
+（"这批手机膜有几条加急预警"、"G506 卡在哪个环节"），助手会**调用本系统的只读接口取真实数据**再作答。
+
+- **它是"嵌进来的独立服务"**：助手本体是一个**独立的 Agent 服务**（默认 `127.0.0.1:8765`），
+  由后端 **BFF 反向代理**（`/api/agent/*` → `:8765`）接入，浏览器**只与平台后端对话**、
+  永不直连 Agent，也**永不接触** Agent token —— 鉴权由服务端注入 `Bearer`（见下）。
+- **能读、不能改**：助手接的是 **10 个只读工具**（批次总览 / 明细 / 复盘 / 加急预警 / 货件运输 /
+  在途 / 日报 / 增量等），**不会**写入或改动任何数据。
+- **写操作要审批**：一旦工具涉及写/对外发送，抽屉里会弹**审批卡**（允许 / 本会话总允许 / 拒绝）；
+  `external`（对外发送）级**不给**"本会话总允许"、且**需二次确认**，避免一次授权把对外发送全放行。
+- **数据出网有兜底**：回答由云端模型生成，助手会收到**当前页面信息**；**敏感字段（姓名/手机/负责人等
+  57 类键）在出网前被屏蔽**——上行经平台 `outbound_guard`、下行（工具结果）经 Agent 侧
+  `_plat_sanitize` 双重脱敏，两端词典同集。
+- **先起 Agent 服务**：助手依赖 Agent 进程，需**单独启动**（本系统 `start.py` **不含**它）：
+  在 Agent 目录下 `python server.py`（见任务书），并把 Agent token 写入
+  `D:\apps\data-admin\.env` 的 `AGENT_TOKEN`（后端启动时读取，用于注入 `Bearer`）。
+  Agent 未启动时，抽屉会显示"未连接"，说话返回 **503**（不报 500）。
+
+> 对接契约、工具清单、脱敏词典与验收方式见 `docs/Agent侧对接任务书.md`；
+> 脱敏词典扩容依据见 `docs/AI助手脱敏词典扩容-20261010.md`。
+
 ## 四、技术栈与结构
 
 - 后端：Python FastAPI + uvicorn + pandas + openpyxl（`backend/`）
@@ -237,9 +260,14 @@ set "NPM=%USERPROFILE%\.workbuddy\binaries\node\versions\%NODE_VER%\npm.cmd"
     > 单进程 pandas 预热与用户的首次请求抢 CPU（GIL），而 `get_batch_data` 的按批次锁
     > 让用户请求只能排队等预热算完同一批次。礼让式预热不可能比不做更差，立即预热会。
     > 收益落在「用户没打开过的批次」上：切换批次合计 **3.43s → 0.11s**。
-  - `app/routers/`：19 组接口 —— batches / overview / timeliness / anomalies / records /
+  - `app/routers/`：20 组接口 —— batches / overview / timeliness / anomalies / records /
     compare / skus / review / scenarios / routes / transport / alerts / watch /
-    fillins / history / rules / dataadmin / manual / deltas
+    fillins / history / rules / dataadmin / manual / deltas / **agent（BFF 反代）**
+  - `app/routers/agent_proxy.py`：**AI 助手 BFF**。把 `/api/agent/{path}` 反向代理到
+    独立 Agent 服务（默认 `:8765`），**服务端注入** `Authorization: Bearer <AGENT_TOKEN>`、
+    SSE（`/api/agent/api/events`）**逐块透传**（禁止全量缓冲）、透传 `Last-Event-ID`，
+    上游不可达降级 **503/502 + JSON**（绝不让异常穿成 500）；`trust_env=False` 避免被
+    本机代理劫持。token 见 `D:\apps\data-admin\.env` 的 `AGENT_TOKEN`（前端不接触）。
 - 前端：Vite + React + MUI + ECharts（`frontend/`）
   - 页面按需懒加载（`React.lazy`），首屏只加载当前页面，不必为 20 个页面（含 2.6MB ECharts）买单；
   - 页面与批次同步到 URL（`?page=transport&batch=手机膜9.7`）：刷新保持、链接可分享、支持浏览器前进后退；
@@ -319,6 +347,7 @@ set "NPM=%USERPROFILE%\.workbuddy\binaries\node\versions\%NODE_VER%\npm.cmd"
 | GET /api/deltas?days=30&sku= | 单据增量：基线信息 + 最近一次增量 + 窗口聚合（byDay/bySku）+ 快照流水 |
 | POST /api/deltas/snapshot | 立即拍一张增量快照（force=true 同指纹强制重拍） |
 | GET /api/deltas/export?days=30 | 导出单据增量 xlsx（新增单据/单据新动作/状态变化/未闭环SKU汇总/口径说明 5 sheet） |
+| `/api/agent/*` | **AI 助手 BFF**：反向代理到独立 Agent 服务（`:8765`），服务端注入 Bearer。含 `/api/agent/api/events`（SSE）/ `/chat` / `/approve` / `/pending` / `/sessions` 等，路径与 Agent 上游 1:1 同名 |
 
 批次不存在返回 404；空数据返回空结构而非 500。
 
