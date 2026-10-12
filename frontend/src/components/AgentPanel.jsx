@@ -130,11 +130,15 @@ export default function AgentPanel({ open, onClose, getPlatContext }) {
         setItems((prev) => markTool(prev, ev.name, 'error', '策略拒绝（permission_denied）'));
         break;
       case 'permission_request':
+        // level 契约：Agent 事件已下发 level（'external' / 'write' / …）；
+        // 直读传给 ApprovalCard，用于判定是否给「本会话总允许」（旧 Agent 可能不带 → undefined）。
         setApprovals((prev) => [...prev, { id: ev.id, kind: 'permission',
-                                           tool: ev.tool, preview: ev.preview }]);
+                                           tool: ev.tool, preview: ev.preview,
+                                           level: ev.level }]);
         break;
       case 'plan_request':
-        setApprovals((prev) => [...prev, { id: ev.id, kind: 'plan', plan: ev.plan }]);
+        setApprovals((prev) => [...prev, { id: ev.id, kind: 'plan', plan: ev.plan,
+                                           level: ev.level }]);
         break;
       case 'step_request':
         setApprovals((prev) => [...prev, { id: ev.id, kind: 'step', step: ev.step,
@@ -181,7 +185,8 @@ export default function AgentPanel({ open, onClose, getPlatContext }) {
             const known = new Set(prev.map((a) => a.id));
             const extra = pending
               .filter((p) => !known.has(p.id))
-              .map((p) => ({ id: p.id, kind: 'permission', tool: p.tool, preview: p.preview }));
+              .map((p) => ({ id: p.id, kind: 'permission', tool: p.tool,
+                             preview: p.preview, level: p.level }));
             return [...prev, ...extra];
           });
         }
