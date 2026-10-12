@@ -484,8 +484,26 @@ export function fetchAgentPending(session) {
   return agentRequest(`/api/pending?session=${encodeURIComponent(session)}`);
 }
 
-/** 会话列表 */
+/** 会话列表（按最近活动倒序；元素形如 {name, size, mtime}） */
 export function fetchAgentSessions() {
   return agentRequest('/api/sessions');
+}
+
+/** 某会话的历史消息（返回 {items, usage, running}；会话不存在也返回 200 空 items） */
+export function fetchAgentHistory(name) {
+  return agentRequest(`/api/sessions/${encodeURIComponent(name)}/history`);
+}
+
+/** 重命名会话（body {new}；成功返回 {ok, name}；400 空名 / 404 / 409 重名或运行中） */
+export function renameAgentSession(name, newName) {
+  return agentRequest(`/api/sessions/${encodeURIComponent(name)}/rename`, {
+    method: 'POST',
+    body: { new: newName },
+  });
+}
+
+/** 删除会话（成功返回 {ok}；404 / 409 运行中） */
+export function deleteAgentSession(name) {
+  return agentRequest(`/api/sessions/${encodeURIComponent(name)}`, { method: 'DELETE' });
 }
 

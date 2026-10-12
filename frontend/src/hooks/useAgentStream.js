@@ -106,6 +106,12 @@ export function useAgentStream({ session, onEvent, onError }) {
   // 卸载时确保中止，避免流泄漏
   useEffect(() => () => stop(), [stop]);
 
+  // 切换会话时必须**重置** lastIdRef：它保存的是上一个会话最近的事件 id，
+  // 若带到新会话会让上游「从旧 id 重放」，导致新会话事件窗口错位/漏事件。
+  useEffect(() => {
+    lastIdRef.current = null;
+  }, [session]);
+
   return { start, stop, connected };
 }
 
