@@ -25,12 +25,26 @@
  *   {kind:'user', text}           → {type:'user', text}
  *   {kind:'assistant', text}      → {type:'assistant', text, streaming:false}
  *   {kind:'tool_call', name,args} → {type:'tool', id, name, args, status:'running'}
- *   {kind:'tool_result', result}  → 把**最近一个 running 的 tool** 置 {status:'ok', result}
+ *   {kind:'tool_result', name,result} → 优先**按 name** 配对（回退 **FIFO**）置 {status:'ok', result}
  *   {kind:'reflect', critique}    → {type:'notice', text}（渲染成提示，不丢信息）
  *   其它 / 非法项                  → 跳过（不崩）
  *
- * ⚠️ tool_result 的 `name` **恒为空串**（Agent 落盘时 tool_result 不带 name），
- *    所以**不能**按名配对，只能"找最后一个 status==='running' 的 tool"。
+ * ⚠️ tool_result 配对规则（**改自旧版 LIFO，修复多工具调用结果错配**）：
+ *   一条 assistant 消息可能同时发起**多个** tool_call。`/history` 重建时会把该消息的
+ *   所有 tool_call **先依次列出**，随后各 tool_result **按同一顺序**列出
+ *   （server.py:477-483）。因此正确配对是：
+ *     1) **优先按 name** —— 与 SSE 直播路径一致（直播事件本就带 name）；
+ *        eng-agent 已让 `/history` 的 tool_result 补回 name（tool_call_id → name）。
+ *        从**前往后**找**同名**且仍 running 的第一条（同名重复时 = 第一个 call 配第一个 result）。
+ *     2) **回退 FIFO** —— name 缺失（旧 Agent 仍落空串）或无匹配时，从前往后找
+ *        **第一个**仍 running 的 tool。**为什么是 FIFO 而不是 LIFO**：多 tool_calls
+ *        是"call 先全列、result 同序跟随"，第一个 call 对应第一个 result；
+ *        旧的 LIFO（找最后一个 running）会把首尾两条结果的归属**对调**。
+ *     3) 都无匹配 → 补一条 ok 的 tool（不丢信息）。
+ *
+ *   为什么「按 name」与「回退 FIFO」都用**从前往后**：两者本质都是"第 k 个 result
+ *   配第 k 个尚未配对的 call"。按 name 只是先用名字把候选缩小到同名集合，同一集合内
+ *   仍应按出现顺序（FIFO）配。用从后往前会在**同名重复调用**时把结果对调，与地面真值相悖。
  *
  * @param {Array<object>} raw history 原始 items（可能为 undefined/null/非数组）
  * @returns {Array<object>} AgentPanel 形状的 items
@@ -55,17 +69,38 @@ export function historyItemsToPanelItems(raw) {
         status: 'running',
       });
     } else if (kind === 'tool_result') {
-      // 找最近一个仍 running 的 tool，置终态（不能按 name 配对：history 里 name 为空串）
+      const nm = it.name || '';
       let matched = false;
-      for (let j = out.length - 1; j >= 0; j -= 1) {
-        if (out[j].type === 'tool' && out[j].status === 'running') {
-          out[j] = { ...out[j], status: 'ok', result: it.result };
-          matched = true;
-          break;
+
+      // 1) 优先按 name 配对（与 SSE 直播路径**结果一致**；同名多条时取**第一个** running）
+      //    ⚠️ 这里用**从前往后**（FIFO）而非从后往前：多 tool_calls 是「call 先全列、
+      //    result 同序跟随」，同名重复调用时第一个 result 属于第一个 call（见文件头说明）。
+      //    直播路径靠 交错到达 天然也是「先配先」，故 FIFO 才真正与直播一致。
+      if (nm) {
+        for (let j = 0; j < out.length; j += 1) {
+          if (out[j].type === 'tool' && out[j].status === 'running' && out[j].name === nm) {
+            out[j] = { ...out[j], status: 'ok', result: it.result };
+            matched = true;
+            break;
+          }
         }
       }
+
+      // 2) 回退 FIFO：name 缺失或无匹配时，取**第一个**仍 running 的 tool。
+      //    为什么是 FIFO：/history 里一条 assistant 的多个 tool_call 先全列，
+      //    各 tool_result 再按同一顺序跟随（server.py:477-483），故首 call 配首 result。
       if (!matched) {
-        // 没有匹配的运行中工具：仍补一条（保持信息完整），置为终态
+        for (let j = 0; j < out.length; j += 1) {
+          if (out[j].type === 'tool' && out[j].status === 'running') {
+            out[j] = { ...out[j], status: 'ok', result: it.result };
+            matched = true;
+            break;
+          }
+        }
+      }
+
+      // 3) 无匹配：补一条 ok 的 tool（保持信息完整，不丢 result）
+      if (!matched) {
         out.push({
           type: 'tool',
           id: `h-${i}-${Math.random().toString(36).slice(2, 8)}`,
