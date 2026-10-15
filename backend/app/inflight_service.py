@@ -927,8 +927,11 @@ def generate_daily_report(category=None, date_str=None):
       · 「今日进度变化」→「在研SKU甘特图」（每在研 SKU 一块，未完成段延伸至今日）。
     豁免 SKU（人工登记/换号/末端终止）移出在研追踪，明细单列「豁免备查」sheet
     （无豁免时仍是 5 sheets，不产生空页）。
+    人工登记备注（2026-10-15）：读 `资产文件\事中日报人工登记.xlsx` → {SKU: 备注}，
+    填进总表末列，随每日生成自动延续（真源与口径见 sku_note.py）。读不到=全空，不阻断。
     """
     from .reporting import daily_report as _daily_xlsx
+    from .sku_note import read_notes
     from pathlib import Path
 
     rs = rules_for(category)
@@ -953,11 +956,16 @@ def generate_daily_report(category=None, date_str=None):
     exempts.extend(data.get("transportExempted") or [])
     exempts = exempts or None
     gantts = _gantt_records(data)
+    notes, note_warns = read_notes()   # 登记表异常只随返回值告警，不阻断日报
+    # 落值条数 = 登记表里**本批次在研**的 SKU 命中的备注数（不是登记表总条数：
+    # 备注表不按品类分，手机壳的日报不该把膜的 SKU 备注计进去）
+    note_applied = sum(1 for it in (data["items"] or [])
+                       if notes.get(it.get("sku")))
     content = _daily_xlsx(
         category=cat, computed_at=data["computedAt"], date_str=today,
         items=data["items"], alerts=alerts, gantts=gantts,
         provisional=rs.provisional, targets_source=rs.targets_source,
-        exempts=exempts)
+        exempts=exempts, notes=notes)
     try:
         with open(path, "wb") as f:
             f.write(content)
@@ -977,6 +985,7 @@ def generate_daily_report(category=None, date_str=None):
         "warnCount": len(alerts["warnings"]),
         "exemptCount": data.get("exemptCount", 0),
         "transportExemptCount": data.get("transportExemptCount", 0),
+        "noteCount": note_applied,
         "createdAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
     with _lock:
@@ -990,6 +999,7 @@ def generate_daily_report(category=None, date_str=None):
             "warnCount": entry["warnCount"],
             "exemptCount": entry["exemptCount"],
             "transportExemptCount": entry.get("transportExemptCount", 0),
+            "noteCount": entry["noteCount"], "noteWarns": note_warns,
             "category": cat,
             "targetsProvisional": rs.provisional,
             "legacyRemoved": dropped}

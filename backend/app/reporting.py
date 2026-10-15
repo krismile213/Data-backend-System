@@ -582,7 +582,8 @@ def route_limits(ruleset=None):
 # P0-4 · 事中日报（5 sheets：在研总表 / 超期明细 / 风险预警 / 在研SKU甘特图 / 上报清单）
 # ---------------------------------------------------------------------------
 def daily_report(*, category, computed_at, date_str, items, alerts,
-                 gantts=None, provisional=False, targets_source="", exempts=None):
+                 gantts=None, provisional=False, targets_source="", exempts=None,
+                 notes=None):
     """生成事中日报 xlsx（bytes）。
 
     items    ：inflight overview 的在研 SKU 行（staySeg=当前停留环节，
@@ -597,6 +598,10 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
                 transportExempted，[{sku, model, kind, reason}]）。kind ∈ {hold,
                 alias, void, 运输闭环}；非空时追加「豁免备查」sheet —— 移出追踪但不吞数据，
                 谁被豁免、为什么豁免，日报里要能对上账。
+    notes    ：{SKU: 备注}（`sku_note.read_notes()` 的真源，`资产文件\事中日报人工登记.xlsx`）。
+                非空时在总表末列「人工登记」按 SKU 填上，随每日生成自动延续；
+                缺省/为空 → 该列全空，行为与本功能上线前完全一致。
+                只影响展示，不影响任何时效/预警/豁免判定。
     """
     wb = Workbook()
     dir_label = {"loss": "亏损", "gain": "增益", "none": "无"}
@@ -612,11 +617,11 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
                      f"「{targets_source or '继承名义值'}」判定，仅供预警参考，"
                      "不得作为既定 KPI 引用；业务确认后须重跑本日报。")
         ws1["A2"].font = Font(bold=True, size=10, color="EF6C00")
-        ws1.merge_cells(start_row=2, start_column=1, end_row=2, end_column=12)
+        ws1.merge_cells(start_row=2, start_column=1, end_row=2, end_column=13)
     _head_row(ws1, 3, ["SKU", "型号", "状态", "当前停留环节", "部门", "已停留(天)",
                        "目标(天)", "距超时(天)", "预警段数", "多轮提交",
-                       "核心原因", "责任人"],
-              widths=[14, 18, 8, 22, 8, 10, 9, 11, 9, 10, 26, 10])
+                       "核心原因", "责任人", "人工登记"],
+              widths=[14, 18, 8, 22, 8, 10, 9, 11, 9, 10, 26, 10, 26])
     r = 4
     for it in items or []:
         _put(ws1, r, 1, it.get("sku"))
@@ -653,6 +658,13 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
         _put(ws1, r, 11, (f"{rc.get('type')}({rc.get('seg')})"
                           if rc.get("type") else "—"))
         _put(ws1, r, 12, it.get("owner") or "—")
+        # 人工登记（2026-10-15）：跟着日期走的在研备注，真源在生成器之外的
+        # `资产文件\事中日报人工登记.xlsx`（见 sku_note.py）—— 日报每天被
+        # 幂等覆盖，备注不能手填在表里。留空即无备注。
+        _note = (notes or {}).get(it.get("sku") or "")
+        if _note:
+            c = _put(ws1, r, 13, _note)
+            c.font = Font(size=10, bold=True, color="1F4E79")
         r += 1
     if r == 4:
         _put(ws1, 4, 1, "（当前无在研 SKU）")
