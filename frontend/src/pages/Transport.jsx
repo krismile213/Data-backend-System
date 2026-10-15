@@ -34,6 +34,17 @@ const JUDGE_COLOR = {
   达标: { bg: SEMANTIC.successBg, color: SEMANTIC.success },
 };
 
+/** 追踪状态 → 徽标配色（在途=蓝 / 留观=绿 / 未发货=灰） */
+const TRACK_COLOR = {
+  在途: { bg: '#E3F2FD', color: '#1565C0' },
+  未发货: { bg: SEMANTIC.neutralBg, color: SEMANTIC.neutral },
+};
+function trackStyle(track) {
+  if (!track) return TRACK_COLOR.未发货;
+  if (track.startsWith('留观')) return { bg: '#E8F5E9', color: '#2E7D32' };
+  return TRACK_COLOR[track] || TRACK_COLOR.未发货;
+}
+
 export default function Transport() {
   const { data, error } = useApi(() => fetchTransport(), []);
   const [q, setQ] = useState('');
@@ -88,7 +99,7 @@ export default function Transport() {
     <Box>
       <PageHeader
         title="货件运输看板"
-        subtitle={`Part5 发货 × Part8 到货按货件号配对，逐票对照渠道目标（空运15 / 海运35 / 卡航35）· 计算于 ${data.computedAt}`}
+        subtitle={`Part5 发货 × Part8 到货按货件号配对，逐票对照渠道目标（空运15 / 海运35 / 卡航35）· 到货 5 天内留观、超出不追踪 · 计算于 ${data.computedAt}`}
         actions={
           <Button variant="outlined" startIcon={<DownloadIcon />} href={buildTransportExportUrl()}>
             导出 xlsx
@@ -101,7 +112,8 @@ export default function Transport() {
           <KpiCard label="货件总票数" value={k.total} sub={`涉及 ${k.skuCount} 个 SKU`} />
         </Grid>
         <Grid item xs={6} sm={4} md={2}>
-          <KpiCard label="已到货 / 未到货" value={`${k.arrived} / ${k.notArrived}`} sub="未到货含在途" />
+          <KpiCard label="已到货 / 未到货" value={`${k.arrived} / ${k.notArrived}`}
+            sub={`未到货含在途${k.archived ? ` · 到货超${k.retentionDays}天归档 ${k.archived} 票` : ''}`} />
         </Grid>
         <Grid item xs={6} sm={4} md={2}>
           <KpiCard
@@ -188,9 +200,10 @@ export default function Transport() {
                 <TableCell>方式</TableCell>
                 <TableCell>发货</TableCell>
                 <TableCell>到货</TableCell>
-                <TableCell>运输(天)</TableCell>
+                <TableCell>已运输(天)</TableCell>
                 <TableCell>目标(天)</TableCell>
                 <TableCell>判定</TableCell>
+                <TableCell>追踪</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -198,6 +211,10 @@ export default function Transport() {
                 .slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage)
                 .map((i, idx) => {
                   const c = JUDGE_COLOR[i.judge] || { bg: SEMANTIC.neutralBg, color: SEMANTIC.neutral };
+                  const t = trackStyle(i.track);
+                  // 已运输天数：在途 = 发货→至今（可能已超目标 → 红字），已到货 = 发货→到货
+                  const overDays = (i.elapsed != null && i.target != null
+                    && Number(i.elapsed) > Number(i.target));
                   return (
                     <TableRow key={`${i.sku}-${i.trk}-${idx}`} hover>
                       <TableCell><b>{i.sku}</b></TableCell>
@@ -209,11 +226,19 @@ export default function Transport() {
                       <TableCell>{i.mode || '—'}</TableCell>
                       <TableCell>{i.ship || '—'}</TableCell>
                       <TableCell>{i.arr || '—'}</TableCell>
-                      <TableCell>{i.days ?? '—'}</TableCell>
+                      <TableCell sx={overDays ? { color: SEMANTIC.danger, fontWeight: 700 } : {}}>
+                        {i.elapsed ?? '—'}
+                      </TableCell>
                       <TableCell>{i.target ?? '—'}</TableCell>
                       <TableCell>
                         <Chip size="small" label={i.judge}
                           sx={{ bgcolor: c.bg, color: c.color, fontWeight: 700 }} />
+                      </TableCell>
+                      <TableCell>
+                        {i.track
+                          ? <Chip size="small" label={i.track}
+                              sx={{ bgcolor: t.bg, color: t.color, fontWeight: 700 }} />
+                          : '—'}
                       </TableCell>
                     </TableRow>
                   );
@@ -241,6 +266,13 @@ export default function Transport() {
         </Typography>
         <Typography variant="body2" color="text.secondary">
           · 「未发货」为 Part5 已立项渠道但无货件号的占位记录（不计超时统计）；其停滞天数与超时判定见「加急预警」页。
+        </Typography>
+        <Typography variant="body2" color="text.secondary">
+          · 到货 5 天内保留追踪（「追踪」列留观 N/5 天），超出 5 天不追踪 —— 归档票不进明细与聚合，
+          KPI「已归档」计数可见；完整历史去复盘页单 SKU 货件表或数据源 Part5/Part8 查。
+        </Typography>
+        <Typography variant="body2" color="text.secondary">
+          · 「已运输(天)」在途票 = 发货→至今（超目标红字），已到货票 = 发货→到货。
         </Typography>
       </Paper>
     </Box>

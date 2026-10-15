@@ -29,7 +29,16 @@ transport_closure.py — 运输闭环判定单一真源（纯函数 · 零业务
   · 只要**任一已发货票未到货** → 未闭环（`pending`）；
   · `pendingHubs` 按**渠道仓/国家聚合去重**：只列「该仓下存在已发货但未到货的票」的国家名；
   · `notShippedHubs`（无货件号占位渠道）**只进 notShippedHubs，绝不参与 closure 判定**。
+
+2026-10-15 起本模块还持有两条**运输追踪口径**的单一真源（事中日报「货件运输」sheet
+与后台「货件运输」看板共用，避免两处各自实现 5 天窗口）：
+  · `TRACK_ARRIVED_DAYS` —— 到货留观天数：到货 5 天内保留追踪记录，超出不追踪；
+  · `MUTE_NOSHIP_HUB_KEYWORD` —— 免标记的未发货渠道关键词：emag「有发货才标记」
+    （Part5 审批中的 emag 记录无货件号，不生成「·未发货」占位段、不进在研卡点；
+      该渠道真发货后按正常货件追踪）。仅 emag，其它渠道未发货仍是卡点。
 """
+
+from datetime import date, datetime
 
 # 运输域部门（段级时间轴里属于"运输"的部门）
 TRANSPORT_DEPTS = ("运输", "4国")
@@ -161,3 +170,89 @@ def transport_exempt_reason(closure, pending_hubs, not_shipped_hubs):
     if closure == "closed":
         return f"运输已闭环：已发货货件全部到货{tail}（免追踪）"
     return f"无已发货货件，运输未形成卡点{tail}（免追踪）"
+
+
+# ---------------------------------------------------------------------------
+# 运输追踪口径（2026-10-15 用户确认）：到货留观 / 已运输天数 / emag 免标记
+# ---------------------------------------------------------------------------
+# 「·未发货」占位段后缀（与 is_transport_segment 同一约定：seg = f"{hub}·未发货"）
+NOSHIP_SEG_SUFFIX = "·未发货"
+
+# 到货留观天数：到货 5 天内保留追踪记录，超出 5 天不追踪。
+# 事中日报「货件运输」sheet 与后台「货件运输」看板共用同一窗口，避免两处漂移。
+TRACK_ARRIVED_DAYS = 5
+
+# 免标记的未发货渠道关键词：emag「有发货才标记」。
+# 实况：emag罗马尼亚 的 Part5 记录长期「审批中/无货件号」——审批未完结前「未发货」
+# 是既定状态而非卡点，天天挂「超时未发货」是误报；该渠道真发货（有货件号）后
+# 按正常货件进运输段/货件运输明细。仅 emag —— 其它渠道（亚马逊等）未发货仍是卡点。
+MUTE_NOSHIP_HUB_KEYWORD = "emag"
+
+
+def _as_date(v):
+    """datetime / date / 'YYYY-MM-DD[ HH:MM[:SS]]' → date；取不到返回 None。
+
+    两个消费方的货件时间形态不同（事中侧是 datetime、看板侧是 _fmt 格式化串），
+    这里统一容错，调用方一律拿到 date 再算天数。
+    """
+    if v is None or v == "":
+        return None
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    s = str(v).strip()
+    if not s:
+        return None
+    for f in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, f).date()
+        except ValueError:
+            continue
+    return None
+
+
+def arrival_ago_days(arr, today=None):
+    """到货至今几天；未到货 / 缺时间 → None（未来到货钳为 0）。
+
+    入参 today 可注入（测试用）；缺省 = 本地今天。
+    """
+    a = _as_date(arr)
+    if a is None:
+        return None
+    if today is None:
+        today = date.today()
+    return max((today - a).days, 0)
+
+
+def elapsed_days(ship, arr, today=None):
+    """已运输天数：已到货 = 发货→到货；在途 = 发货→至今；未发货/无发货日 → None。"""
+    s = _as_date(ship)
+    if s is None:
+        return None
+    end = _as_date(arr)
+    if end is None:
+        if today is None:
+            today = date.today()
+        end = today
+    return max((end - s).days, 0)
+
+
+def shipment_keep(ship, arr, today=None):
+    """该票是否仍在追踪：在途 / 未发货 → True；到货 ≤ TRACK_ARRIVED_DAYS → True；
+    到货超过 TRACK_ARRIVED_DAYS 天 → False（不追踪）。"""
+    ago = arrival_ago_days(arr, today)
+    return ago is None or ago <= TRACK_ARRIVED_DAYS
+
+
+def is_muted_noship_hub(hub):
+    """该渠道仓的「未发货」占位是否免标记（emag 专有，见 MUTE_NOSHIP_HUB_KEYWORD）。"""
+    return MUTE_NOSHIP_HUB_KEYWORD in str(hub or "").lower()
+
+
+def is_muted_noship_segment(seg):
+    """「{hub}·未发货」占位段是否免标记；非占位段一律 False。"""
+    seg = str(seg or "")
+    if not seg.endswith(NOSHIP_SEG_SUFFIX):
+        return False
+    return is_muted_noship_hub(seg[:-len(NOSHIP_SEG_SUFFIX)])

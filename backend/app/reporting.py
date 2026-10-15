@@ -579,11 +579,12 @@ def route_limits(ruleset=None):
 
 
 # ---------------------------------------------------------------------------
-# P0-4 · 事中日报（5 sheets：在研总表 / 超期明细 / 风险预警 / 在研SKU甘特图 / 上报清单）
+# P0-4 · 事中日报（5 张固定：在研总表 / 超期明细 / 风险预警 / 在研SKU甘特图 / 上报清单；
+#                   按需 +2：货件运输 / 豁免备查）
 # ---------------------------------------------------------------------------
 def daily_report(*, category, computed_at, date_str, items, alerts,
                  gantts=None, provisional=False, targets_source="", exempts=None,
-                 notes=None):
+                 notes=None, shipments=None):
     """生成事中日报 xlsx（bytes）。
 
     items    ：inflight overview 的在研 SKU 行（staySeg=当前停留环节，
@@ -602,6 +603,11 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
                 非空时在总表末列「人工登记」按 SKU 填上，随每日生成自动延续；
                 缺省/为空 → 该列全空，行为与本功能上线前完全一致。
                 只影响展示，不影响任何时效/预警/豁免判定。
+    shipments：compute_inflight 的 shipmentTracking（在研 SKU 的真货件逐票，
+               字段见 inflight_service._shipment_tracking_rows）。非空时在
+               「异常上报清单」之后追加「货件运输」sheet —— 货件号/发往地区/
+               已运输天数 + 到货 5 天留观（超出不追踪，>5 天的行已在数据源丢弃）；
+               未发货渠道无货件号不进本表。空 → 不产生空页。
     """
     wb = Workbook()
     dir_label = {"loss": "亏损", "gain": "增益", "none": "无"}
@@ -741,28 +747,68 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
     if r == 4:
         _put(ws5, 4, 1, "（无待上报异常）")
 
-    # ---- Sheet6 豁免备查（2026-10-06 口径合并：不进追踪的 SKU 单列备查） ----
+    # ---- Sheet6 货件运输（2026-10-15：在研 SKU 真货件逐票）----
+    if shipments:
+        ws_ship = wb.create_sheet("货件运输")
+        ws_ship["A1"] = ("在研 SKU 货件运输（Part5 发货 × Part8 到货按货件号配对 · "
+                         "已到货票到货 5 天内保留，超出不追踪 · 未发货渠道无货件号不进本表）")
+        ws_ship["A1"].font = TITLE_FONT
+        _head_row(ws_ship, 3, ["SKU", "型号", "货件号", "发往地区", "运输方式",
+                               "发货日期", "到货日期", "已运输(天)", "目标(天)",
+                               "状态"],
+                  widths=[14, 20, 20, 14, 11, 12, 12, 10, 9, 16])
+        r = 4
+        for x in shipments:
+            _put(ws_ship, r, 1, x.get("sku"))
+            _put(ws_ship, r, 2, x.get("model") or "—")
+            _put(ws_ship, r, 3, x.get("trk") or "—")
+            _put(ws_ship, r, 4, x.get("hub") or "—")
+            _put(ws_ship, r, 5, x.get("mode") or "—")
+            _put(ws_ship, r, 6, x.get("ship") or "—",
+                 align=Alignment(horizontal="center"))
+            _put(ws_ship, r, 7, x.get("arr") or "—",
+                 align=Alignment(horizontal="center"))
+            # 已运输天数：在途超目标 → 红字加粗（「持续运输多少天」要能一眼看出超没超）
+            elap = x.get("elapsed")
+            tgt = x.get("target")
+            over = (elap is not None and tgt is not None
+                    and float(elap) > float(tgt))
+            c = _put(ws_ship, r, 8, elap if elap is not None else "—",
+                     align=Alignment(horizontal="center"))
+            if over:
+                c.font = Font(size=10, bold=True, color="C62828")
+            _put(ws_ship, r, 9, tgt if tgt is not None else "—",
+                 align=Alignment(horizontal="center"))
+            if x.get("state") == "已到货":
+                txt, color = f"已到货·留观{x.get('keep')}/5天", "2E7D32"
+            else:
+                txt, color = "在途", "1F4E79"
+            c = _put(ws_ship, r, 10, txt, align=Alignment(horizontal="center"))
+            c.font = Font(size=10, color=color)
+            r += 1
+
+    # ---- Sheet7 豁免备查（2026-10-06 口径合并：不进追踪的 SKU 单列备查） ----
     if exempts:
-        ws6 = wb.create_sheet("豁免备查")
-        ws6["A1"] = ("已移出追踪的 SKU（人工登记 / 换号 / 末端终止作废 / 运输闭环）"
+        ws7 = wb.create_sheet("豁免备查")
+        ws7["A1"] = ("已移出追踪的 SKU（人工登记 / 换号 / 末端终止作废 / 运输闭环）"
                      "—— 前三种与加急预警同口径（真源 app/exemption.py），"
                      "运输闭环真源 app/transport_closure.classify_transport")
-        ws6["A1"].font = TITLE_FONT
-        _head_row(ws6, 3, ["SKU", "型号", "豁免类型", "原因"],
+        ws7["A1"].font = TITLE_FONT
+        _head_row(ws7, 3, ["SKU", "型号", "豁免类型", "原因"],
                   widths=[14, 20, 12, 60])
         kind_label = {"hold": "人工登记", "alias": "换号", "void": "末端终止",
                       "运输闭环": "运输闭环"}
         r = 4
         for x in exempts:
-            _put(ws6, r, 1, x.get("sku"))
-            _put(ws6, r, 2, x.get("model") or "—")
-            c = _put(ws6, r, 3, kind_label.get(x.get("kind"), x.get("kind") or "—"),
+            _put(ws7, r, 1, x.get("sku"))
+            _put(ws7, r, 2, x.get("model") or "—")
+            c = _put(ws7, r, 3, kind_label.get(x.get("kind"), x.get("kind") or "—"),
                      align=Alignment(horizontal="center"))
             c.font = Font(size=10, color="9E9E9E")
-            _put(ws6, r, 4, x.get("reason") or "—")
+            _put(ws7, r, 4, x.get("reason") or "—")
             r += 1
         if r == 4:
-            _put(ws6, 4, 1, "（无豁免 SKU）")
+            _put(ws7, 4, 1, "（无豁免 SKU）")
 
     buf = io.BytesIO()
     wb.save(buf)

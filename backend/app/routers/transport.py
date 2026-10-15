@@ -11,14 +11,25 @@ transport.py — 货件运输看板（GET /api/transport*）
   - 方式名含「海运」归海运，其余归空运；
   - Part5 有渠道仓但无货件号 → noShip 占位（未发货渠道，不计超时）。
 
+追踪口径（2026-10-15 用户确认，与事中日报「货件运输」sheet 共用 transport_closure 真源）：
+  - 逐票带「发往地区（渠道仓）」与「已运输天数」：在途票 = 发货→至今，
+    已到货票 = 发货→到货（不再是只有到货票才有天数）；
+  - 到货 5 天内保留追踪记录（留观 N/5 天），超出 5 天不追踪 —— 到货超
+    TRACK_ARRIVED_DAYS 的票不进 items / 不进 KPI 聚合，只在 KPI 记一笔
+    「已归档」计数（完整历史回复盘单 SKU 货件表 / 数据源 Part5·Part8 查）。
+
 接口：
-  GET /api/transport          KPI + 渠道聚合 + 逐票明细
-  GET /api/transport/export   导出逐票明细 xlsx
+  GET /api/transport          KPI + 渠道聚合 + 逐票明细（= 追踪范围）
+  GET /api/transport/export   导出逐票明细 xlsx（同追踪范围）
 """
+
+from datetime import date
 
 from fastapi import APIRouter, HTTPException
 
 from .review import get_review_data
+from ..transport_closure import (TRACK_ARRIVED_DAYS, arrival_ago_days,
+                                 elapsed_days, shipment_keep)
 
 router = APIRouter(prefix="/api/transport", tags=["transport"])
 
@@ -43,22 +54,43 @@ def _agg(items):
 
 
 def compute_transport(category=None):
-    """全量汇总货件运输（category 缺省 = 默认品类手机膜）。"""
+    """全量汇总货件运输（category 缺省 = 默认品类手机膜）。
+
+    返回的 items = **追踪范围**：在途票 + 未发货占位 + 到货 ≤5 天（留观）的票；
+    到货超 5 天的票不追踪（KPI.archived 记数，完整历史去复盘单 SKU 货件表查）。
+    每票附 elapsed（已运输天数）/ arrivedAgo（到货至今几天）/ track（追踪状态）。
+    """
     data = get_review_data(category)
     row_by_sku = {r["sku"]: r for r in data["rows"]}
+    today = date.today()
 
     items = []
+    archived = 0                    # 到货超 5 天、已不追踪的票数（透明计数）
     for sku, det in data["skuDetails"].items():
         row = row_by_sku.get(sku, {})
         for s in det.get("shipments") or []:
             days = s.get("days")
             target = s.get("target")
-            if s.get("noShip"):
+            ship, arr = s.get("ship"), s.get("arr")
+            no_ship = bool(s.get("noShip"))
+            # 到货 5 天内保留，超出不追踪（在途/未发货无到货时间 → 恒保留）
+            if not shipment_keep(ship, arr, today):
+                archived += 1
+                continue
+            ago = arrival_ago_days(arr, today)
+            if no_ship:
                 judge = "未发货"
             elif days is None:
                 judge = "未到货"
             else:
                 judge = "超时" if float(days) > float(target or 0) else "达标"
+            # 追踪状态：在途（已发货未到货）/ 未发货（noShip 占位）/ 留观N/5天（刚到货）
+            if no_ship:
+                track = "未发货"
+            elif ago is None:
+                track = "在途"
+            else:
+                track = f"留观{ago}/{TRACK_ARRIVED_DAYS}天"
             items.append({
                 "sku": sku,
                 "model": row.get("model") or "",
@@ -66,24 +98,29 @@ def compute_transport(category=None):
                 "valid": bool(det.get("valid")),
                 "trk": s.get("trk") or "",
                 "hub": s.get("hub") or "",
-                "ship": s.get("ship"),
-                "arr": s.get("arr"),
+                "ship": ship,
+                "arr": arr,
                 "days": days,
+                "elapsed": elapsed_days(ship, arr, today),
+                "arrivedAgo": ago,
+                "track": track,
                 "target": target,
                 "mode": s.get("mode") or "",
                 "cls": s.get("cls") or "",
                 "stallDays": s.get("stallDays"),
-                "noShip": bool(s.get("noShip")),
+                "noShip": no_ship,
                 "judge": judge,
                 "bottleneck": row.get("bottleneck"),
             })
 
-    # 排序：超时在前（超时幅度降序），其次未到货/未发货，最后达标
+    # 排序：超时在前（超时幅度降序），其次未到货/未发货，最后达标。
+    # 未到货组内按已运输天数降序 —— 「持续运输多少天」越长的越该先催。
     def _sort_key(i):
         rank = {"超时": 0, "未到货": 1, "未发货": 2, "达标": 3}.get(i["judge"], 9)
         over = (float(i["days"]) - float(i["target"] or 0)
                 if i["judge"] == "超时" else 0)
-        return (rank, -over, i["sku"], i["trk"])
+        transit = -(i["elapsed"] or 0) if i["judge"] == "未到货" else 0
+        return (rank, -over, transit, i["sku"], i["trk"])
 
     items.sort(key=_sort_key)
 
@@ -119,6 +156,9 @@ def compute_transport(category=None):
         "skuCount": len({i["sku"] for i in items}),
         "overRate": round(100 * kpi["over"] / kpi["arrived"], 1)
         if kpi["arrived"] else 0.0,
+        # 到货超 5 天已不追踪的票（完整历史回复盘查；见模块 docstring）
+        "archived": archived,
+        "retentionDays": TRACK_ARRIVED_DAYS,
     })
 
     return {
@@ -154,8 +194,8 @@ def export_transport(category: str = None):
         raise HTTPException(status_code=500, detail=f"导出失败: {e}")
 
     cols = ["SKU", "型号", "开发类型", "是否已闭环", "货件号", "渠道仓",
-            "运输方式", "目标(天)", "发货", "到货", "运输(天)", "判定",
-            "未发货停滞(天)", "头号卡点"]
+            "运输方式", "目标(天)", "发货", "到货", "已运输(天)", "判定",
+            "追踪状态", "未发货停滞(天)", "头号卡点"]
     out = []
     for i in data["items"]:
         b = i.get("bottleneck") or {}
@@ -167,8 +207,10 @@ def export_transport(category: str = None):
             "运输方式": i["mode"],
             "目标(天)": i["target"] if i["target"] is not None else "",
             "发货": i["ship"] or "", "到货": i["arr"] or "",
-            "运输(天)": i["days"] if i["days"] is not None else "",
+            "已运输(天)": (i["elapsed"] if i.get("elapsed") is not None
+                          else (i["days"] if i["days"] is not None else "")),
             "判定": i["judge"],
+            "追踪状态": i.get("track") or "",
             "未发货停滞(天)": i["stallDays"] if i.get("stallDays") is not None else "",
             "头号卡点": f"{b['dept']}·{b['seg']}({b['days']}天)" if b else "",
         })

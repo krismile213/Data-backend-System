@@ -30,6 +30,13 @@ inflight_service.py — 事中引擎（P0-4 数据面 / P0-7 清单 / P1-1 进�
     已换号旧号、末端终止（前面 Part 已结束、末尾 Part 全终止）的 SKU
     全部混进「在研 SKU 状态总表」——终止的单据也在被追踪。
     豁免 SKU 移出追踪后不吞数据：items 之外单列 exempted 备查（日报出「豁免备查」sheet）。
+  · emag「有发货才标记」（2026-10-15，**仅事中日报口径**）：Part5 审批中的 emag
+    记录（无货件号）不生成「·未发货」占位段、不进在研卡点 —— 审批未完结前「未发货」
+    是既定状态而非卡点；该渠道真发货后按正常货件追踪。网页在研清单/复盘不受影响
+    （compute_inflight / get_inflight_data 的 mute_emag_noship 开关，日报侧传 True）。
+  · 货件运输（2026-10-15）：日报「货件运输」sheet 逐票列在研 SKU 的真货件
+    （货件号/发往地区/已运输天数）；到货 5 天内保留、超出不追踪
+    （窗口常量 transport_closure.TRACK_ARRIVED_DAYS，与后台货件运输看板同源）。
 """
 
 import json
@@ -40,15 +47,18 @@ from datetime import date, datetime, timedelta
 from . import exemption
 from .category_rules import rules_for
 from .config import STATE_DIR, list_batches
-from .transport_closure import (classify_transport, is_transport_segment,
-                               transport_exempt_reason)
+from .transport_closure import (TRACK_ARRIVED_DAYS, arrival_ago_days,
+                                classify_transport, elapsed_days,
+                                is_muted_noship_segment, is_transport_segment,
+                                shipment_keep, transport_exempt_reason)
 
 _SNAP_FILE = STATE_DIR / "inflight_snapshots.json"
 _REPORT_INDEX = STATE_DIR / "daily_reports_index.json"
 _SNAP_RETENTION_DAYS = 365
 
 # 日报落盘名前缀。原为「复盘报告_」，与单 SKU 的「复盘报告 md」撞名，而内容其实
-# 是**事中日报**（5 sheets）——2026-09-24 改名，语义对齐。
+# 是**事中日报**（5 张固定 + 货件运输/豁免备查按需，最多 7 张）——2026-09-24 改名，
+# 语义对齐。
 _REPORT_PREFIX = "事中日报_"
 # 改名前的旧前缀：同批次目录里同一天的旧名文件会在生成时随迁删除，
 # 否则索引条目一换，旧文件就永远没人再引用（既不会被保留期清理，也不会被下载）。
@@ -108,6 +118,48 @@ def seg_state(row, today=None, ratio=0.85):
                 "warnLine": warn_line, "over": None}
     return {"state": ST_RUNNING, "elapsed": elapsed, "target": target,
             "warnLine": warn_line, "over": None}
+
+
+def _drop_muted_noship(seg_rows):
+    """剔除 emag「·未发货」占位段（2026-10-15 用户口径：有发货才标记）。
+
+    只认段行上的 `noShip` 标记 + seg 名（`{hub}·未发货`），非占位段一律不动；
+    仅 emag（MUTE_NOSHIP_HUB_KEYWORD），其它渠道未发货仍是卡点（G597 回归锁）。
+    """
+    return [r for r in seg_rows
+            if not (r.get("noShip") and is_muted_noship_segment(r.get("seg")))]
+
+
+def _shipment_tracking_rows(sku, model, shipments, today):
+    """在研 SKU 的货件行 → 事中日报「货件运输」sheet 数据源（纯函数）。
+
+    口径（2026-10-15 用户确认，与后台货件运输看板共用 transport_closure 真源）：
+      · 只列**真货件**（有货件号且非未发货占位）—— 未发货渠道没有运输号/发货日，
+        「哪个运输号 / 发往哪 / 运多少天」都无从谈起，且与总表「·未发货」标记重复；
+      · 已运输天数 = elapsed（在途：发货→至今；已到货：发货→到货）；
+      · 到货 5 天内保留（留观 N/5 天），超出 5 天不追踪（shipment_keep 直接丢）。
+    入参 today 可注入（测试用）；缺省 = 本地今天。
+    """
+    rows = []
+    for it in shipments or []:
+        if it.get("noShip") or not it.get("trk"):
+            continue
+        ship, arr = it.get("ship"), it.get("arr")
+        if not shipment_keep(ship, arr, today):
+            continue                # 到货超 5 天 → 不追踪
+        ago = arrival_ago_days(arr, today)
+        rows.append({
+            "sku": sku, "model": model,
+            "trk": it.get("trk") or "",
+            "hub": it.get("hub") or "",
+            "mode": it.get("mode") or "",
+            "ship": _iso_date(ship), "arr": _iso_date(arr),
+            "elapsed": elapsed_days(ship, arr, today),
+            "target": it.get("target"),
+            "state": "已到货" if arr else "在途",
+            "keep": ago,            # 已到货行 = 到货至今几天（0~5）；在途行 = None
+        })
+    return rows
 
 
 def _seg_public(row, st):
@@ -262,8 +314,13 @@ def _load_all(category):
     return by_sku
 
 
-def compute_inflight(category=None):
+def compute_inflight(category=None, *, mute_emag_noship=False):
     """事中全量计算。category 缺省 = 默认品类（手机膜）。
+
+    mute_emag_noship=True（事中日报专用，见 generate_daily_report）：emag「·未发货」
+    占位段不参与段状态机 —— 审批未完结前「未发货」是既定状态而非卡点；该渠道真发货
+    （有货件号）后按正常货件进运输段/货件运输明细。⚠️ 只影响事中日报口径，复盘
+    （review）与网页在研清单（默认 False）保留完整记录不变。
 
     返回 {computedAt, **describe, inResearchCount, overdueSkuCount, warnCount,
           multiRoundCount, todayNewNodes, items, skuDetails, exemptCount, exempted}
@@ -296,6 +353,7 @@ def compute_inflight(category=None):
     exempted = []                  # 豁免备查（不进追踪，也不吞数据）
     transport_exempted = []        # 运输闭环免追踪备查（不吞数据）
     transport_in_transit = []      # 运输在途·逐票（前端④：有未到货票 / 有未发货渠道的 SKU）
+    shipment_tracking = []         # 货件运输·逐票（日报 sheet；在研 SKU 的真货件）
 
     for sku, info in sorted(by_sku.items()):
         if info["all_terminated"]:
@@ -347,6 +405,11 @@ def compute_inflight(category=None):
                 seg_rows, nodes_iso = [], {}
                 multi_round, root_cause, part_stat = {}, None, {}
 
+        # emag「有发货才标记」（2026-10-15，仅日报口径）：剔除该渠道「·未发货」
+        # 占位段后再进状态机 —— 审批中的 emag 不是卡点；真发货后由正常运输段接手。
+        if mute_emag_noship:
+            seg_rows = _drop_muted_noship(seg_rows)
+
         # ---- 段状态机 + 汇总 ----
         segs_out, warn_list, over_list, state_rows = [], [], [], []
         for r in seg_rows:
@@ -373,6 +436,8 @@ def compute_inflight(category=None):
         # ⚠️ 反向边界（必须守住）：只要还有任一段处在「未开始 / 进行中 / 预警 / 超期」——
         # 尤其是运输域「·未发货」占位段（Part5 已立项渠道但压根没发货）——就**不是**在售品，
         # 必须保留追踪（G597 那种"发货期限没过、都还没发货"的，绝不能丢开在研）。
+        # ⚠️ emag 例外（2026-10-15 用户口径，仅日报）：emag「·未发货」占位段已在上面
+        # _drop_muted_noship 剔除，不进 state_rows —— 该渠道"有发货才标记"。
         shipments = build_shipments(parts_docs, rs)
         closure_info = classify_transport(shipments)
         closure = closure_info["closure"]
@@ -465,6 +530,10 @@ def compute_inflight(category=None):
         status = ST_OVER if over_list else (ST_WARN if warn_list else ST_RUNNING)
         owner = ((stay_row or {}).get("executor")
                  or (stay_row or {}).get("owner") or "")
+        # 货件运输·逐票（日报 sheet 数据源）：只收**落进在研 items** 的 SKU 的真货件，
+        # 到货 5 天外的已在 _shipment_tracking_rows 里丢掉（超出不追踪）。
+        shipment_tracking.extend(
+            _shipment_tracking_rows(sku, info["model"], shipments, today))
         items.append({
             "sku": sku, "model": info["model"],
             "staySeg": (stay_row or {}).get("seg"),
@@ -497,6 +566,9 @@ def compute_inflight(category=None):
     items.sort(key=lambda x: (x["stayDaysLeft"] is None,
                               x["stayDaysLeft"] if x["stayDaysLeft"] is not None else 0,
                               -len(x["warnSegs"]), x["sku"]))
+    # 货件行按 SKU 聚块、同 SKU 按发货日期（缺时间沉底）—— 对着总表一行行核对
+    shipment_tracking.sort(key=lambda r: (r["sku"], r["ship"] or "9999-99-99",
+                                          r["trk"]))
     return {
         "computedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
         **rs.describe(),
@@ -515,6 +587,14 @@ def compute_inflight(category=None):
         "transportExempted": transport_exempted,
         # 运输在途·逐票（前端④催物流）：有未到货票 / 有未发货渠道的 SKU
         "transportInTransit": transport_in_transit,
+        # 货件运输·逐票（事中日报「货件运输」sheet）：在研 SKU 的真货件，
+        # 已运输天数 + 到货留观 ≤5 天（口径真源 transport_closure）
+        "shipmentTracking": shipment_tracking,
+        "shipmentTrackingDef": {
+            "trackArrivedDays": TRACK_ARRIVED_DAYS,
+            "note": ("只列在研 SKU 的真货件（有货件号）；到货 5 天内保留，"
+                     "超出不追踪；未发货渠道无货件号不进本表"),
+        },
         "transportDef": {
             "l4Name": rs.l4[1],
             "note": "在售品（所有段已完成且运输无未到货）→ 运输域不再是卡点，免追踪",
@@ -531,16 +611,17 @@ _cache_by_cat = {}
 _cache_lock = threading.Lock()
 
 
-def get_inflight_data(category=None):
+def get_inflight_data(category=None, *, mute_emag_noship=False):
     cat = rules_for(category).key
     from .routers.review import fingerprint_for
     fp = fingerprint_for(cat)
+    slot_key = (cat, bool(mute_emag_noship))   # 两种口径各一份缓存
     with _cache_lock:
-        slot = _cache_by_cat.get(cat)
+        slot = _cache_by_cat.get(slot_key)
         if slot is not None and slot["fp"] == fp:
             return slot["data"]
-        data = compute_inflight(cat)
-        _cache_by_cat[cat] = {"fp": fp, "data": data}
+        data = compute_inflight(cat, mute_emag_noship=mute_emag_noship)
+        _cache_by_cat[slot_key] = {"fp": fp, "data": data}
         return data
 
 
@@ -550,7 +631,10 @@ def invalidate(category=None):
         if category is None:
             _cache_by_cat.clear()
         else:
-            _cache_by_cat.pop(rules_for(category).key, None)
+            key = rules_for(category).key
+            for slot in [k for k in _cache_by_cat
+                         if isinstance(k, tuple) and k[0] == key]:
+                _cache_by_cat.pop(slot, None)
 
 
 # ---------------------------------------------------------------------------
@@ -929,6 +1013,10 @@ def generate_daily_report(category=None, date_str=None):
     （无豁免时仍是 5 sheets，不产生空页）。
     人工登记备注（2026-10-15）：读 `资产文件\事中日报人工登记.xlsx` → {SKU: 备注}，
     填进总表末列，随每日生成自动延续（真源与口径见 sku_note.py）。读不到=全空，不阻断。
+    emag「有发货才标记」（2026-10-15）：日报口径走 mute_emag_noship=True ——
+    审批中的 emag「·未发货」占位段不进日报；真发货后按正常货件追踪。
+    货件运输 sheet（2026-10-15）：在研 SKU 的真货件逐票（货件号/发往地区/已运输
+    天数），到货 5 天内保留、超出不追踪；无货件时不产生空页。
     """
     from .reporting import daily_report as _daily_xlsx
     from .sku_note import read_notes
@@ -936,7 +1024,7 @@ def generate_daily_report(category=None, date_str=None):
 
     rs = rules_for(category)
     cat = rs.key
-    data = get_inflight_data(cat)
+    data = get_inflight_data(cat, mute_emag_noship=True)
     alerts = compute_alerts_today(cat, data=data)
     today = (date_str or datetime.now().strftime("%Y-%m-%d"))
 
@@ -955,6 +1043,8 @@ def generate_daily_report(category=None, date_str=None):
     exempts = list(data.get("exempted") or [])
     exempts.extend(data.get("transportExempted") or [])
     exempts = exempts or None
+    # 货件运输·逐票（在研 SKU 真货件；到货 >5 天已在 compute 侧丢弃）
+    shipments = data.get("shipmentTracking") or None
     gantts = _gantt_records(data)
     notes, note_warns = read_notes()   # 登记表异常只随返回值告警，不阻断日报
     # 落值条数 = 登记表里**本批次在研**的 SKU 命中的备注数（不是登记表总条数：
@@ -965,7 +1055,7 @@ def generate_daily_report(category=None, date_str=None):
         category=cat, computed_at=data["computedAt"], date_str=today,
         items=data["items"], alerts=alerts, gantts=gantts,
         provisional=rs.provisional, targets_source=rs.targets_source,
-        exempts=exempts, notes=notes)
+        exempts=exempts, notes=notes, shipments=shipments)
     try:
         with open(path, "wb") as f:
             f.write(content)
@@ -986,6 +1076,7 @@ def generate_daily_report(category=None, date_str=None):
         "exemptCount": data.get("exemptCount", 0),
         "transportExemptCount": data.get("transportExemptCount", 0),
         "noteCount": note_applied,
+        "shipmentCount": len(shipments or []),
         "createdAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
     with _lock:
@@ -994,12 +1085,16 @@ def generate_daily_report(category=None, date_str=None):
         entries.append(entry)
         _save_report_index(entries)
     cleanup_expired_reports()
-    return {"path": str(path), "sheets": 6 if exempts else 5, "date": today,
+    # sheets = 总表/超期/预警/甘特/上报（5）+ 货件运输（有货件时）+ 豁免备查（有豁免时）
+    return {"path": str(path),
+            "sheets": 5 + (1 if shipments else 0) + (1 if exempts else 0),
+            "date": today,
             "skuCount": entry["skuCount"], "overdueCount": entry["overdueCount"],
             "warnCount": entry["warnCount"],
             "exemptCount": entry["exemptCount"],
             "transportExemptCount": entry.get("transportExemptCount", 0),
             "noteCount": entry["noteCount"], "noteWarns": note_warns,
+            "shipmentCount": entry["shipmentCount"],
             "category": cat,
             "targetsProvisional": rs.provisional,
             "legacyRemoved": dropped}
