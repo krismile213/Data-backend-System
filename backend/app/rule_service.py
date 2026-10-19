@@ -44,7 +44,7 @@ def _default_rules():
         "product_target_generic": 23,      # 素材通用产品段目标(天)
         "product_target_non_generic": 38,  # 素材不通用产品段目标(天)
         "ops_target": 7,                   # 运营段目标(天)
-        "proposal_stale_days": 75,         # 提案→取数超期阈值(天)
+        "proposal_stale_days": 1,          # 提案→取数超期阈值(天)；2026-10-19 由 75 收紧到 1（锚点改「提案日期」）
         "air_good": 49, "air_limit": 60,   # 空运 优/底线(天)
         "sea_good": 69, "sea_limit": 69,   # 海运 优/底线(天)
         "country_min": 14,                 # 到货国数达标线
@@ -82,7 +82,7 @@ RULE_META = {
     "ops_target": {"label": "运营段目标(天)",
                    "desc": "素材交付→max(上架,广告设置)"},
     "proposal_stale_days": {"label": "提案→取数超期(天)",
-                            "desc": "超过即 P0 预警"},
+                            "desc": "超过即 P0 预警；锚点=Part1「提案日期」，未填则回退创建时间"},
     "air_good": {"label": "空运优线(天)", "desc": "≤该值为优"},
     "air_limit": {"label": "空运底线(天)", "desc": "超过即 P0 预警"},
     "sea_good": {"label": "海运优线(天)", "desc": "≤该值为优"},

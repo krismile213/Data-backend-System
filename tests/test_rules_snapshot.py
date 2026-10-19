@@ -198,7 +198,7 @@ class TestOverrideApplied:
         assert mod.NOT_SHIPPED_GRACE_DAYS == 22
         assert mod.ASSESS_LIMIT == 60
         seg = {row[1]: row[4] for row in mod.SEGS}
-        assert seg["提案→取数"] == 75                 # 回退默认
+        assert seg["提案→取数"] == 1                  # 回退默认（2026-10-19 由 75 收紧）
         assert mod._snap_warn and any("非数值" in w for w in mod._snap_warn)
         # 判定层不再因 str 目标报 TypeError
         assert mod.judge_seg(3, mod.L4[3]) == "✓"

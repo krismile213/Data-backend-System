@@ -5,12 +5,12 @@ alerts.py — SKU 加急预警引擎（GET /api/alerts）
 口径 1:1 移植自 流程复盘/route_check_sys.py 的 write_warn_md：
 
   只列未闭环（复盘无效）SKU，按优先级排列，停滞越久越靠前：
-    P0 = 空运/海运超底线（空>60 / 海>69 判定=差） / 提案→取数超75天 / Part7 卡点停滞>7天
+    P0 = 空运/海运超底线（空>60 / 海>69 判定=差） / 提案→取数超阈值（2026-10-19 起 1 天） / Part7 卡点停滞>7天
     P1 = 产品段超时（通用>23 / 不通用>38） / 停滞>7天 / 缺到货渠道（有发货未到货）
     P2 = 尚在阶段时限内的推进中 SKU（到期自动升级）
 
   关键段：
-    提案→取数  = Part1 提案确认 → 取得手机数据（>75 天 ⚠，P0）
+    提案→取数  = Part1 提案日期（未填回退提案确认） → 取得手机数据（>1 天 ⚠，P0）
     产品段     = 起点(膜=取数/壳=提案) → 素材交付（=Part6「产品营销素材加工」，素材通用≤23 / 不通用≤38，✗ 计 P1）
     运营段     = 素材交付 → max(上架, 广告设置)（≤7 天）
     空运/海运  = 取数 → 该方式末批到货（Part5×Part8 按货件号关联；渠道映射：
@@ -279,6 +279,28 @@ def _node_time(sku_data, part, action, sys_cols=None):
                 if v and (t is None or v > t):
                     t = v
     return t
+
+
+# 钉钉 Part1 新增字段（2026-10 起）：业务真实提案日。
+# ⚠️ 仅作为**新增优先列**：无值仍走改造前的审批动作口径（手机膜=提案确认），
+#    换成创建时间会改动全部存量预警数字，属独立变更，需单独验收。
+_PROPOSAL_SYS_COLS = ("提案日期",)
+
+
+def _proposal_time(sku_data, part, action):
+    """提案时间：优先「提案日期」，无值回退既有审批动作口径。
+
+    逐单按创建时间升序取首个非空——多轮提交时取最早一轮，口径同复盘
+    `extract_node_times`，避免把后补轮当成提案起点。
+    """
+    docs = sorted(sku_data["parts"].get(part) or [],
+                  key=lambda d: d.get("create") or datetime.min)
+    for col in _PROPOSAL_SYS_COLS:
+        for d in docs:
+            v = _parse_dt(_clean(d["raw"].get(col)))
+            if v:
+                return v
+    return _node_time(sku_data, part, action)
 
 
 def _generic_material(sku_data):
@@ -558,7 +580,7 @@ def compute_alerts(category=None):
             })
             continue
 
-        t_prop = _node_time(data, "Part1", prop_action)
+        t_prop = _proposal_time(data, "Part1", prop_action)
         t_fetch = _nt(data, "fetch")
         # t_prod_end = 素材交付（Part6 产品营销素材加工，audit 优先）
         t_prod_end = _nt(data, "deliver")

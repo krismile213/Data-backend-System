@@ -82,9 +82,10 @@ def test_membrane_ruleset_matches_legacy_module_exactly():
         spec = rs.nodes[name]
         assert spec["part"] == part
         assert spec["act"] == (act or "")
-        expect_sys = (str(sys_field),) if sys_field else ()
+        expect_sys = ((str(sys_field),) if isinstance(sys_field, str) and sys_field
+                      else tuple(str(x) for x in (sys_field or ()) if x))
         assert spec["sys"] == expect_sys, f"节点 {name} 系统列不一致"
-    assert rs.proposal_warn_days == 75          # 提案→取数 异常预警线
+    assert rs.proposal_warn_days == 1           # 提案→取数 异常预警线（2026-10-19 由 75 收紧）
     assert rs.proposal_backfilled is False      # 手机膜不做"补录"宽容
 
 
@@ -301,3 +302,42 @@ def test_assessment_start_node_is_category_aware():
     # 手机膜口径：起点=取数（本例缺）→ 无法评估
     assert compute(sku="G", nodes=nodes, items=items, product=None,
                    rules=rules, start_node="取数") is None
+
+
+# ---------------------------------------------------------------------------
+# ⑥ 提案锚点：钉钉 Part1「提案日期」优先，未填回退「创建时间」（2026-10-19）
+# ---------------------------------------------------------------------------
+def test_membrane_proposal_anchor_prefers_proposal_date():
+    """新字段接入 + 目标 1 天：提案日 10-05 → 取数 10-07 应判「超1天」而非反向。
+
+    背景：审批单常在业务提案后几天才提交，只用「创建时间」会把
+    提案→取数 算成负数（G602/G603 实测 -3 天），在复盘里误标 ⚠反向。
+    """
+    from datetime import datetime
+
+    from app.routers.review import _seg_judge, extract_node_times
+
+    def _doc(raw):
+        return {"doc_id": "x", "part": "Part1", "sku": "G602", "model": "M",
+                "approval_no": "1", "status": "已结束",
+                "create_time": datetime(2026, 10, 10, 14, 36),
+                "raw": raw, "nodes": []}
+
+    rs = rules_for("手机膜")
+    raw = {"创建时间": "2026-10-10 14:36:57", "提案日期": "2026-10-05",
+           "手机数据取得日期": "2026-10-07"}
+
+    nd = extract_node_times({"Part1": [_doc(dict(raw))]}, ruleset=rs)
+    assert nd["提案"]["sys_field"] == "提案日期"          # 命中候选链第 1 列
+    assert nd["提案"]["adopted"] == datetime(2026, 10, 5)
+    assert nd["取数"]["adopted"] == datetime(2026, 10, 7)
+    # 2 天 > 目标 1 天
+    assert _seg_judge(2.0, rs.proposal_warn_days, "提案→取数") == "✗超1天"
+
+    # 老单据没有「提案日期」→ 回退创建时间，不掉时刻（也不会漏掉这一段）
+    raw.pop("提案日期")
+    nd2 = extract_node_times({"Part1": [_doc(dict(raw))]}, ruleset=rs)
+    assert nd2["提案"]["sys_field"] == "创建时间"
+    assert nd2["提案"]["adopted"] == datetime(2026, 10, 10, 14, 36, 57)
+    # 这正是改前的负值场景：取数(10-07) 早于建单(10-10)
+    assert nd2["取数"]["adopted"] < nd2["提案"]["adopted"]

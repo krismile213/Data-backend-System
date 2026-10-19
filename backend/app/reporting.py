@@ -290,7 +290,7 @@ def _causal_sheet(ws, root_cause, assess, detail):
         assess.get("direction", "none")]
     rows = [
         ("口径", f"{assess.get('basis')}；时钟起点=取数"
-                 f"（提案→取数 75 天只挂异常、不进考核）"),
+                 f"（提案→取数 1 天只挂异常、不进考核）"),
         ("取数→到货", f"{assess.get('spanDays')} 天"),
         ("推迟底线", f"{assess.get('limit')} 天（对齐路线总评级底线）"),
         ("推迟天数", f"{assess.get('delayDays')} 天 → {dir_label}"),
