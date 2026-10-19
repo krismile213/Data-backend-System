@@ -267,6 +267,9 @@ def test_daily_report_sheets():
               "staySeg": "取数→签样", "staySegDept": "运营",
               "stayElapsed": 12, "stayTarget": 10, "stayDaysLeft": -2,
               "warnSegs": [], "multiRound": False,
+              # 2026-10-19：「超期环节」列的数据源 —— 状态=超期看全 SKU 任一段，
+              # 与「距超时」(当前停留环节) 口径不同，必须写明超的是哪一段
+              "overSegs": [{"seg": "取数→签样", "dept": "运营", "overDays": 2}],
               "rootCause": {"type": "搁置", "seg": "取数→签样"}, "owner": "李四"}]
     content = _daily_xlsx(category="手机膜", computed_at="2026-09-22 17:00",
                           date_str="2026-09-22", items=items, alerts=alerts,
@@ -282,6 +285,11 @@ def test_daily_report_sheets():
     # 第 8 列 = 距超时（负 → 「已超N天」人话，不再是裸数字）
     assert ws1.cell(row=4, column=8).value == "已超2天"
     assert "已超" in str(ws1.cell(row=4, column=8).value)
+    # 第 9 列 = 超期环节（2026-10-19）：写明"超的是哪一段"，与第 8 列各说各段，
+    # 消除「状态=超期」+「距超时=剩N天」同行的观感矛盾
+    assert ws1.cell(row=3, column=9).value == "超期环节"
+    assert ws1.cell(row=3, column=10).value == "预警段数"
+    assert ws1.cell(row=4, column=9).value == "取数→签样 超2天"
     # 甘特 sheet：空记录也要有占位（不抛异常）
     assert "甘特" in ws4.title
     # 上报清单：先当日新超期后持续超期，类型列可区分

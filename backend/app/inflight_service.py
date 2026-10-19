@@ -542,6 +542,12 @@ def compute_inflight(category=None, *, mute_emag_noship=False):
             "stayTarget": (stay_st or {}).get("target"),
             "stayDaysLeft": stay_left,      # 距超时天数（负 = 已超期 N 天）
             "warnSegs": [w[1].get("seg") for w in warn_list],
+            # 超期段明细（2026-10-19）：status=超期 判的是"任一未完成段超期"，
+            # 而 stayDaysLeft 只看**当前停留环节** —— 两个口径不同，总表必须标明
+            # 到底哪一段超了，否则同一行会出现「超期」+「剩N天」的观感矛盾
+            # （G599/G600/G601 实测：签样→寄送 7天/目标5天 超2天，当前停留还未到期）。
+            "overSegs": [{"seg": o[1].get("seg"), "dept": o[1].get("dept"),
+                          "overDays": o[2].get("over")} for o in over_list],
             "status": status, "multiRound": bool(multi_round.get("flag")),
             "rootCause": root_cause, "owner": owner,
             "shipClosure": closure,                   # 运输闭环态（closed/pending/none）

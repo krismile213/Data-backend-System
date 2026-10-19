@@ -623,11 +623,11 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
                      f"「{targets_source or '继承名义值'}」判定，仅供预警参考，"
                      "不得作为既定 KPI 引用；业务确认后须重跑本日报。")
         ws1["A2"].font = Font(bold=True, size=10, color="EF6C00")
-        ws1.merge_cells(start_row=2, start_column=1, end_row=2, end_column=13)
+        ws1.merge_cells(start_row=2, start_column=1, end_row=2, end_column=14)
     _head_row(ws1, 3, ["SKU", "型号", "状态", "当前停留环节", "部门", "已停留(天)",
-                       "目标(天)", "距超时(天)", "预警段数", "多轮提交",
+                       "目标(天)", "距超时(天)", "超期环节", "预警段数", "多轮提交",
                        "核心原因", "责任人", "人工登记"],
-              widths=[14, 18, 8, 22, 8, 10, 9, 11, 9, 10, 26, 10, 26])
+              widths=[14, 18, 8, 22, 8, 10, 9, 11, 26, 9, 10, 26, 10, 26])
     r = 4
     for it in items or []:
         _put(ws1, r, 1, it.get("sku"))
@@ -657,19 +657,32 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
             dl_color, dl_bold = ("EF6C00", True) if dl <= 2 else ("2E7D32", False)
         c = _put(ws1, r, 8, dl_txt, align=Alignment(horizontal="center"))
         c.font = Font(size=10, bold=dl_bold, color=dl_color)
-        _put(ws1, r, 9, len(it.get("warnSegs") or []),
+        # 超期环节（2026-10-19）：状态=超期 判的是「任一未完成段超期」，而上一列
+        # 「距超时」只看当前停留环节 —— 两列口径不同，同一行会同时出现
+        # 「超期」+「剩3天」。这里写明超的到底是哪一段（G599/G600/G601 实例：
+        # 签样→寄送 7天/目标5天 超2天，而当前停留的采购段还剩3天）。
+        _ov = []
+        for _o in (it.get("overSegs") or []):
+            _od = _o.get("overDays")
+            _ov.append(f"{_o.get('seg') or '—'} "
+                       + (f"超{_od:g}天" if isinstance(_od, (int, float))
+                          else "超期"))
+        c = _put(ws1, r, 9, "；".join(_ov) if _ov else "—")
+        if _ov:
+            c.font = Font(size=10, color="C62828")
+        _put(ws1, r, 10, len(it.get("warnSegs") or []),
              align=Alignment(horizontal="center"))
-        _put(ws1, r, 10, "⚠ 是" if it.get("multiRound") else "—")
+        _put(ws1, r, 11, "⚠ 是" if it.get("multiRound") else "—")
         rc = it.get("rootCause") or {}
-        _put(ws1, r, 11, (f"{rc.get('type')}({rc.get('seg')})"
+        _put(ws1, r, 12, (f"{rc.get('type')}({rc.get('seg')})"
                           if rc.get("type") else "—"))
-        _put(ws1, r, 12, it.get("owner") or "—")
+        _put(ws1, r, 13, it.get("owner") or "—")
         # 人工登记（2026-10-15）：跟着日期走的在研备注，真源在生成器之外的
         # `资产文件\事中日报人工登记.xlsx`（见 sku_note.py）—— 日报每天被
         # 幂等覆盖，备注不能手填在表里。留空即无备注。
         _note = (notes or {}).get(it.get("sku") or "")
         if _note:
-            c = _put(ws1, r, 13, _note)
+            c = _put(ws1, r, 14, _note)
             c.font = Font(size=10, bold=True, color="1F4E79")
         r += 1
     if r == 4:

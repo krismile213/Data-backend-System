@@ -167,13 +167,14 @@ def test_daily_report_column_written():
                           date_str="2026-10-15", items=_items(), alerts=_ALERTS,
                           gantts=[], notes={"G591": "暂时不弄了"})
     ws = _sheet1(content)
-    # 表头第 13 列 = 人工登记，前 12 列原样不动
-    assert ws.cell(row=3, column=13).value == "人工登记"
-    assert ws.cell(row=3, column=12).value == "责任人"
+    # 表头第 14 列 = 人工登记（2026-10-19 起第 9 列插入「超期环节」，整体右移一位），
+    # 前 13 列（含第 13 列「责任人」）不动
+    assert ws.cell(row=3, column=14).value == "人工登记"
+    assert ws.cell(row=3, column=13).value == "责任人"
     # 有备注的 SKU 填上，没备注的留空
-    assert ws.cell(row=4, column=13).value == "暂时不弄了"
+    assert ws.cell(row=4, column=14).value == "暂时不弄了"
     assert ws.cell(row=5, column=1).value == "G599"
-    assert ws.cell(row=5, column=13).value in (None, "")
+    assert ws.cell(row=5, column=14).value in (None, "")
 
 
 def test_daily_report_without_notes_backwards_compatible():
@@ -181,9 +182,9 @@ def test_daily_report_without_notes_backwards_compatible():
     content = _daily_xlsx(category="手机膜", computed_at="x", date_str="d",
                           items=_items(), alerts=_ALERTS, gantts=[])
     ws = _sheet1(content)
-    assert ws.cell(row=3, column=13).value == "人工登记"
+    assert ws.cell(row=3, column=14).value == "人工登记"
     for r in (4, 5):
-        assert ws.cell(row=r, column=13).value in (None, "")
+        assert ws.cell(row=r, column=14).value in (None, "")
     # 其它 sheet 不受影响
     wb = load_workbook(io.BytesIO(content))
     assert wb.sheetnames == ["在研SKU状态总表", "超期明细", "风险预警",

@@ -135,10 +135,13 @@ def locate(seg_rows, nodes, parts_docs, multi_round=None, min_days=MIN_DAYS,
 
         from_node, to_node = r.get("from"), r.get("to")
         down_part = node_part.get(to_node)
+        docs_down = parts_docs.get(down_part) or []
+        all_cts = [d.get("create_time") for d in docs_down
+                   if d.get("create_time") is not None]
         # 只有"仍在进行"的下游单据才算这次停滞的启动信号；已结束的单据属历史，
         # 采信它的 create_time 会把 wait 压到 0（G506 的 Part2 单 2025-11-11 就已建、
         # 2026-04-30 才完成，用建单时间会把 170 天停滞算成 0 天，根因就丢了）。
-        cts = [d.get("create_time") for d in (parts_docs.get(down_part) or [])
+        cts = [d.get("create_time") for d in docs_down
                if d.get("create_time") is not None
                and d.get("status") != "已结束"]
         t1 = r.get("t1")
@@ -147,8 +150,16 @@ def locate(seg_rows, nodes, parts_docs, multi_round=None, min_days=MIN_DAYS,
         wait = ((down_start - t0).total_seconds() / 86400.0
                 if down_start is not None else days)
 
-        # 窗口内是否已有下游动作（严格开区间：端点即"这次完成"本身）
-        mid = [t for t in cts if t1 is not None and t0 < t < t1]
+        # 窗口内是否已有下游动作（严格开区间：端点即"这次完成"本身）。
+        # ⚠️ 用 all_cts，不用 cts（2026-10-19）：已结束的单据同样证明"活接了"，
+        # 把它排除在窗口外会把正常拖期误判成漏报 —— G599/600/601 的 Part2 单
+        # 2026-09-29 就建了（窗口 取数09-28 ~ 签样10-12 内），却因 status=已结束
+        # 被判「漏报嫌疑」，实际应判「搁置」。
+        # 按**日历日**比较（与段口径一致）：建单日 == 下游完成日 视为"这次完成
+        # 本身"，不算窗口内前置动作 —— G506 的 Part2 单与采购同日(2026-04-30)，
+        # 仍判漏报嫌疑，既有基准不被改坏。
+        mid = [t for t in all_cts
+               if t1 is not None and t0.date() < t.date() < t1.date()]
 
         seg_name = str(r.get("seg") or "")
         # 终点落在 Part5/Part8（含「发货末批(Part5)」这类拼接名）或段名带"运输" → 归运输
