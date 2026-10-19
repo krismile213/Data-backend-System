@@ -12,14 +12,18 @@
 可靠性约定：
 - **失败不静默**：任何一步失败都写 state/auto_pipeline.log（FAIL 行）+ 返回
   ok=False，计划任务与手动触发都能看到真实结果。
+- **撞锁不放弃**：日报文件被 Excel/WPS 占用时等 60s 重试，最多 5 次
+  （`REPORT_LOCK_RETRIES` / `REPORT_LOCK_WAIT_SEC` 可覆盖），仍失败才 FAIL。
 - **幂等**：指纹增量导入 / 快照按指纹+日期去重 / 日报同日覆盖 / 邮件按日去重。
 - CLI：`python backend/etl/auto_pipeline.py [--skip-mail] [--category 手机膜]`
-  计划任务 DataAdmin-AutoPipeline 每天 09:05 / 14:35 调它。
+  计划任务 DataAdmin-AutoPipeline 每天 09:00 / 14:10 调它（2026-10-19 核对）。
 """
 
 import argparse
 import json
+import os
 import sys
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +37,41 @@ from app.config import DATA_ROOTS, STATE_DIR, list_batches  # noqa: E402
 
 LOG_FILE = STATE_DIR / "auto_pipeline.log"
 LAST_RUN = STATE_DIR / "pipeline_last_run.json"
+
+# 日报文件被 Excel/WPS 占用不是偶发，而是常态（用户白天一直开着日报看）。
+# 撞锁就等一会儿再写，比整轮 FAIL、当天没报表好。5×60s 上限 = 5 分钟，
+# 离下游的晨检/午后简报（09:00 / 14:20）还有余量。
+# 环境变量可覆盖（测试/临时调试）：AUTO_PIPELINE_LOCK_RETRIES / _WAIT_SEC
+REPORT_LOCK_RETRIES = int(os.environ.get("AUTO_PIPELINE_LOCK_RETRIES") or 5)
+REPORT_LOCK_WAIT_SEC = float(os.environ.get("AUTO_PIPELINE_LOCK_WAIT_SEC") or 60)
+
+
+def _is_lock_error(e):
+    """写盘撞锁：generate_daily_report 会包成 RuntimeError(msg) from PermissionError。"""
+    if isinstance(e, PermissionError):
+        return True
+    if isinstance(e.__cause__, PermissionError):
+        return True
+    s = str(e)
+    return "被占用" in s or "Permission denied" in s or "Errno 13" in s
+
+
+def _with_lock_retry(fn, cat, retries=None, wait=None, sleep=time.sleep):
+    """跑 fn()，撞锁则等 wait 秒重试 → (返回值, 重试次数)。非锁错误立即抛。
+
+    sleep 可注入，单测不需要真的等。
+    """
+    n = REPORT_LOCK_RETRIES if retries is None else retries
+    gap = REPORT_LOCK_WAIT_SEC if wait is None else wait
+    for i in range(n + 1):
+        try:
+            return fn(), i
+        except Exception as e:                  # noqa: BLE001
+            if i >= n or not _is_lock_error(e):
+                raise
+            log_line(f"WARN report {cat} 被占用，{gap:.0f}s 后重试 ({i + 1}/{n})")
+            sleep(gap)
+
 
 
 def log_line(msg):
@@ -95,7 +134,10 @@ def _step_snapshots_and_reports():
             d = maybe_doc_snapshot(cat)         # T10 未闭环 SKU 单据增量基线
             log_line(f"{'OK' if d.get('recorded') else 'SKIP'} doc-delta {cat}: "
                      f"{d.get('reason')}")
-            r = generate_daily_report(cat)
+            r, tries = _with_lock_retry(
+                lambda: generate_daily_report(cat), cat)
+            if tries:
+                log_line(f"OK report {cat} 占用重试 {tries} 次后写入成功")
             reports[cat] = r
             log_line(f"OK report {cat} -> {r.get('path')}")
         except Exception as e:                  # noqa: BLE001
