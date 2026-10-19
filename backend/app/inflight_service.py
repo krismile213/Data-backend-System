@@ -527,7 +527,19 @@ def compute_inflight(category=None, *, mute_emag_noship=False):
             if stay_elapsed is None and stay_st["state"] == ST_PENDING:
                 stay_elapsed = 0            # 停在还没开始的段：已停留 0 天
 
-        status = ST_OVER if over_list else (ST_WARN if warn_list else ST_RUNNING)
+        # 状态判定（2026-10-19 用户口径修正）：**「超期」只认当前停留环节**。
+        # 旧口径 over_list 非空即超期（=任一未完成段超期），会把"已走过的那一段
+        # 超了、当前环节还剩 3 天"的 SKU 整行标红，和「距超时 剩3天」自相矛盾
+        # （G599/G600/G601 实测：签样→寄送 7天/目标5天，当前采购段还剩 3 天）。
+        # 现在：当前段超期 → 超期；只有历史段超期 → 预警（仍要盯，但不误标）。
+        # 历史段超期不丢，完整保留在 overSegs（总表第 9 列）供统计与追责。
+        cur_over = bool(stay_st and stay_st.get("state") == ST_OVER)
+        if cur_over:
+            status = ST_OVER
+        elif over_list or warn_list:
+            status = ST_WARN
+        else:
+            status = ST_RUNNING
         owner = ((stay_row or {}).get("executor")
                  or (stay_row or {}).get("owner") or "")
         # 货件运输·逐票（日报 sheet 数据源）：只收**落进在研 items** 的 SKU 的真货件，
@@ -542,12 +554,14 @@ def compute_inflight(category=None, *, mute_emag_noship=False):
             "stayTarget": (stay_st or {}).get("target"),
             "stayDaysLeft": stay_left,      # 距超时天数（负 = 已超期 N 天）
             "warnSegs": [w[1].get("seg") for w in warn_list],
-            # 超期段明细（2026-10-19）：status=超期 判的是"任一未完成段超期"，
-            # 而 stayDaysLeft 只看**当前停留环节** —— 两个口径不同，总表必须标明
-            # 到底哪一段超了，否则同一行会出现「超期」+「剩N天」的观感矛盾
-            # （G599/G600/G601 实测：签样→寄送 7天/目标5天 超2天，当前停留还未到期）。
+            # 超期段明细（2026-10-19）：status 已改为只看**当前停留环节**，
+            # 这里仍列**全部**超期段（含已走过的那段），供统计"哪一段烂过"。
+            # 渲染时按是否当前段加前缀（当前·/已过·），别让读者以为整行都超了。
             "overSegs": [{"seg": o[1].get("seg"), "dept": o[1].get("dept"),
-                          "overDays": o[2].get("over")} for o in over_list],
+                          "overDays": o[2].get("over"),
+                          "isCurrent": o[1].get("seg") == (stay_row or {}).get("seg")}
+                         for o in over_list],
+            "stayOver": cur_over,
             "status": status, "multiRound": bool(multi_round.get("flag")),
             "rootCause": root_cause, "owner": owner,
             "shipClosure": closure,                   # 运输闭环态（closed/pending/none）
@@ -973,10 +987,12 @@ def _gantt_records(data, today=None):
             t0, t1 = _parse_iso(s.get("t0")), _parse_iso(s.get("t1"))
             judge = s.get("judge")
             days = s.get("days")
+            open_seg = False
             if t1 is None or s.get("noShip"):
                 if t0 is None:
                     continue            # 未开始：起点无时间，无条形可画
                 t1 = noon               # 未完成段延伸至今日（事中口径）
+                open_seg = True         # 终点是"填充的今日"，不是真实完成时间
                 if not s.get("noShip"):
                     # noShip 行 judge 已是"✗超时未发货/⏳未发货"，保留
                     st_name = s.get("state")
@@ -991,6 +1007,9 @@ def _gantt_records(data, today=None):
                          "t0": t0, "t1": t1, "days": days,
                          "target": s.get("target"), "judge": judge,
                          "owner": s.get("executor") or s.get("owner") or "",
+                         # 未完成段：t1 是"延伸到今日"的填充值，甘特终点列要写
+                         # 「进行中」而不是伪造一个完成日期（2026-10-19）
+                         "open": open_seg,
                          "neutral": bool(s.get("gap"))
                          or str(judge or "").startswith("—")})
         if not rows:

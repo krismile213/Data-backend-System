@@ -657,19 +657,21 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
             dl_color, dl_bold = ("EF6C00", True) if dl <= 2 else ("2E7D32", False)
         c = _put(ws1, r, 8, dl_txt, align=Alignment(horizontal="center"))
         c.font = Font(size=10, bold=dl_bold, color=dl_color)
-        # 超期环节（2026-10-19）：状态=超期 判的是「任一未完成段超期」，而上一列
-        # 「距超时」只看当前停留环节 —— 两列口径不同，同一行会同时出现
-        # 「超期」+「剩3天」。这里写明超的到底是哪一段（G599/G600/G601 实例：
-        # 签样→寄送 7天/目标5天 超2天，而当前停留的采购段还剩3天）。
+        # 超期环节（2026-10-19 二次修正）：状态列只认当前停留环节，本列仍统计
+        # **全部**超期段。加「当前·/已过·」前缀，一眼看出超的是现在卡的这段、
+        # 还是已经走过的那段（G599：当前·采购→首次上架 / 已过·签样→寄送）。
         _ov = []
+        _cur_over = bool(it.get("stayOver"))
         for _o in (it.get("overSegs") or []):
             _od = _o.get("overDays")
-            _ov.append(f"{_o.get('seg') or '—'} "
+            _tag = "当前·" if _o.get("isCurrent") else "已过·"
+            _ov.append(f"{_tag}{_o.get('seg') or '—'} "
                        + (f"超{_od:g}天" if isinstance(_od, (int, float))
                           else "超期"))
         c = _put(ws1, r, 9, "；".join(_ov) if _ov else "—")
         if _ov:
-            c.font = Font(size=10, color="C62828")
+            # 当前环节超期=红（要立刻催）；只有历史段超期=橙（记录/追责用）
+            c.font = Font(size=10, color="C62828" if _cur_over else "EF6C00")
         _put(ws1, r, 10, len(it.get("warnSegs") or []),
              align=Alignment(horizontal="center"))
         _put(ws1, r, 11, "⚠ 是" if it.get("multiRound") else "—")
@@ -843,8 +845,12 @@ def _fill_report_row(ws, r, x):
 # 画法 1:1 抄 流程复盘/gantt_sheet.py（route_check_sys 汇总 xlsx 同款）：
 # 全局日历轴每格=1天 / 月份合并轴 / 部门列纵向合并 / 条形超出目标部分红色；
 # 事中差异：未完成段条形延伸至今日（当前停留可见）、只画在研 SKU、区块新→旧。
+# 2026-10-19 用户要求"学复盘的程序，把日期也带上"→ 标签列由 6 列扩到 8 列，
+# 与复盘 dates_mode 完全一致：A部门 B环节 C起点 D终点 E耗时 F目标 G判定 H执行人。
 # ---------------------------------------------------------------------------
-G_CAL0 = 7                              # 日历轴起始列（G；标签列 A-F）
+G_CAL0 = 9                              # 日历轴起始列（I；标签列 A-H）
+G_LABEL_W = {"A": 7, "B": 38, "C": 11, "D": 10, "E": 8.5, "F": 8.5,
+             "G": 10, "H": 10}
 G_DEPT_FILL = {"产品": "4472C4", "运营": "70AD47", "后勤": "ED7D31",
                "运输": "7030A0", "4国": "BF8F00", "应发未发": "C00000"}
 G_DEPT_HEAD = {"产品": "D9E1F2", "运营": "E2EFDA", "后勤": "FCE4D6",
@@ -875,6 +881,16 @@ def _g_judge_color(judge):
     return "808080"
 
 
+def _g_fmt_dt(t):
+    """起止时间展示（抄复盘 gantt_sheet 的 dates_mode）：零点只显 MM-DD，
+    带时刻显 MM-DD HH:MM —— 节点时间精确到分时别丢掉。"""
+    if not isinstance(t, datetime):
+        return "—"
+    if (t.hour, t.minute, t.second) == (0, 0, 0):
+        return f"{t:%m-%d}"
+    return f"{t:%m-%d %H:%M}"
+
+
 def _g_left_text(dl):
     """距超时天数的展示文案（与总表第 8 列同口径）。"""
     if dl is None:
@@ -894,7 +910,8 @@ def _gantt_sheet_inflight(ws, records, date_str):
         today = datetime.now().date()
     ws.cell(1, 1, (
         f"在研 SKU 流程甘特图（截至 {today:%Y-%m-%d} · 每格=1天 · "
-        "条形超出目标的部分=红色 · 未完成段延伸至今日）   "
+        "条形超出目标的部分=红色 · 未完成段延伸至今日、终点列写「进行中」）   "
+        "C/D=该段起点/终点（有具体时刻的显示 MM-DD HH:MM，纯日期只显 MM-DD）· "
         "颜色：■产品部(蓝) ■运营部(绿) ■后勤部(橙) ■运输(紫) ■4国(金) "
         "■留空/无目标(灰) · SKU 区块按新→旧排列")).font = Font(bold=True, size=11)
 
@@ -913,12 +930,8 @@ def _gantt_sheet_inflight(ws, records, date_str):
     n_days = (axis_end - axis_start).days + 1
     last_col = G_CAL0 + n_days - 1
 
-    ws.column_dimensions["A"].width = 7
-    ws.column_dimensions["B"].width = 38
-    ws.column_dimensions["C"].width = 8.5
-    ws.column_dimensions["D"].width = 8.5
-    ws.column_dimensions["E"].width = 10
-    ws.column_dimensions["F"].width = 10
+    for col, w in G_LABEL_W.items():
+        ws.column_dimensions[col].width = w
     for i in range(n_days):
         ws.column_dimensions[get_column_letter(G_CAL0 + i)].width = 3.0
     for c in range(1, last_col + 1):
@@ -987,12 +1000,19 @@ def _g_block(ws, top, rec, axis_start, n_days, last_col):
         target = item.get("target")
         judge = str(item.get("judge") or "-")
         jc = _g_judge_color(judge)
+        # 标签列与复盘 dates_mode 一致：C 起点 / D 终点（未完成段写「进行中」，
+        # 因为它的终点是"延伸到今日"的填充值，不能伪装成完成日期）
         ws.cell(r, 2, item.get("seg")).font = Font(size=9)
-        ws.cell(r, 3, cost if cost is not None else "—").font = Font(size=9)
-        ws.cell(r, 4, f"≤{target:g}" if target is not None else "—").font = Font(size=9)
-        ws.cell(r, 5, judge).font = Font(size=9, bold=judge.startswith(("✓", "✗")),
+        ws.cell(r, 3, _g_fmt_dt(item.get("t0"))).font = Font(size=8, color="404040")
+        if item.get("open"):
+            ws.cell(r, 4, "进行中").font = Font(size=8, color="1F4E79")
+        else:
+            ws.cell(r, 4, _g_fmt_dt(item.get("t1"))).font = Font(size=8, color="404040")
+        ws.cell(r, 5, cost if cost is not None else "—").font = Font(size=9)
+        ws.cell(r, 6, f"≤{target:g}" if target is not None else "—").font = Font(size=9)
+        ws.cell(r, 7, judge).font = Font(size=9, bold=judge.startswith(("✓", "✗")),
                                          color=jc)
-        ws.cell(r, 6, item.get("owner") or "—").font = Font(size=9)
+        ws.cell(r, 8, item.get("owner") or "—").font = Font(size=9)
         for cc in range(2, G_CAL0):
             ws.cell(r, cc).border = G_THIN_BOTTOM
             ws.cell(r, cc).alignment = Alignment(vertical="center", wrap_text=False)

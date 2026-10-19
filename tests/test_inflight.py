@@ -266,11 +266,20 @@ def test_daily_report_sheets():
     items = [{"sku": "G1", "model": "M1", "status": "超期",
               "staySeg": "取数→签样", "staySegDept": "运营",
               "stayElapsed": 12, "stayTarget": 10, "stayDaysLeft": -2,
-              "warnSegs": [], "multiRound": False,
-              # 2026-10-19：「超期环节」列的数据源 —— 状态=超期看全 SKU 任一段，
-              # 与「距超时」(当前停留环节) 口径不同，必须写明超的是哪一段
-              "overSegs": [{"seg": "取数→签样", "dept": "运营", "overDays": 2}],
-              "rootCause": {"type": "搁置", "seg": "取数→签样"}, "owner": "李四"}]
+              "warnSegs": [], "multiRound": False, "stayOver": True,
+              # 2026-10-19：状态列只认当前停留环节；本列仍统计全部超期段，
+              # 用「当前·/已过·」区分超的是现在这段还是已经走过的那段
+              "overSegs": [{"seg": "取数→签样", "dept": "运营", "overDays": 2,
+                            "isCurrent": True}],
+              "rootCause": {"type": "搁置", "seg": "取数→签样"}, "owner": "李四"},
+             # G2：当前环节还剩 3 天、超的是已走过的「签样→寄送」→ 状态=预警
+             {"sku": "G2", "model": "M2", "status": "预警",
+              "staySeg": "采购→本地仓到货", "staySegDept": "后勤",
+              "stayElapsed": 5, "stayTarget": 8, "stayDaysLeft": 3,
+              "warnSegs": [], "multiRound": False, "stayOver": False,
+              "overSegs": [{"seg": "签样→寄送", "dept": "产品", "overDays": 2,
+                            "isCurrent": False}],
+              "rootCause": {}, "owner": "王五"}]
     content = _daily_xlsx(category="手机膜", computed_at="2026-09-22 17:00",
                           date_str="2026-09-22", items=items, alerts=alerts,
                           gantts=[])
@@ -289,7 +298,13 @@ def test_daily_report_sheets():
     # 消除「状态=超期」+「距超时=剩N天」同行的观感矛盾
     assert ws1.cell(row=3, column=9).value == "超期环节"
     assert ws1.cell(row=3, column=10).value == "预警段数"
-    assert ws1.cell(row=4, column=9).value == "取数→签样 超2天"
+    assert ws1.cell(row=4, column=9).value == "当前·取数→签样 超2天"
+    # G2：超的是已走过的那段 → 状态必须是「预警」（当前环节还剩 3 天），
+    # 第 9 列用「已过·」标出来，信息不丢但不误标整行超期
+    assert ws1.cell(row=5, column=1).value == "G2"
+    assert ws1.cell(row=5, column=3).value == "预警"
+    assert ws1.cell(row=5, column=8).value == "剩3天"
+    assert ws1.cell(row=5, column=9).value == "已过·签样→寄送 超2天"
     # 甘特 sheet：空记录也要有占位（不抛异常）
     assert "甘特" in ws4.title
     # 上报清单：先当日新超期后持续超期，类型列可区分
@@ -499,3 +514,44 @@ def test_inflight_exposes_transport_keys(inflight_data):
             # 日期已转字符串（不得泄漏 datetime）
             assert t["ship"] is None or isinstance(t["ship"], str)
             assert t["arr"] is None or isinstance(t["arr"], str)
+
+
+def test_gantt_label_columns_have_dates():
+    """在研甘特学复盘 dates_mode（2026-10-19 用户要求"把日期也带上"）。
+
+    标签列：A部门 B环节 C起点 D终点 E耗时 F目标 G判定 H执行人，日历轴从 I(9)。
+    未完成段的终点是"延伸到今日"的填充值 → 必须写「进行中」，不能伪造完成日期。
+    """
+    from openpyxl import load_workbook
+
+    from app.reporting import G_CAL0       # 顶部已把 daily_report 别名成 _daily_xlsx
+
+    gantts = [{"sku": "G9", "model": "M9", "status": "预警", "staySeg": "采购→上架",
+               "stayDaysLeft": 3,
+               "rows": [
+                   {"dept": "产品", "seg": "取数→签样",
+                    "t0": datetime(2026, 10, 12, 9, 30), "t1": datetime(2026, 10, 14),
+                    "days": 2, "target": 12, "judge": "✓", "owner": "李四",
+                    "open": False, "neutral": False},
+                   {"dept": "运营", "seg": "采购→上架",
+                    "t0": datetime(2026, 10, 15), "t1": datetime(2026, 10, 19, 12),
+                    "days": 4, "target": 7, "judge": "⏳进行中(已4天)",
+                    "owner": "张三", "open": True, "neutral": False}]}]
+    wb = load_workbook(io.BytesIO(_daily_xlsx(
+        category="手机膜", computed_at="2026-10-19 10:00", date_str="2026-10-19",
+        items=[], alerts={"todayNewOverdue": [], "ongoingOverdue": [],
+                          "warnings": []}, gantts=gantts)))
+    ws = wb["在研SKU甘特图"]
+    assert G_CAL0 == 9                     # 标签列 8 列，日历从 I
+    # 区块：3=标题 4=月份 5=日期 6/7=两条条形
+    assert ws.cell(row=6, column=3).value == "10-12 09:30"   # 起点（带时刻）
+    assert ws.cell(row=6, column=4).value == "10-14"         # 终点（纯日期）
+    assert ws.cell(row=6, column=5).value == 2               # 耗时
+    assert ws.cell(row=6, column=6).value == "≤12"           # 目标
+    assert ws.cell(row=6, column=7).value == "✓"             # 判定
+    assert ws.cell(row=6, column=8).value == "李四"          # 执行人
+    assert ws.cell(row=7, column=4).value == "进行中"        # 未完成段不伪造日期
+    assert ws.cell(row=7, column=8).value == "张三"
+    # 日历轴首格在 I 列（日期数字），且冻结在 I3
+    assert isinstance(ws.cell(row=5, column=G_CAL0).value, int)
+    assert ws.freeze_panes == "I3"
