@@ -14,6 +14,9 @@
   ok=False，计划任务与手动触发都能看到真实结果。
 - **撞锁不放弃**：日报文件被 Excel/WPS 占用时等 60s 重试，最多 5 次
   （`REPORT_LOCK_RETRIES` / `REPORT_LOCK_WAIT_SEC` 可覆盖），仍失败才 FAIL。
+  注意 2026-10-20 起 generate_daily_report 自己会撞锁改名（真名_HHMMSS
+  后缀）落盘，所以这条重试通常根本触发不到——只剩「改名后也被占用」的
+  双锁场景才会等。仍失败才 FAIL。
 - **幂等**：指纹增量导入 / 快照按指纹+日期去重 / 日报同日覆盖 / 邮件按日去重。
 - CLI：`python backend/etl/auto_pipeline.py [--skip-mail] [--category 手机膜]`
   计划任务 DataAdmin-AutoPipeline 每天 09:00 / 14:10 调它（2026-10-19 核对）。

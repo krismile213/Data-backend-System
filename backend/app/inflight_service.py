@@ -899,6 +899,32 @@ def reports_index(category=None):
     return sorted(entries, key=lambda e: e.get("date", ""), reverse=True)
 
 
+def _write_report_bytes(path, content):
+    """写日报字节：正式名优先，撞锁（Excel/WPS 占用）则改写真名_HHMMSS 后缀。
+
+    返回 (实际写入路径, 是否改名)。Windows 下 Excel/WPS 占着同名文件时，
+    共享模式只放读进程进来——`rename`/`os.replace` 同样 PermissionError，
+    所以「临时文件 + 原子替换」走不通，唯一可行解是**换一个没被占用的名字**。
+    后缀带时分秒：同日多次撞锁不互相覆盖，按名可辨新旧。索引/下载/邮件全吃
+    返回的 path，下游零适配。两个路径都写不进去才抛 RuntimeError。
+    """
+    try:
+        with open(path, "wb") as f:
+            f.write(content)
+        return path, False
+    except PermissionError:
+        alt = path.with_name(f"{path.stem}_{datetime.now().strftime('%H%M%S')}.xlsx")
+        try:
+            with open(alt, "wb") as f:
+                f.write(content)
+        except PermissionError as e:
+            raise RuntimeError(
+                f"日报文件被占用，写不进去：{path}（改名 {alt.name} 也失败）\n"
+                "多半是 Excel/WPS 正开着它 —— 关闭后重跑即可（生成是幂等覆盖）。"
+            ) from e
+        return alt, True
+
+
 def _drop_legacy_report(reports_dir, stamp):
     """删除同一天、旧命名（复盘报告_YYYYMMDD.xlsx）的历史文件。
 
@@ -920,6 +946,29 @@ def _drop_legacy_report(reports_dir, stamp):
         return str(legacy)
     except OSError:
         return None        # 删不掉（被 Excel 占用）→ 不管，下次生成再试
+
+
+def _drop_fallback_reports(reports_dir, stamp):
+    """删除同日、撞锁改名残留（事中日报_YYYYMMDD_HHMMSS.xlsx）。
+
+    正式名写成功时调用：残留里的数据已被正式名覆盖，且索引按 category+date
+    去重、早就指向正式名——残留不在索引里，保留期清理看不见它，会变永久孤儿。
+    与 _drop_legacy_report 同一条数据根防线；删不掉（被占用）先跳过，下次再试。
+    """
+    from pathlib import Path
+
+    from .config import DATA_ROOTS
+    removed = []
+    for p in Path(reports_dir).glob(f"{_REPORT_PREFIX}{stamp}_*.xlsx"):
+        roots = [str(Path(r)) for r in DATA_ROOTS.values()]
+        if not any(str(p).startswith(r) for r in roots):
+            continue
+        try:
+            p.unlink()
+            removed.append(str(p))
+        except OSError:
+            pass
+    return removed or None
 
 
 def cleanup_expired_reports():
@@ -1031,6 +1080,9 @@ def generate_daily_report(category=None, date_str=None):
     """生成当日日报 xlsx（幂等覆盖同名文件），返回 {path, sheets, ...}。
 
     落盘名 = `事中日报_YYYYMMDD.xlsx`（2026-09-24 起；旧名「复盘报告_」同日文件随迁删除）。
+    撞锁改名（2026-10-20）：正式名被 Excel/WPS 占用时，落盘改写真名_HHMMSS
+    后缀（返回的 path 随之改变，索引/下载/邮件全走新 path）；正式名写成功时
+    清掉同日残留后缀文件（见 _write_report_bytes / _drop_fallback_reports）。
     2026-10-06 起两处改版：
       · 总表「最差环节」→「当前停留环节」+ 距超时天数（见 _pick_stay）；
       · 「今日进度变化」→「在研SKU甘特图」（每在研 SKU 一块，未完成段延伸至今日）。
@@ -1081,15 +1133,12 @@ def generate_daily_report(category=None, date_str=None):
         items=data["items"], alerts=alerts, gantts=gantts,
         provisional=rs.provisional, targets_source=rs.targets_source,
         exempts=exempts, notes=notes, shipments=shipments)
-    try:
-        with open(path, "wb") as f:
-            f.write(content)
-    except PermissionError as e:
-        # 日报是幂等覆盖，但 Excel/WPS 开着同名文件时会锁住写入
-        # （~$ 锁文件）。给一句人话，别甩裸 PermissionError 给定时任务日志。
-        raise RuntimeError(
-            f"日报文件被占用，写不进去：{path}\n"
-            "多半是 Excel/WPS 正开着它 —— 关闭后重跑即可（生成是幂等覆盖）。") from e
+    # 撞锁改名约定见 _write_report_bytes：正式名优先，Excel/WPS 占用时落
+    # 真名_HHMMSS 后缀。auto_pipeline 的 _with_lock_retry 仍会先等 60s×5——
+    # 那是给「瞬时锁」（~$ 刚生成即消失）的机会；用户长期开着日报属于常态，
+    # 等满 5 分钟再 FAIL 不如直接改名落盘，当天数据不丢、pipeline 不 FAIL。
+    path, fallback = _write_report_bytes(path, content)
+    fallback_cleaned = None if fallback else _drop_fallback_reports(target, stamp)
 
     entry = {
         "date": today, "category": cat, "path": str(path),
@@ -1103,6 +1152,8 @@ def generate_daily_report(category=None, date_str=None):
         "noteCount": note_applied,
         "shipmentCount": len(shipments or []),
         "createdAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        # True = 正式名被占用，本份落的是真名_HHMMSS 后缀（pipeline/CLI 要能看见）
+        "fallback": fallback,
     }
     with _lock:
         entries = [e for e in _load_report_index()
@@ -1122,6 +1173,8 @@ def generate_daily_report(category=None, date_str=None):
             "shipmentCount": entry["shipmentCount"],
             "category": cat,
             "targetsProvisional": rs.provisional,
+            "fallback": fallback,
+            "fallbackCleaned": fallback_cleaned,
             "legacyRemoved": dropped}
 
 
