@@ -12,6 +12,10 @@ seg_rules.py — 实际动作映射口径的段级绩效规则
   - 部门边界：产品部 = 考核起点 → PRODUCT_END_NODE(素材交付)；运营段 = 素材交付 → max(上架,广告)。
 
 段级规则的目标天/是否考核可在规则配置中心(seg_targets)调整，此处为代码默认值。
+
+⚠️ 「默认责任人」已外部化（2026-10-26）：本文件的 NODES/SEGS/L4 里的责任人只是
+   **代码兜底**，实际生效值优先取 `资产文件/责任人配置.xlsx` 口径=sys 的行
+   （见文件末尾的应用代码与 `owner_config.py`）。换人只改表，不用改这里。
 """
 
 # ---------------------------------------------------------------------------
@@ -139,3 +143,21 @@ def seg_meta():
         "note": note, "gap": False,
     })
     return out
+
+
+# ---------------------------------------------------------------------------
+# 默认责任人外部化（2026-10-26）：读 资产文件/责任人配置.xlsx 里 口径=sys 的行，
+#   换人只改表、不用改代码。文件缺失/读失败/单元格为空 → 全部沿用上面的内置默认。
+#   ⚠️ 必须**原地**改 NODES / SEGS 的元素：causal.py 等模块用的是
+#      `from .seg_rules import NODES, SEGS`（绑对象引用），重新赋值会让两边不一致。
+#   ⚠️ 改完表要重启后端（模块加载时生效一次，避免运行中半新半旧）。
+# ---------------------------------------------------------------------------
+try:                                                    # 包内导入（正常路径）
+    from .owner_config import apply_to_l4, apply_to_nodes, apply_to_segs
+except ImportError:                                     # 直接以脚本方式 import 时的兜底
+    from owner_config import apply_to_l4, apply_to_nodes, apply_to_segs
+
+_OWNER_HITS = apply_to_nodes(NODES, "sys") + apply_to_segs(SEGS, "sys")
+L4 = apply_to_l4(L4, "sys")
+if _OWNER_HITS:
+    print(f"[责任人配置] 已覆盖 {_OWNER_HITS} 项默认责任人（手机膜·sys 口径）")

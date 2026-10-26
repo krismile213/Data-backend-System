@@ -255,3 +255,22 @@ PART_CONFIGS = {
         "notes": "该 Part 多为流程进行中状态",
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# 默认责任人外部化（2026-10-26）：与手机膜共用 `资产文件/责任人配置.xlsx` 的
+#   口径=sys 行（节点名/段名各自独立匹配，两边不会互串）。
+#   文件缺失/读失败/单元格为空 → 全部沿用上面的内置默认（等价改动前行为）。
+#   若将来要给手机壳单独指定不同的人：在表里加 口径=sys_shell 的行，并把下面的
+#   "sys" 改成 "sys_shell"（届时两套并存，需同时维护）。
+#   ⚠️ 必须原地改 NODES/SEGS 元素（category_rules 用属性访问、causal 用 from-import）。
+# ---------------------------------------------------------------------------
+try:
+    from .owner_config import apply_to_l4, apply_to_nodes, apply_to_segs
+except ImportError:
+    from owner_config import apply_to_l4, apply_to_nodes, apply_to_segs
+
+_OWNER_HITS = apply_to_nodes(NODES, "sys") + apply_to_segs(SEGS, "sys")
+L4 = apply_to_l4(L4, "sys")
+if _OWNER_HITS:
+    print(f"[责任人配置] 已覆盖 {_OWNER_HITS} 项默认责任人（手机壳·sys 口径）")
