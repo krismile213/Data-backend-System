@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <script>
+      /* ------------------------------------------------------------------
+       * 前端自检上报 —— 回答「这个页面到底能不能进得去」
+       *
+       * 为什么放在这里：curl 只能证明模块能下载，证不了页面能渲染。
+       * 白屏的真实原因（运行时异常、依赖重新预构建导致的模块加载失败）只在
+       * 浏览器里出现。让页面自己把现场报回来，是最可靠的一条路。
+       *
+       * 上报时机（只有出问题时才发，正常访问零噪音）：
+       *   1. 任何未处理的异常 / Promise 拒绝
+       *   2. load 之后 #root 仍然为空 —— 捕获「没报错但也没渲染」的白屏
+       * 诊断用：URL 带 ?diag=1 时**无条件上报**（即使页面正常），
+       *         用于确认自检脚本本身确实在运行。
+       *
+       * 必须早于 main.jsx 执行，才能捕获模块加载阶段的错误。
+       * ---------------------------------------------------------------- */
+      (function () {
+        var MAX_ERRORS = 10;
+        var errors = [];
+
+        window.addEventListener('error', function (e) {
+          if (errors.length >= MAX_ERRORS) return;
+          errors.push({
+            type: 'error',
+            message: e.message || '(empty message)',
+            source: e.filename || '',
+            line: e.lineno || 0,
+            col: e.colno || 0,
+          });
+        }, true);
+
+        window.addEventListener('unhandledrejection', function (e) {
+          if (errors.length >= MAX_ERRORS) return;
+          var r = e.reason;
+          errors.push({
+            type: 'rejection',
+            message: String((r && (r.message || r)) || r),
+            stack: String((r && r.stack) || '').slice(0, 1200),
+          });
+        });
+
+        function report(payload) {
+          /* 优先 fetch + keepalive：navigator.sendBeacon 在被内嵌预览的浏览器里
+             会静默丢弃请求（返回 false 且不抛错），导致现场丢失。 */
+          try {
+            var body = JSON.stringify(payload);
+            fetch('/api/diag/report', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: body,
+              keepalive: true,
+            }).catch(function () {
+              try {
+                if (navigator.sendBeacon) {
+                  navigator.sendBeacon('/api/diag/report',
+                    new Blob([body], { type: 'application/json' }));
+                }
+              } catch (e) { /* 放弃上报 */ }
+            });
+          } catch (err) {
+            /* 上报失败绝不能反过来影响页面 */
+          }
+        }
+
+        window.addEventListener('load', function () {
+          /* 3.5s：足够 React 挂载 + 首页数据请求返回（Dashboard 冷启动约 2.4s）。
+             不用更长的延时 —— 后台标签页的定时器会被浏览器节流，反而测不准。 */
+          setTimeout(function () {
+            var root = document.getElementById('root');
+            var rendered = !!(root && root.childElementCount > 0);
+            report({
+              /* page-ok / page-failed —— 每次访问都留一条足迹。
+                 这样「后台到底能不能进」是一个随时可查的事实，
+                 而不是每次都要靠肉眼试。 */
+              type: (rendered && errors.length === 0) ? 'page-ok' : 'page-failed',
+              url: location.href,
+              rendered: rendered,
+              rootHtml: root
+                ? root.innerHTML.slice(0, rendered ? 300 : 1500)
+                : '(no #root)',
+              errors: errors.slice(),
+            });
+          }, 3500);
+        });
+      })();
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>新品售前流程数据后台系统</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

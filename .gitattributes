@@ -1,0 +1,12 @@
+# 统一换行符：仓库内存 LF，各平台按原生换行检出
+* text=auto
+
+# 二进制文件不做换行转换
+*.xlsx binary
+*.xls binary
+*.xlsm binary
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.woff binary
+*.woff2 binary

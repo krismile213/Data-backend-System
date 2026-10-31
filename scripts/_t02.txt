@@ -1,0 +1,42 @@
+[1] GET /api/review/sku/G506 → 200
+    反向段(days<0) = 无  → PASS
+    取数 = 2025-10-30 00:00:00  (期望 2025-10-30…)
+    multiRound = {'flag': True, 'count': 2, 'gapDays': 182.0, 'note': '多轮提交·间隔 182 天·疑似漏报'}
+    rounds = [{'round': 1, 'approvalNo': '202510301701000568196', 'createTime': '2025-10-30 17:01', 'hasData': True, 'status': '已结束'}, {'round': 2, 'approvalNo': '202604301520000367901', 'createTime': '2026-04-30 15:20', 'hasData': True, 'status': '已结束'}]
+    assessment: basis=空运 span=232.0 limit=60 delay=172.0 dir=loss
+                 grade=XC daily=1.38~5.5 price=12.0266(参考成本价)
+                 qty=237~946 amount=2854.63~11377.16 degraded=[]
+    rootCause: seg=寄送→拍摄交付 type=漏报嫌疑 wait=184.0 suspect=True owner=李杰华
+               evidence=寄送 2025-11-11 完成 → Part6 下一动作 2026-05-14 才出现，间隔 184 天（期间无任何单据）；另：Part1 存在多轮提交（间隔 182 天）——取数完成后无人上报后续流程，属人工漏报而非系统缺失
+               chain=[('提案', '2025-10-30 17:01', None), ('取数', '2025-10-30', 0.0), ('签样', '2025-11-11', 12.0), ('寄送', '2025-11-11', 0.0), ('拍摄交付', '2026-05-14', 184.0)]
+    --- 全部段（days / target / judge） ---
+        产品     提案→取数                  days=      0 target=   75 ✓
+        产品     取数→签样                  days=     12 target=   12 ✓
+        产品     签样→寄送                  days=      0 target=    5 ✓
+        产品     寄送→拍摄交付                days=    184 target=   10 ✗超174天
+        产品     拍摄交付→素材加工              days=      1 target=    3 ✓
+        __GAP__ [产品部留空·后勤接管段]          days=    180 target= None —留空
+        运营     素材加工→上架                days=      0 target=    7 ✓
+        运营     素材加工→广告                days=      0 target=    7 ✓
+        运营     采购→首次上架                days=      5 target=    7 ✓
+        后勤     签样→采购                  days=    170 target=    1 ✗超169天
+        后勤     采购→本地仓到货               days=     10 target=    8 ✗超2天
+        后勤     采购→发货末批                days=     41 target=   22 ✗超19天
+        运输     运输·空运(7票)              days=     38 target=   15 ✗超23天
+        运输     运输·海运(7票)              days=     43 target=   35 ✗超8天
+        4国     英国·运输                  days=     10 target=   15 ✓
+        4国     欧洲·运输                  days=      8 target=   15 ✓
+        4国     日本·运输                  days=      7 target=   15 ✓
+        4国     美国·运输                  days=     13 target=   35 ✓
+
+[2] GET /api/review/assessment → 200
+    summary = {'assessedCount': 93, 'lossCount': 43, 'gainCount': 48, 'noneCount': 2, 'lossTotalMin': 76989.07, 'lossTotalMax': 126837.2, 'gainTotalMin': 29056.59, 'gainTotalMax': 49989.87, 'lossQtyMin': 5974, 'lossQtyMax': 9703, 'degradedCount': 17}
+    G506 项 = {'sku': 'G506', 'grade': 'XC', 'basis': '空运', 'startNode': '取数', 'startAt': '2025-10-30', 'spanDays': 232.0, 'limit': 60, 'delayDays': 172.0, 'direction': 'loss', 'qtyMin': 237, 'qtyMax': 946, 'amountMin': 2854.63, 'amountMax': 11377.16, 'dailyMin': 1.38, 'dailyMax': 5.5, 'price': 12.0266, 'priceType': '参考成本价', 'degraded': []}
+[3] GET /api/review/assessment/export → 200, 18397 bytes
+
+[4] GET /api/review/sku/G506/checkreport → 200, 11292 bytes
+    sheets = ['段级明细与人工核对', '甘特', '核心原因与损益']
+    明细表头(第 10 行) = ['部门', '环节', '起点节点', '终点节点', '耗时(天)', '目标(天)', '判定', '执行人', '人工核对（请填写）']
+    含『人工核对』列 = True  → PASS
+
+===== T02 验收：PASS =====

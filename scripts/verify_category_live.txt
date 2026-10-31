@@ -1,0 +1,41 @@
+==============================================================================
+在线「品类分规则」冒烟验证
+==============================================================================
+目标后端 : http://127.0.0.1:8001
+超时     : 60s（超时 = FAIL，因为曾经出现过永久挂死）
+
+[0] 后端存活
+  [PASS] /api/health 可达 — 200 0.07s
+
+[1] 品类口径透传（/api/review/overview）
+  [PASS] category=手机膜 返回 200 — 200 1.28s 48080B
+  [PASS] category=手机膜 startNode == 取数 — '取数'
+  [PASS] category=手机膜 targetsProvisional == False — False
+  [PASS] category=手机膜 回显 category — '手机膜'
+  [PASS] category=手机壳 返回 200 — 200 0.03s 12923B
+  [PASS] category=手机壳 startNode == 提案 — '提案'
+  [PASS] category=手机壳 targetsProvisional == True — True
+  [PASS] category=手机壳 回显 category — '手机壳'
+
+[2] 缺省品类回退
+  [PASS] 无 category 参数 → 手机膜 — 200 startNode='取数'
+
+[3] 关键接口存活
+  [PASS] /api/history 200 — 200 0.03s 13561B
+  [PASS] /api/alerts 200 — 200 0.04s 53861B
+  [PASS] /api/review/assessment 200 — 200 0.03s 27789B
+  [PASS] /api/transport 200 — 200 0.21s 467494B
+  [PASS] /api/scenarios 200 — 200 0.02s 16094B
+  [PASS] /api/routes 200 — 200 0.06s 60100B
+  [PASS] /api/watch 200 — 200 0.01s 3582B
+
+[4] 快照去重（品类交替后 /api/history 长度应稳定）
+  [PASS] 三轮交替后快照张数稳定 — 观测=[29, 29, 29]（若递增=按'最后一张'去重，会把历史刷爆）
+
+[5] 快照品类一致性
+  [PASS] 快照指纹品类 == 自报 category（无跨品类串味） — 0 张不一致
+  [PASS] 无「手机壳指纹但无 category」的自动串味快照 — 0 张
+
+==============================================================================
+验收：PASS
+==============================================================================

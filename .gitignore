@@ -1,0 +1,50 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ===== 日志 / 临时文件 =====
+*.log
+_diag.txt
+.pytest_cache/
+
+# ===== 本地运行状态（手工填报记录、KPI 快照，仅存本机）=====
+backend/state/
+
+# ===== 备份产物（含数据库导出，体积大，仅存本机）=====
+backups/
+
+# ===== 环境变量文件（含数据库口令，切勿提交）=====
+.env
+.env.*
+!.env.example
+
+# ===== 前端依赖与构建产物（可重新生成）=====
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/*.timestamp-*.mjs
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
+# ===== Agent 工作区状态 =====
+.workbuddy/
+
+# ===== 仓库根临时物（探针 / 调试输出 / pytest 临时目录，不入库）=====
+# 约定：仓库根以 `_` 开头的都是临时物（与上面的 _diag.txt 同规矩）。
+# 根目录没有任何正式文件以 `_` 开头（已核 git ls-files），故整类忽略。
+# 本机安全策略禁止批量删除，垃圾只能留在磁盘上 → 用忽略规则兜住，
+# 避免以后 `git add -A` 把它们误提交。
+/_*
+
+# ===== Agent 工作区状态（与 .workbuddy/ 同规矩）=====
+.workbuddy-ai/
+
+# ===== 损坏版本库的本地备份（2026-11-01 对象丢失后保留，勿入库）=====
+.git.broken-*/

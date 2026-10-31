@@ -1,0 +1,43 @@
+sequenceDiagram
+    autonumber
+    participant PS as PowerShell ScheduledTasks<br/>(09:05 / 14:35)
+    participant AP as AutoPipeline<br/>(etl/auto_pipeline.py)
+    participant ETL as import_excel<br/>import_batch()
+    participant DB as MySQL<br/>(batch/part_doc/...)
+    participant IS as InflightService
+    participant RS as ReviewEngine<br/>(get_review_data)
+    participant REP as ReportingService
+    participant ML as Mailer
+    participant FE as 前端 InflightDaily/Assessment
+
+    Note over PS,AP: 每日自动管线（P0-2/P0-4/P0-7）
+    PS->>AP: 触发 auto_pipeline.py
+    AP->>ETL: 指纹增量导入（retry×5 若落盘未完成）
+    ETL->>DB: DELETE+批量 INSERT（指纹未变跳过）
+    AP->>IS: record_snapshot()
+    IS->>RS: get_review_data()
+    RS->>DB: _load_sku_docs()
+    RS->>RS: 轮次配对 + 段级 + 因果链 + 损益
+    IS-->>AP: 当日快照 + 今日新完成节点 diff
+    AP->>REP: daily_report()
+    REP->>RS: 取 overview/alerts 数据
+    REP-->>AP: 事中日报_YYYYMMDD.xlsx（5 sheets）
+    alt mail_enabled = true 且当日未发
+        AP->>ML: send_daily(1432640858@qq.com)
+        ML-->>AP: 发送结果（失败仅记日志）
+    end
+    AP-->>AP: 写 auto_pipeline.log + last_run.json
+
+    Note over FE,RS: 手动查询/导出（浏览器）
+    FE->>RS: GET /api/review/sku/G506
+    RS-->>FE: segments + rounds + multiRound + rootCause + assessment
+    FE->>RS: GET /api/review/sku/G506/checkreport
+    RS->>REP: sku_check_report(G506)
+    REP-->>FE: xlsx（甘特 + 人工核对列）
+    FE->>IS: GET /api/inflight/overview
+    IS->>RS: 复用缓存（指纹一致直接返回）
+    IS-->>FE: 在研清单 + 85% 预警 + 最差段 + rootCause
+    FE->>IS: GET /api/inflight/alerts / progress
+    IS-->>FE: 上报清单 / 7 天节点变化
+    FE->>IS: GET /api/inflight/daily-report/download
+    IS-->>FE: 日报 xlsx
