@@ -285,7 +285,8 @@ export default function Transport() {
           到货 5 天内标「留观 N/5 天」，超出标「已归档(到货 N 天)」——只是状态标记，不再隐藏。
         </Typography>
         <Typography variant="body2" color="text.secondary">
-          · 5 天截断只发生在**事中日报**的「货件运输」sheet（只列追踪中的票）；本页与导出 xlsx 均为全量。
+          · 事中日报的「货件运输」sheet 与本页**同口径全量保留**（SKU 在研期间每一票都在），
+          5 天留观同样只改状态文案，不删行。
         </Typography>
         <Typography variant="body2" color="text.secondary">
           · 「已运输(天)」在途票 = 发货→至今（超目标红字），已到货票 = 发货→到货。

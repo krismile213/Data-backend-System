@@ -34,9 +34,10 @@ inflight_service.py — 事中引擎（P0-4 数据面 / P0-7 清单 / P1-1 进�
     记录（无货件号）不生成「·未发货」占位段、不进在研卡点 —— 审批未完结前「未发货」
     是既定状态而非卡点；该渠道真发货后按正常货件追踪。网页在研清单/复盘不受影响
     （compute_inflight / get_inflight_data 的 mute_emag_noship 开关，日报侧传 True）。
-  · 货件运输（2026-10-15）：日报「货件运输」sheet 逐票列在研 SKU 的真货件
-    （货件号/发往地区/已运输天数）；到货 5 天内保留、超出不追踪
-    （窗口常量 transport_closure.TRACK_ARRIVED_DAYS，与后台货件运输看板同源）。
+  · 货件运输（2026-10-15 / 2026-11-01 改）：日报「货件运输」sheet 逐票列在研 SKU
+    的真货件（货件号/发往地区/已运输天数）；**全量保留**，到货 5 天只决定状态文案
+    （留观N/5天 → 已归档(到货N天)），不删行 —— 与后台货件运输看板同口径
+    （窗口常量 transport_closure.TRACK_ARRIVED_DAYS）。
 """
 
 import json
@@ -130,14 +131,34 @@ def _drop_muted_noship(seg_rows):
             if not (r.get("noShip") and is_muted_noship_segment(r.get("seg")))]
 
 
+def _shipment_sort_key(r):
+    """货件行排序键：**在途 → 留观 → 已归档**，组内按 SKU 聚合，再按紧急度。
+
+    为什么要分层：全量保留后一张 sheet 能到两三百行，若按 SKU 原顺序铺开，
+    排在最前的 SKU 往往全是几个月前的老票（已归档），真正要催的在途票被埋到中间。
+    分层后第一屏就是「还在路上」的票，历史票沉底留档。
+
+    组内：先按 SKU 聚合（同一 SKU 的票挨着，便于查单个 SKU），
+    再按「越该催越前」——在途运得久的在前，已到货新到的在前。
+    """
+    sku = r.get("sku") or ""
+    if r["archived"]:
+        return (2, sku, r["keep"] or 0, r["trk"])
+    if r["state"] == "在途":
+        return (0, sku, -(r["elapsed"] or 0), r["trk"])
+    return (1, sku, r["keep"] or 0, r["trk"])
+
+
 def _shipment_tracking_rows(sku, model, shipments, today):
     """在研 SKU 的货件行 → 事中日报「货件运输」sheet 数据源（纯函数）。
 
-    口径（2026-10-15 用户确认，与后台货件运输看板共用 transport_closure 真源）：
+    口径（2026-11-01 用户确认，与后台货件运输看板共用 transport_closure 真源）：
       · 只列**真货件**（有货件号且非未发货占位）—— 未发货渠道没有运输号/发货日，
         「哪个运输号 / 发往哪 / 运多少天」都无从谈起，且与总表「·未发货」标记重复；
       · 已运输天数 = elapsed（在途：发货→至今；已到货：发货→到货）；
-      · 到货 5 天内保留（留观 N/5 天），超出 5 天不追踪（shipment_keep 直接丢）。
+      · **全量保留**（2026-11-01 改）：SKU 进了在研就追到它彻底结束，到货多久都不删行。
+        5 天留观只降级为「追踪状态」文案 —— 留观 N/5 天 → 已归档(到货 N 天)，
+        不再把超 5 天的票从表里剔掉（旧口径下回头查一张老票得重新跑一遍）。
     入参 today 可注入（测试用）；缺省 = 本地今天。
     """
     rows = []
@@ -145,9 +166,14 @@ def _shipment_tracking_rows(sku, model, shipments, today):
         if it.get("noShip") or not it.get("trk"):
             continue
         ship, arr = it.get("ship"), it.get("arr")
-        if not shipment_keep(ship, arr, today):
-            continue                # 到货超 5 天 → 不追踪
         ago = arrival_ago_days(arr, today)
+        archived = not shipment_keep(ship, arr, today)
+        if arr is None:
+            track = "在途"
+        elif archived:
+            track = f"已归档(到货{ago}天)"
+        else:
+            track = f"留观{ago}/{TRACK_ARRIVED_DAYS}天"
         rows.append({
             "sku": sku, "model": model,
             "trk": it.get("trk") or "",
@@ -157,8 +183,11 @@ def _shipment_tracking_rows(sku, model, shipments, today):
             "elapsed": elapsed_days(ship, arr, today),
             "target": it.get("target"),
             "state": "已到货" if arr else "在途",
-            "keep": ago,            # 已到货行 = 到货至今几天（0~5）；在途行 = None
+            "keep": ago,            # 已到货行 = 到货至今几天；在途行 = None
+            "track": track,         # 追踪状态：在途 / 留观N/5天 / 已归档(到货N天)
+            "archived": archived,   # 超留观窗：只降级文案，不删行
         })
+    rows.sort(key=_shipment_sort_key)
     return rows
 
 
@@ -609,7 +638,7 @@ def compute_inflight(category=None, *, mute_emag_noship=False):
         owner = ((stay_row or {}).get("executor")
                  or (stay_row or {}).get("owner") or "")
         # 货件运输·逐票（日报 sheet 数据源）：只收**落进在研 items** 的 SKU 的真货件，
-        # 到货 5 天外的已在 _shipment_tracking_rows 里丢掉（超出不追踪）。
+        # 全量保留（到货超 5 天只降级成「已归档(到货N天)」，不删行）。
         shipment_tracking.extend(
             _shipment_tracking_rows(sku, info["model"], shipments, today))
         p1_dev_type, p1_launch = _part1_meta(info)
@@ -680,16 +709,19 @@ def compute_inflight(category=None, *, mute_emag_noship=False):
         # 运输在途·逐票（前端④催物流）：有未到货票 / 有未发货渠道的 SKU
         "transportInTransit": transport_in_transit,
         # 货件运输·逐票（事中日报「货件运输」sheet）：在研 SKU 的真货件，
-        # 已运输天数 + 到货留观 ≤5 天（口径真源 transport_closure）
-        "shipmentTracking": shipment_tracking,
+        # 全量保留 + 追踪状态标记（留观 ≤5 天 / 已归档 >5 天；口径真源 transport_closure）。
+        # 这里再全局排一次：单 SKU 内部已排好，但多 SKU 拼接后要保证「在途整体在前、
+        # 归档整体沉底」，否则第一个 SKU 的老票会占满第一屏。
+        "shipmentTracking": sorted(shipment_tracking, key=_shipment_sort_key),
         # 本月已消化超期段（2026-10-29）：完成段 ✗ 超期且终点在本月；
         # 日报「本月已消化超期」+「本月绩效视角」数据源（完成不蒸发）
         "digestedOverdue": digested,
         "digestedOverdueCount": len(digested),
         "shipmentTrackingDef": {
             "trackArrivedDays": TRACK_ARRIVED_DAYS,
-            "note": ("只列在研 SKU 的真货件（有货件号）；到货 5 天内保留，"
-                     "超出不追踪；未发货渠道无货件号不进本表"),
+            "note": ("只列在研 SKU 的真货件（有货件号），**全量保留**："
+                     "到货 ≤5 天标「留观N/5天」，超出标「已归档(到货N天)」，不删行；"
+                     "未发货渠道无货件号不进本表"),
         },
         "transportDef": {
             "l4Name": rs.l4[1],
@@ -1233,8 +1265,9 @@ def generate_daily_report(category=None, date_str=None):
     填进总表末列，随每日生成自动延续（真源与口径见 sku_note.py）。读不到=全空，不阻断。
     emag「有发货才标记」（2026-10-15）：日报口径走 mute_emag_noship=True ——
     审批中的 emag「·未发货」占位段不进日报；真发货后按正常货件追踪。
-    货件运输 sheet（2026-10-15）：在研 SKU 的真货件逐票（货件号/发往地区/已运输
-    天数），到货 5 天内保留、超出不追踪；无货件时不产生空页。
+    货件运输 sheet（2026-10-15 / 2026-11-01 改）：在研 SKU 的真货件逐票（货件号/
+    发往地区/已运输天数），**全量保留**（到货 5 天只降级状态文案，不删行）；
+    无货件时不产生空页。
     """
     from .reporting import daily_report as _daily_xlsx
     from .sku_note import read_notes

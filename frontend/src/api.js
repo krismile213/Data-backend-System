@@ -301,6 +301,21 @@ export function runBackup() {
   return postJson('/etl/backup');
 }
 
+/** 登记表导入状态（SKU登记表.xlsx：SKU换号 + 人工登记 两子表 → sku_alias / sku_hold） */
+export function fetchRegistryStatus() {
+  return request('/etl/registry');
+}
+
+/**
+ * 导入登记表（人工维护的两张子表）。
+ * 改完 `SKU登记表.xlsx` 的「人工登记」/「SKU换号」子表后点一下，无需重启服务；
+ * 成功会自动预热缓存（alerts/review 的「不催办」判定立即生效）。
+ * 自带护栏：登记文件/子表/表头缺失时不清库，返回 status="warned"。
+ */
+export function runRegistryImport(force = false) {
+  return postJson(`/etl/registry?force=${force ? 'true' : 'false'}`);
+}
+
 /* ---------------------------- 操作手册 ---------------------------- */
 
 /** 已收录的手册文档列表 */

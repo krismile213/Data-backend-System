@@ -17,8 +17,9 @@ transport.py — 货件运输看板（GET /api/transport*）
   - **明细全量保留**：本页是「货件明细」，所有票（含到货很久的历史票）都在
     items / KPI / 渠道聚合里，不因时间被隐藏；
   - 5 天留观只作为**追踪状态**标记：到货 ≤TRACK_ARRIVED_DAYS 天 → 「留观N/5天」，
-    超出 → 「已归档(到货N天)」。截断只发生在**事中日报「货件运输」sheet**
-    （`inflight_service._shipment_tracking_rows`），本页不截断。
+    超出 → 「已归档(到货N天)」。**两处都不截断**（2026-11-01 统一）：本页与
+    事中日报「货件运输」sheet（`inflight_service._shipment_tracking_rows`）
+    同口径全量保留，5 天只改状态文案。
 
 接口：
   GET /api/transport          KPI + 渠道聚合 + 逐票明细（全量）

@@ -1,17 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-test_shipment_tracking.py — 货件明细全量 / 事中日报 5 天留观
-============================================================
-2026-11-01 用户口径修正：
-  · **货件明细（后台货件运输页）必须全量保留** —— 到货多久都要在明细里，
-    5 天只作为「追踪状态」标记（留观 N/5 天 → 已归档(到货 N 天)），不得隐藏；
-  · **事中日报「货件运输」sheet 仍只列追踪中的票**（到货 ≤5 天），
-    报表要短、明细要全，两者不再共用同一条截断逻辑。
+test_shipment_tracking.py — 货件明细与事中日报「货件运输」sheet 的追踪口径
+========================================================================
+2026-11-01 用户口径（第二版，推翻了同日上午的「日报截断」结论）：
+  · **两处都全量保留** —— 后台货件运输页 + 事中日报「货件运输」sheet，
+    SKU 在研期间每一票都在，到货多久都不删行；
+  · 5 天留观只降级为「追踪状态」文案：留观 N/5 天 → 已归档(到货 N 天)。
+    理由（用户原话）：留观 5 天确实能减量，但会「增加重新查询的麻烦」，
+    要的是「整个 SKU 彻底结束才不追踪」。
 
 本文件钉住：
   ① transport_closure 纯函数边界（5 天临界 / 已运输天数三形态 / 到货至今钳 0）；
-  ② inflight `_shipment_tracking_rows`（日报口径：>5 天丢弃、noShip 排除）；
-  ③ `compute_transport`（明细口径：全量返回 + archived 标记 + KPI 分层计数）。
+  ② inflight `_shipment_tracking_rows`（全量保留 + 状态文案 + 排序 + noShip 排除）；
+  ③ 日报 sheet 渲染（归档票要真画出来，标题不能还写「超出不追踪」）；
+  ④ `compute_transport`（明细口径：全量返回 + archived 标记 + KPI 分层计数）。
 """
 
 import sys
@@ -72,25 +74,121 @@ def test_arrival_ago_days_clamps_future():
 
 
 # ---------------------------------------------------------------------------
-# ② 事中日报口径：只列追踪中的真货件
+# ② 事中日报口径：全量保留（5 天只改状态文案）
 # ---------------------------------------------------------------------------
-def test_tracking_rows_keep_5d_drop_beyond():
+def test_tracking_rows_keep_all_beyond_5d_marked_archived():
+    """超 5 天不再丢行 —— 只降级成「已归档(到货N天)」，这是本批的核心断言。
+
+    旧口径下 T-6D 会被 shipment_keep 直接 continue 掉；若哪天有人把
+    `if not shipment_keep(...): continue` 加回来，这条必须挂。
+    """
     ships = [
-        _ship("T-5D", arr=_dt(TODAY - timedelta(days=5))),    # 临界 5 天 → 保留
-        _ship("T-6D", arr=_dt(TODAY - timedelta(days=6))),    # 超 5 天 → 丢
-        _ship("T-TRANSIT", ship=_dt(TODAY - timedelta(days=7))),  # 在途 → 保留
-        _ship("", no_ship=True),                               # 未发货占位 → 丢
+        _ship("T-5D", arr=_dt(TODAY - timedelta(days=5))),      # 临界 5 天 → 留观
+        _ship("T-6D", arr=_dt(TODAY - timedelta(days=6))),      # 超 5 天 → 已归档（保留）
+        _ship("T-OLD", arr=_dt(TODAY - timedelta(days=40))),    # 很老 → 已归档（保留）
+        _ship("T-TRANSIT", ship=_dt(TODAY - timedelta(days=7))),  # 在途
+        _ship("", no_ship=True),                                 # 未发货占位 → 仍排除
     ]
     rows = svc_inflight._shipment_tracking_rows("GA", "M-GA", ships, TODAY)
-    assert [r["trk"] for r in rows] == ["T-5D", "T-TRANSIT"]
-    assert rows[0]["state"] == "已到货" and rows[0]["keep"] == 5
-    assert rows[1]["state"] == "在途" and rows[1]["keep"] is None
+    by = {r["trk"]: r for r in rows}
+    assert set(by) == {"T-5D", "T-6D", "T-OLD", "T-TRANSIT"}, "除未发货占位外一票都不能少"
+
+    assert by["T-5D"]["archived"] is False
+    assert by["T-5D"]["track"] == "留观5/5天"
+    assert by["T-6D"]["archived"] is True
+    assert by["T-6D"]["track"] == "已归档(到货6天)"
+    assert by["T-OLD"]["track"] == "已归档(到货40天)"
+    assert by["T-TRANSIT"]["state"] == "在途"
+    assert by["T-TRANSIT"]["track"] == "在途"
+    assert by["T-TRANSIT"]["archived"] is False
     # 天数走 elapsed：到货票 = 发货→到货；在途票 = 发货→今天
-    assert rows[1]["elapsed"] == 7
+    assert by["T-TRANSIT"]["elapsed"] == 7
+
+
+def test_tracking_rows_sort_transit_then_watch_then_archived():
+    """排序：在途最前（运得久在前）→ 留观（新到货在前）→ 已归档沉底。"""
+    ships = [
+        _ship("OLD-30", ship=_dt(TODAY - timedelta(days=60)),
+              arr=_dt(TODAY - timedelta(days=30))),
+        _ship("WATCH-4", ship=_dt(TODAY - timedelta(days=20)),
+              arr=_dt(TODAY - timedelta(days=4))),
+        _ship("TRANSIT-20", ship=_dt(TODAY - timedelta(days=20))),
+        _ship("WATCH-1", ship=_dt(TODAY - timedelta(days=16)),
+              arr=_dt(TODAY - timedelta(days=1))),
+        _ship("TRANSIT-9", ship=_dt(TODAY - timedelta(days=9))),
+    ]
+    rows = svc_inflight._shipment_tracking_rows("GA", "M-GA", ships, TODAY)
+    assert [r["trk"] for r in rows] == [
+        "TRANSIT-20",   # 在途，运得久
+        "TRANSIT-9",
+        "WATCH-1",      # 留观，新到货
+        "WATCH-4",
+        "OLD-30",       # 已归档沉底
+    ]
+
+
+def test_shipment_rows_global_order_transit_before_archived():
+    """多 SKU 拼接后必须再全局排一次：否则第一个 SKU 的老票占满第一屏。
+
+    模拟真实形态：A 仓全是几个月前的老票（已归档），B 仓还有在途票。
+    单 SKU 内部排序救不了这个 —— 拼接顺序决定第一屏，所以 compute_inflight
+    返回前用 `_shipment_sort_key` 全局重排（见 "shipmentTracking": sorted(...)）。
+    """
+    a = svc_inflight._shipment_tracking_rows("GA", "M-GA", [
+        _ship("A-OLD1", ship=_dt(TODAY - timedelta(days=200)),
+              arr=_dt(TODAY - timedelta(days=190))),
+        _ship("A-OLD2", ship=_dt(TODAY - timedelta(days=120)),
+              arr=_dt(TODAY - timedelta(days=110))),
+    ], TODAY)
+    b = svc_inflight._shipment_tracking_rows("GB", "M-GB", [
+        _ship("B-TRANSIT", ship=_dt(TODAY - timedelta(days=12))),
+        _ship("B-WATCH", ship=_dt(TODAY - timedelta(days=9)),
+              arr=_dt(TODAY - timedelta(days=2))),
+    ], TODAY)
+
+    rows = sorted(a + b, key=svc_inflight._shipment_sort_key)
+    # 归档组内按「新归档在前」：A-OLD2 到货 110 天 < A-OLD1 到货 190 天
+    assert [r["trk"] for r in rows] == ["B-TRANSIT", "B-WATCH", "A-OLD2", "A-OLD1"]
+    # 泛化断言：任何归档行都不能出现在非归档行之前
+    rank = [2 if r["archived"] else (0 if r["state"] == "在途" else 1) for r in rows]
+    assert rank == sorted(rank)
+
+
+def test_tracking_rows_report_sheet_keeps_archived():
+    """日报「货件运输」sheet 必须把归档票也画出来（标题不再写「超出不追踪」）。"""
+    import io
+
+    from openpyxl import load_workbook
+
+    from app import reporting
+
+    empty_alerts = {"todayNewOverdue": [], "ongoingOverdue": [], "warnings": []}
+    rows = svc_inflight._shipment_tracking_rows("GA", "M-GA", [
+        _ship("T-TRANSIT", ship=_dt(TODAY - timedelta(days=7))),
+        _ship("T-WATCH", ship=_dt(TODAY - timedelta(days=18)),
+              arr=_dt(TODAY - timedelta(days=3))),
+        _ship("T-ARCH", ship=_dt(TODAY - timedelta(days=45)),
+              arr=_dt(TODAY - timedelta(days=30))),
+    ], TODAY)
+
+    blob = reporting.daily_report(
+        category="手机膜", computed_at="x", date_str="d",
+        items=[], alerts=empty_alerts, gantts=[], shipments=rows)
+    wb = load_workbook(io.BytesIO(blob))
+    assert "货件运输" in wb.sheetnames
+
+    ws = wb["货件运输"]
+    assert "超出不追踪" not in str(ws["A1"].value), "标题不能再宣称不追踪"
+    assert "全量保留" in str(ws["A1"].value)
+
+    trks = [ws.cell(row=r, column=3).value for r in range(4, ws.max_row + 1)]
+    states = [ws.cell(row=r, column=10).value for r in range(4, ws.max_row + 1)]
+    assert trks == ["T-TRANSIT", "T-WATCH", "T-ARCH"], "归档票不能被丢掉"
+    assert states == ["在途", "留观3/5天", "已归档(到货30天)"]
 
 
 # ---------------------------------------------------------------------------
-# ③ 明细口径：compute_transport 全量返回
+# ④ 明细口径：compute_transport 全量返回
 # ---------------------------------------------------------------------------
 def _det(ships):
     return {"shipments": ships, "devType": "常规开发", "valid": True}
