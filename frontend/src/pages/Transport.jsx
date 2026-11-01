@@ -73,6 +73,7 @@ export default function Transport() {
 
   const k = data.kpi;
   const hubs = data.byHub.slice(0, 14);
+  const noShipCount = data.items.filter((i) => i.noShip).length;
 
   const hubOption = {
     tooltip: { trigger: 'axis' },
@@ -174,7 +175,10 @@ export default function Transport() {
 
       <Paper sx={{ mb: 2 }}>
         <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', p: 2, flexWrap: 'wrap' }}>
-          <Typography variant="subtitle2">逐票明细（{rows.length} 票）</Typography>
+          <Typography variant="subtitle2">逐票明细（{rows.length} 条）</Typography>
+          <Typography variant="caption" color="text.secondary">
+            含未发货占位 {noShipCount} 条（无货件号，不计入票数）
+          </Typography>
           <Box sx={{ flexGrow: 1 }} />
           <TextField size="small" label="SKU / 型号 / 货件号 / 渠道" value={q}
             onChange={(e) => { setQ(e.target.value); setPage(0); }} sx={{ width: 230 }} />
