@@ -172,8 +172,11 @@ def test_daily_report_column_written():
     # 2026-10-29 加图例行（A2）→ 表头 3→4、数据行 4→5
     assert ws.cell(row=4, column=14).value == "人工登记"
     assert ws.cell(row=4, column=13).value == "责任人"
-    # 有备注的 SKU 填上，没备注的留空
-    assert ws.cell(row=5, column=14).value == "暂时不弄了"
+    # 有备注的 SKU 填上，没备注的留空。
+    # 2026-10-29 起：备注 ≠ 豁免 —— 能走到这张表里的 SKU 必然没被豁免
+    # （豁免的 SKU 在 items 阶段就被剔除了），所以有备注一律加「⚠未豁免」，
+    # 免得业务以为「写一句暂时不弄了」就生效（G591 连报 60 天的教训）。
+    assert ws.cell(row=5, column=14).value == "暂时不弄了 ⚠未豁免"
     assert ws.cell(row=6, column=1).value == "G599"
     assert ws.cell(row=6, column=14).value in (None, "")
 

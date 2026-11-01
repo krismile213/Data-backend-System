@@ -236,25 +236,38 @@ def test_prune_events_by_retention_and_cap(monkeypatch):
 # ---------------------------------------------------------------------------
 # 4. 查询与导出
 # ---------------------------------------------------------------------------
+def _recent(days_ago):
+    """相对今天的日期串 —— 窗口类测试绝不能用字面量日期。
+
+    `window_rows` / `doc_delta` 的 cutoff = today - days；写死「2026-09-28」这类
+    字面量，只要真实时间往前走超过窗口长度，事件就被静默过滤掉，
+    测试表现为 newNodes 为空 / summary 全 0 —— 看着像功能坏了，其实是测试过期。
+    """
+    return (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+
+
 def test_window_rows_moves_action_time_to_actionAt(temp_state):
     """节点行自带的 at 是动作时间，被事件时刻覆盖前必须挪到 actionAt。"""
+    d = _recent(1)
+    ev_at = f"{d} 14:55:00"          # 事件时刻（这次同步跑的时间）
+    act_at = f"{d} 10:30:00"         # 动作时刻（审批节点上真实发生的）
     svc._save({
         "version": 1, "state": {},
         "events": [{
-            "date": "2026-09-28", "at": "2026-09-28 14:55:00",
+            "date": d, "at": ev_at,
             "category": "手机膜", "baseline": False,
             "summary": {"newDocs": 0, "newNodes": 1, "statusChanges": 0},
             "newDocs": [], "newNodes": [{"sku": "G506", "part": "Part6",
                                          "approvalNo": "9",
                                          "action": "素材接收",
-                                         "at": "2026-09-28 10:30:00",
+                                         "at": act_at,
                                          "operator": "李杰华"}],
             "statusChanges": [], "newSkus": [], "closedSkus": [],
         }]})
     out = svc.window_rows("手机膜", days=30)
     n = out["newNodes"][0]
-    assert n["actionAt"] == "2026-09-28 10:30:00", "动作时间不能被事件时刻吃掉"
-    assert n["at"] == "2026-09-28 14:55:00", "at 统一表示事件时刻"
+    assert n["actionAt"] == act_at, "动作时间不能被事件时刻吃掉"
+    assert n["at"] == ev_at, "at 统一表示事件时刻"
 
 
 def test_doc_delta_shape_when_no_state(temp_state):
@@ -271,29 +284,30 @@ def test_doc_delta_shape_when_no_state(temp_state):
 
 def test_doc_delta_aggregates_window(temp_state):
     """窗口聚合必须自洽：汇总 = 各日之和 = 各 SKU 之和。"""
+    d1, d2 = _recent(2), _recent(1)      # 都在 30 天窗口内（见 _recent 的说明）
     ev1_nodes = [{"sku": "G506", "part": "Part3", "approvalNo": "1",
-                  "action": "本地仓到货检查", "at": "2026-09-27 09:00:00",
+                  "action": "本地仓到货检查", "at": f"{d1} 09:00:00",
                   "operator": "仓管"}]
     ev2_nodes = [{"sku": "G506", "part": "Part6", "approvalNo": "1",
-                  "action": "素材接收", "at": "2026-09-28 10:30:00",
+                  "action": "素材接收", "at": f"{d2} 10:30:00",
                   "operator": "李杰华"},
                  {"sku": "G506", "part": "Part7", "approvalNo": "1",
-                  "action": "上架", "at": "2026-09-28 11:00:00",
+                  "action": "上架", "at": f"{d2} 11:00:00",
                   "operator": "运营"}]
     svc._save({
         "version": 1,
-        "state": {"手机膜": {"at": "2026-09-28 14:55:00", "fingerprint": "f",
+        "state": {"手机膜": {"at": f"{d2} 14:55:00", "fingerprint": "f",
                           "skuCount": 1, "docCount": 1,
                           "docs": {"G506|Part1|1": _doc()}}},
         "events": [
-            {"date": "2026-09-27", "at": "2026-09-27 09:25:00", "category": "手机膜",
+            {"date": d1, "at": f"{d1} 09:25:00", "category": "手机膜",
              "summary": {"newDocs": 2, "newNodes": 1, "statusChanges": 0,
                          "newSkus": 0, "closedSkus": 0},
              "newDocs": [{"sku": "G506", "part": "Part1", "approvalNo": "1"},
                          {"sku": "G506", "part": "Part2", "approvalNo": "2"}],
              "newNodes": ev1_nodes, "statusChanges": [],
              "newSkus": [], "closedSkus": []},
-            {"date": "2026-09-28", "at": "2026-09-28 14:55:00", "category": "手机膜",
+            {"date": d2, "at": f"{d2} 14:55:00", "category": "手机膜",
              "summary": {"newDocs": 1, "newNodes": 2, "statusChanges": 0,
                          "newSkus": 1, "closedSkus": 0},
              "newDocs": [{"sku": "G507", "part": "Part1", "approvalNo": "3"}],
@@ -303,8 +317,8 @@ def test_doc_delta_aggregates_window(temp_state):
     d = svc.doc_delta("手机膜", days=30)
     s = d["window"]["summary"]
     assert s["newDocs"] == 3 and s["newNodes"] == 3 and s["snapshots"] == 2
-    assert [r["date"] for r in d["window"]["byDay"]] == ["2026-09-27", "2026-09-28"]
-    assert d["last"]["at"] == "2026-09-28 14:55:00"
+    assert [r["date"] for r in d["window"]["byDay"]] == [d1, d2]
+    assert d["last"]["at"] == f"{d2} 14:55:00"
     by = {r["sku"]: r for r in d["window"]["bySku"]}
     assert by["G506"]["newDocs"] == 2 and by["G506"]["newNodes"] == 3
     assert by["G507"]["newDocs"] == 1 and by["G507"]["newNodes"] == 0

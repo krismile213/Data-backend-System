@@ -187,23 +187,32 @@ def test_compute_inflight_exemptions_out_of_items(patch_inflight_min):
 
 
 def test_daily_report_exempt_sheet(tmp_path):
-    """exempts 非空 → 第 6 sheet「豁免备查」；空 → 保持 5 sheets。"""
+    """exempts 非空 → 末尾追加「豁免备查」；空 → 只有固定 sheet，不产生空页。
+
+    固定 sheet 清单在这里**逐名列出**而不是只断言个数 —— 只数个数时，
+    后来加了两张月度 sheet（本月已消化超期 / 本月绩效视角），断言从 5 变 7，
+    失败信息只剩「assert 7 == 5」，看不出到底多了什么。
+    """
     empty_alerts = {"todayNewOverdue": [], "ongoingOverdue": [], "warnings": []}
     base = dict(category="手机膜", computed_at="x", date_str="d",
                 items=[], alerts=empty_alerts, gantts=[])
     from openpyxl import load_workbook
 
+    # 5 张主表 + 2026-10-29 加的两张月度表；「货件运输」按需（本例无 shipments）
+    FIXED = ["在研SKU状态总表", "超期明细", "风险预警", "在研SKU甘特图",
+             "异常上报清单", "本月已消化超期", "本月绩效视角"]
+
     with_ex = reporting.daily_report(**base, exempts=[
         {"sku": "G495", "model": "S26U", "kind": "hold",
          "reason": "人工登记：渠道取消（不列入追踪）"}])
     wb = load_workbook(io.BytesIO(with_ex))
-    assert len(wb.sheetnames) == 8 and wb.sheetnames[-1] == "豁免备查"
+    assert wb.sheetnames == FIXED + ["豁免备查"], "有豁免 → 末尾追加一张，顺序不变"
     ws6 = wb["豁免备查"]
     assert ws6.cell(row=4, column=1).value == "G495"
     assert ws6.cell(row=4, column=3).value == "人工登记"
 
     without = reporting.daily_report(**base)
-    assert len(load_workbook(io.BytesIO(without)).sheetnames) == 5
+    assert load_workbook(io.BytesIO(without)).sheetnames == FIXED, "无豁免 → 不产生空页"
 
 
 # ---------------------------------------------------------------------------
