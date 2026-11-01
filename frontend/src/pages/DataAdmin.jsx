@@ -182,7 +182,9 @@ export default function DataAdmin() {
         </Grid>
       </Grid>
 
-      {busy && busy !== 'backup' && (
+      {/* 只对「批次导入」显示这条长提示：备份 / 登记表导入各有自己的按钮 spinner，
+          共用 busy 的话会把 registry 当成批次名写进文案（「正在导入「registry」」）。 */}
+      {busy && busy !== 'backup' && busy !== 'registry' && busy !== 'registry-force' && (
         <Alert severity="info" sx={{ mb: 2 }}>
           正在导入「{busy === 'all' ? '全部变更批次' : busy}」…… 大批次可能需要几十秒，请勿关闭页面。
         </Alert>
