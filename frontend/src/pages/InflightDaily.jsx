@@ -1,13 +1,14 @@
 import React, { useMemo, useState } from 'react';
 import {
-  Box, Button, Chip, Dialog, DialogContent, DialogTitle, MenuItem, Paper, Table,
-  TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Tooltip, Typography,
+  Box, Button, Chip, Dialog, DialogContent, DialogTitle, MenuItem, Paper, Tab, Table,
+  TableBody, TableCell, TableContainer, TableHead, TableRow, Tabs, TextField, Tooltip, Typography,
 } from '@mui/material';
 import DownloadIcon from '@mui/icons-material/Download';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import PageHeader from '../components/PageHeader.jsx';
 import KpiCard from '../components/KpiCard.jsx';
 import SectionCard from '../components/SectionCard.jsx';
+import RegistryImport from '../components/RegistryImport.jsx';
 import { ErrorState, LoadingState } from '../components/StateViews.jsx';
 import TransportClosure, {
   ClosureBadge, PendingCountries,
@@ -15,7 +16,7 @@ import TransportClosure, {
 import useApi from '../hooks/useApi.js';
 import {
   fetchInflightOverview, fetchInflightSku, fetchInflightAlerts,
-  fetchDailyReports, runDailyReport, buildDailyReportUrl,
+  fetchDailyReports, runDailyReport, buildDailyReportUrl, fetchRegistryStatus,
 } from '../api.js';
 import { SEMANTIC } from '../theme.js';
 
@@ -219,6 +220,9 @@ export default function InflightDaily() {
   const { data, error, loading, refetch } = useApi(() => fetchInflightOverview(), []);
   const alerts = useApi(() => fetchInflightAlerts(), []);
   const reports = useApi(() => fetchDailyReports(), []);
+  // 登记表（SKU换号 / 人工豁免）状态：接口取不到时降级 null，不影响日报主流程
+  const registry = useApi(() => fetchRegistryStatus().catch(() => null), []);
+  const [tab, setTab] = useState('daily');
   const [selSku, setSelSku] = useState(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
@@ -313,7 +317,7 @@ export default function InflightDaily() {
         title="事中日报"
         subtitle="在研 SKU 的段级时效 / 风险预警 / 当日上报（数据 = 审批记录实时口径）"
         dense
-        actions={<>
+        actions={tab === 'daily' ? <>
           {msg && <Chip size="small" label={msg} sx={{ mr: 1 }} />}
           <Button size="small" variant="contained" startIcon={<PlayArrowIcon />}
             onClick={makeReport} disabled={busy}>
@@ -325,13 +329,26 @@ export default function InflightDaily() {
               下载 {latest.date}
             </Button>
           )}
-        </>}
+        </> : null}
       />
 
-      {loading && <LoadingState label="计算在研清单…" />}
-      {error && <ErrorState error={error} />}
+      {/* 次 sheet：登记表（SKU换号 / 人工豁免）—— 这两张子表直接决定日报里谁「不催办」，
+          属于日报口径的一部分，所以挂在事中日报页下，而不是数据管理页（那边管 ETL 与备份）。 */}
+      <Tabs value={tab} onChange={(e, v) => setTab(v)} sx={{ mb: 2, minHeight: 36 }}>
+        <Tab value="daily" sx={{ minHeight: 36 }}
+          label={`在研日报${data ? `（${kpi.inResearchCount ?? 0}）` : ''}`} />
+        <Tab value="registry" sx={{ minHeight: 36 }}
+          label={`登记表·人工豁免${registry.data ? `（${registry.data.holdTotal ?? 0}）` : ''}`} />
+      </Tabs>
 
-      {data && !error && (
+      {tab === 'daily' && (
+        <>
+          {loading && <LoadingState label="计算在研清单…" />}
+          {error && <ErrorState error={error} />}
+        </>
+      )}
+
+      {tab === 'daily' && data && !error && (
         <>
           <Box sx={{ display: 'grid',
             gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(6, 1fr)' },
@@ -664,6 +681,10 @@ export default function InflightDaily() {
             </Table>
           </SectionCard>
         </>
+      )}
+
+      {tab === 'registry' && (
+        <RegistryImport registry={registry.data} onDone={registry.refetch} />
       )}
 
       <SkuDialog sku={selSku} onClose={() => setSelSku(null)} />

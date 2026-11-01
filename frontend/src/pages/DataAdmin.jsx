@@ -22,15 +22,7 @@ import {
 import RefreshIcon from '@mui/icons-material/Refresh';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import BackupIcon from '@mui/icons-material/Backup';
-import UploadFileIcon from '@mui/icons-material/UploadFile';
-import {
-  fetchEtlScan,
-  runEtlImport,
-  fetchBackups,
-  runBackup,
-  fetchRegistryStatus,
-  runRegistryImport,
-} from '../api.js';
+import { fetchEtlScan, runEtlImport, fetchBackups, runBackup } from '../api.js';
 import KpiCard from '../components/KpiCard.jsx';
 import PageHeader from '../components/PageHeader.jsx';
 import useApi from '../hooks/useApi.js';
@@ -46,22 +38,16 @@ export default function DataAdmin() {
   const [busy, setBusy] = useState('');
   const [result, setResult] = useState(null);
 
-  // 统一请求 hook：批次扫描 + 已有备份列表 + 登记表状态一次拉取
-  // （登记表接口取不到时降级为 null，不影响批次导入/备份这两块主功能）
+  // 统一请求 hook：批次扫描 + 已有备份列表一次拉取
   const { data: payload, error, refetch: load } = useApi(
     async () => {
-      const [s, b, rg] = await Promise.all([
-        fetchEtlScan(),
-        fetchBackups(),
-        fetchRegistryStatus().catch(() => null),
-      ]);
-      return { scan: s, backups: b.items || [], registry: rg };
+      const [s, b] = await Promise.all([fetchEtlScan(), fetchBackups()]);
+      return { scan: s, backups: b.items || [] };
     },
     [],
   );
   const scan = payload ? payload.scan : null;
   const backups = payload ? payload.backups : [];
-  const registry = payload ? payload.registry : null;
 
   const doImport = async (batch, force) => {
     setBusy(batch || 'all');
@@ -99,35 +85,8 @@ export default function DataAdmin() {
     }
   };
 
-  // 登记表导入：改完 SKU登记表.xlsx 的「人工登记」/「SKU换号」子表后点一下即可生效。
-  // status 语义见 backend/etl/products_loader.import_registry：
-  //   imported 已导入 / skipped 指纹未变 / warned 护栏拦截（文件·子表·表头缺失，未清库）
-  const doRegistry = async (force) => {
-    setBusy(force ? 'registry-force' : 'registry');
-    setResult(null);
-    try {
-      const r = await runRegistryImport(force);
-      const st = r.status;
-      const head =
-        st === 'imported'
-          ? `登记表导入完成：人工登记 ${r.holdAfter ?? r.holdTotal} 条（原 ${r.holdBefore ?? '—'}）、`
-            + `SKU换号 ${r.aliasAfter ?? r.aliasTotal} 条（原 ${r.aliasBefore ?? '—'}）`
-          : st === 'skipped'
-            ? '登记表指纹未变化，已跳过（未改动数据库；如需强制重导请点「强制重导」）'
-            : `⚠ 登记表未导入（status=${st}）：${r.lastError || '见下方提示'}`;
-      setResult({
-        severity: st === 'imported' ? 'success' : st === 'skipped' ? 'info' : 'warning',
-        text: `${head}，耗时 ${r.elapsed} 秒`,
-        notes: r.notes || [],
-        rows: [],
-      });
-      await load();
-    } catch (e) {
-      setResult({ severity: 'error', text: `登记表导入失败：${e.message}`, rows: [] });
-    } finally {
-      setBusy('');
-    }
-  };
+  // 登记表（SKU换号 / 人工豁免）已挪到「事中日报」页的次 sheet ——
+  // 那两张子表直接决定日报里谁「不催办」，属于日报口径；本页只管批次 ETL 与备份。
 
   if (error && !scan) return <ErrorState prefix="数据管理加载失败" error={error} />;
   if (!scan) return <LoadingState />;
@@ -182,9 +141,9 @@ export default function DataAdmin() {
         </Grid>
       </Grid>
 
-      {/* 只对「批次导入」显示这条长提示：备份 / 登记表导入各有自己的按钮 spinner，
-          共用 busy 的话会把 registry 当成批次名写进文案（「正在导入「registry」」）。 */}
-      {busy && busy !== 'backup' && busy !== 'registry' && busy !== 'registry-force' && (
+      {/* 只对「批次导入」显示这条长提示：备份有自己的按钮 spinner，
+          共用 busy 的话会把 'backup' 当成批次名写进文案。 */}
+      {busy && busy !== 'backup' && (
         <Alert severity="info" sx={{ mb: 2 }}>
           正在导入「{busy === 'all' ? '全部变更批次' : busy}」…… 大批次可能需要几十秒，请勿关闭页面。
         </Alert>
@@ -193,15 +152,6 @@ export default function DataAdmin() {
       {result && (
         <Alert severity={result.severity} sx={{ mb: 2 }} onClose={() => setResult(null)}>
           <Typography variant="body2">{result.text}</Typography>
-          {(result.notes || []).length > 0 && (
-            <Box sx={{ mt: 1 }}>
-              {result.notes.map((n, i) => (
-                <Typography key={i} variant="caption" sx={{ display: 'block' }}>
-                  · {n}
-                </Typography>
-              ))}
-            </Box>
-          )}
           {result.rows.length > 0 && (
             <Box sx={{ mt: 1 }}>
               {result.rows.map((r) => (
@@ -216,89 +166,6 @@ export default function DataAdmin() {
           )}
         </Alert>
       )}
-
-      <Paper sx={{ p: 2, mb: 2 }}>
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
-          <Typography variant="subtitle2">登记表（SKU换号 / 人工豁免）</Typography>
-          <Box sx={{ flex: 1 }} />
-          <Tooltip title="改完 SKU登记表.xlsx 的『人工登记』或『SKU换号』子表后点这里，立即生效（无需重启服务）">
-            <span>
-              <Button
-                size="small"
-                variant="contained"
-                startIcon={busy === 'registry' ? <CircularProgress size={14} color="inherit" /> : <UploadFileIcon />}
-                onClick={() => doRegistry(false)}
-                disabled={!!busy || (registry && registry.xlsxExists === false)}
-              >
-                导入登记表
-              </Button>
-            </span>
-          </Tooltip>
-          <Tooltip title="文件指纹没变时会被跳过；改过内容但想强制重导（或怀疑库里数据不对）时用这个">
-            <span>
-              <Button
-                size="small"
-                variant="outlined"
-                startIcon={busy === 'registry-force' ? <CircularProgress size={14} color="inherit" /> : <RefreshIcon />}
-                onClick={() => doRegistry(true)}
-                disabled={!!busy || (registry && registry.xlsxExists === false)}
-              >
-                强制重导
-              </Button>
-            </span>
-          </Tooltip>
-        </Stack>
-
-        {!registry && (
-          <Typography variant="caption" color="text.secondary">
-            登记表状态接口不可用（/api/etl/registry）—— 批次导入与备份不受影响。
-          </Typography>
-        )}
-
-        {registry && (
-          <Box>
-            <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-              文件：{registry.xlsxPath}
-              {registry.xlsxExists === false && (
-                <Box component="span" sx={{ color: SEMANTIC.danger, fontWeight: 600 }}>
-                  　（文件不存在）
-                </Box>
-              )}
-            </Typography>
-            <Stack direction="row" spacing={3} sx={{ mt: 0.5, flexWrap: 'wrap' }}>
-              <Typography variant="caption">
-                人工登记 <b>{registry.holdTotal}</b> 条
-                <Box component="span" sx={{ color: 'text.secondary' }}>
-                  　（子表「{registry.holdSheet}」，命中即不催办）
-                </Box>
-              </Typography>
-              <Typography variant="caption">
-                SKU换号 <b>{registry.aliasTotal}</b> 条
-                <Box component="span" sx={{ color: 'text.secondary' }}>
-                  　（子表「{registry.aliasSheet}」）
-                </Box>
-              </Typography>
-              <Typography variant="caption" color="text.secondary">
-                上次导入：{registry.importedAt || '从未导入'}
-              </Typography>
-            </Stack>
-            {(registry.notes || []).slice(0, 6).map((n, i) => (
-              <Typography
-                key={i}
-                variant="caption"
-                sx={{ display: 'block', mt: 0.5, color: 'text.secondary' }}
-              >
-                · {n}
-              </Typography>
-            ))}
-            {registry.lastError && (
-              <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: SEMANTIC.danger }}>
-                {registry.lastError}
-              </Typography>
-            )}
-          </Box>
-        )}
-      </Paper>
 
       <Paper sx={{ p: 2, mb: 2 }}>
         <Typography variant="subtitle2" gutterBottom>批次导入状态</Typography>
