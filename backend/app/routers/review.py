@@ -691,9 +691,12 @@ def transport_rows(items, ruleset=None, ship_op="", today=None):
             "noteText": (f"已发{len(shipped)}·到{len(arrived)}·未到{len(pend)}："
                          + "、".join(hubs)),
             "pendingCount": len(pend),
-            # displayOnly：只画在甘特图/详情，不参与「当前停留/超期/预警/卡点」判定
-            # —— 否则 G594 的当前停留会从「采购→发货末批」被改成「运输·在途」，
-            # 责任人、距超时、绩效统计跟着全变，远超"多一行"的范围。
+            # displayOnly：只画在甘特图/详情，不进状态机、不产生「超期/预警/卡点」，
+            # 有真实卡点时也绝不抢「当前停留」—— 否则 G594 的当前停留会从
+            # 「采购→发货末批」被改成「运输·在途」，责任人、距超时、绩效统计跟着全变。
+            # ✅ 唯一例外（2026-11-05）：流程段**全部走完**且本行存在时，它由
+            #    inflight_service._prefer_in_transit() 兜底成为「当前停留」——
+            #    否则会退化成"取最晚完成的段"，把停留晒成一个早已到货的运输段。
             "displayOnly": True,
             "gap": False, "assessed": False,
         })

@@ -572,8 +572,9 @@ def compute_inflight(category=None, *, mute_emag_noship=False):
                 continue
             segs_out.append(_seg_public(r, st))
             # displayOnly 行（运输·在途）只进 segs_out 供甘特图/详情展示，
-            # **不进状态机**：它 t1 恒空，若参与 _pick_stay 会把「当前停留」
-            # 从真实卡点改成「运输·在途」，责任人/距超时/绩效全跟着变。
+            # **不进状态机**（不产生超期/预警），也不参与 _pick_stay 的常规选取：
+            # 它 t1 恒空，有真实卡点时抢走「当前停留」会把责任人/距超时/绩效全带偏。
+            # 只在流程段全绿后由 _prefer_in_transit() 兜底（2026-11-05）。
             if r.get("displayOnly"):
                 if st["state"] in (ST_RUNNING, ST_WARN, ST_OVER):
                     in_transit_row = (r, st)
