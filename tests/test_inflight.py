@@ -460,8 +460,13 @@ def test_inflight_structure(inflight_data):
     assert d["inResearchCount"] == len(d["items"])
     assert d["overdueSkuCount"] == sum(1 for x in d["items"]
                                        if x["status"] == svc.ST_OVER)
-    assert d["warnCount"] == sum(1 for x in d["items"]
-                                 if x["status"] == svc.ST_WARN)
+    # 预警必须是**段级**：items 各 warnSegs 之和。旧断言 `status == ST_WARN`
+    # 是自证式（status 与 warnCount 同源），G604/G606 明明各有 1 段 85% 预警却
+    # 因当前段超期被整行判成"超期"，于是 warnCount=0 —— 页面卡片 0、正下方
+    # 列表 2 条，同一个页面两个"预警数"。见 test_warn_count_same_source_as_alerts。
+    assert d["warnCount"] == sum(len(x["warnSegs"] or ()) for x in d["items"])
+    assert d["warnSkuCount"] == sum(1 for x in d["items"] if x["warnSegs"])
+    assert d["warnSkuCount"] <= d["warnCount"]
     assert d["multiRoundCount"] == sum(1 for x in d["items"]
                                        if x["multiRound"])
     for x in d["items"]:
@@ -475,6 +480,46 @@ def test_inflight_structure(inflight_data):
     lefts = [x["stayDaysLeft"] for x in d["items"]
              if x["stayDaysLeft"] is not None]
     assert lefts == sorted(lefts)
+
+
+def test_warn_count_same_source_as_alerts(inflight_data):
+    """预警数只能有一个真源：`compute_alerts_today()["warnings"]`。
+
+    回归（2026-11-05，G604/G606）：当前停留段「签样→寄送」已超期，另一段
+    「采购→本地仓到货」8/8 天（85% 预警线）。旧实现把 warnCount 算成
+    `status == 预警` 的 SKU 数 —— 而 status 是互斥的最高优先级快照，这行被判成
+    "超期"，于是 KPI 卡片显示 0，同一页面正下方的预警列表却是 2 条。
+    现在 items 的 warnSegs、alerts.warnings、日报索引三处必须完全相等。
+    """
+    alerts = svc.compute_alerts_today(data=inflight_data)
+    counts = svc.alert_counts(alerts)
+    assert inflight_data["warnCount"] == len(alerts["warnings"])
+    assert inflight_data["warnCount"] == counts["warnSegCount"]
+    assert inflight_data["warnSkuCount"] == counts["warnSkuCount"]
+    # 每个预警行都必须来自一个真实存在（在研）的 SKU，不能凭空多行
+    skus = {x["sku"] for x in inflight_data["items"]}
+    assert {w["sku"] for w in alerts["warnings"]} <= skus
+
+
+def test_alert_counts_keep_warn_and_over_on_same_sku():
+    """预警与超期**不互斥**：同一 SKU 两段各自超期/预警，两边都要算到。
+
+    段级 vs SKU 级也必须分开给：一个 SKU 两段预警 → warnSegCount=2 而
+    warnSkuCount=1；界面上说"预警 2"必须说清是段，否则和 SKU 数对不上账。
+    """
+    alerts = {
+        "todayNewOverdue": [{"sku": "G1", "seg": "签样→寄送"}],
+        "ongoingOverdue": [{"sku": "G2", "seg": "采购→本地仓到货"}],
+        "warnings": [{"sku": "G1", "seg": "采购→本地仓到货"},
+                     {"sku": "G1", "seg": "寄送→上架"},
+                     {"sku": "G2", "seg": "寄送→上架"}],
+    }
+    assert svc.alert_counts(alerts) == {"warnSegCount": 3, "warnSkuCount": 2,
+                                        "overdueSegCount": 2, "overdueSkuCount": 2}
+    empty = {"warnSegCount": 0, "warnSkuCount": 0,
+             "overdueSegCount": 0, "overdueSkuCount": 0}
+    assert svc.alert_counts({}) == empty
+    assert svc.alert_counts(None) == empty
 
 
 def test_inflight_g506_queryable(inflight_data, review_g506_done):

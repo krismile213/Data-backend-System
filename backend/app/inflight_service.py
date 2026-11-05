@@ -19,6 +19,8 @@ inflight_service.py — 事中引擎（P0-4 数据面 / P0-7 清单 / P1-1 进�
     每品类每日一张；同日指纹变化 → 替换当日张（保持每日一张最新）；保留 365 天。
   · 日报索引 `backend/state/daily_reports_index.json`：
         [{date, category, path, skuCount, overdueCount, warnCount, createdAt}]
+    ⚠️ overdueCount / warnCount 是**环节行数**（与对应 sheet 的数据行同数）；
+       skuCount 才是 SKU 数。两者单位不同，界面上不能混称「超期/预警 个」。
 
 口径注意：
   · 上报清单只针对**进行中**的超期段（终点没时间、elapsed > target）——
@@ -431,7 +433,12 @@ def compute_inflight(category=None, *, mute_emag_noship=False):
     （review）与网页在研清单（默认 False）保留完整记录不变。
 
     返回 {computedAt, **describe, inResearchCount, overdueSkuCount, warnCount,
-          multiRoundCount, todayNewNodes, items, skuDetails, exemptCount, exempted}
+          warnSkuCount, multiRoundCount, todayNewNodes, items, skuDetails,
+          exemptCount, exempted}
+    ⚠️ 计数单位（2026-11-05 统一）：overdueSkuCount / warnSkuCount / inResearchCount
+       是 **SKU 数**；warnCount 是 **预警环节数**（= items 各 warnSegs 之和 =
+       compute_alerts_today()["warnings"] 的行数）。预警与超期**不互斥**：一个 SKU
+       可以当前段超期、另一段同时 85% 预警，两处都要出现。
     items 项：{sku, model, staySeg, staySegDept, stayElapsed, stayTarget,
                stayDaysLeft, warnSegs, status, multiRound, rootCause, owner}
       stayDaysLeft = 距超时天数（目标 − 已停留；负 = 已超期 N 天）。
@@ -762,7 +769,15 @@ def compute_inflight(category=None, *, mute_emag_noship=False):
         "warnRatio": ratio,
         "inResearchCount": len(items),
         "overdueSkuCount": sum(1 for x in items if x["status"] == ST_OVER),
-        "warnCount": sum(1 for x in items if x["status"] == ST_WARN),
+        # 预警口径（2026-11-05 统一，**段级**）：已用 ≥85% 目标天且未超期的环节数。
+        # 旧实现数 `status == ST_WARN`，而 status 是**互斥的最高优先级快照**（当前
+        # 停留段一超期，整行就是"超期"）——于是「超期 SKU 10 / 临近预警 0」与页面
+        # 正下方的预警列表（warns.length=2）、日报「风险预警」sheet 行数自相矛盾
+        # （G604/G606：当前段 签样→寄送 超期，另一段 采购→本地仓到货 8/8 预警）。
+        # 现在与 `compute_alerts_today()["warnings"]`、日报索引 warnCount 同源，
+        # 一个 SKU 可同时贡献 1 条超期 + 1..N 条预警，**不互斥**。
+        "warnCount": sum(len(x["warnSegs"] or ()) for x in items),
+        "warnSkuCount": sum(1 for x in items if x["warnSegs"]),
         "multiRoundCount": sum(1 for x in items if x["multiRound"]),
         "items": items,
         "skuDetails": inflight_details,
@@ -1000,6 +1015,32 @@ def compute_alerts_today(category=None, data=None):
     warns.sort(key=lambda r: -(r["elapsed"] - r["target"] * ratio))
     return {"todayNewOverdue": new_over, "ongoingOverdue": ongoing,
             "warnings": warns}
+
+
+def alert_counts(alerts):
+    """预警/超期计数的**唯一入口**（2026-11-05）。
+
+    全部从 `compute_alerts_today()` 的行列表派生，不再从 `status` 枚举反推：
+
+    - `warnSegCount`  : 「风险预警」sheet 的行数 = 已用 ≥85% 目标天且未超期的**环节**数；
+    - `warnSkuCount`  : 涉及多少个 SKU（一个 SKU 可能有多段同时预警）；
+    - `overdueSegCount`: 「当日新超期 + 持续超期」的行数 = 进行中超期的**环节**数；
+    - `overdueSkuCount`: 涉及多少个 SKU。
+
+    三者口径不同、用途不同，**但必须能互相解释**：段数 ≥ SKU 数，且预警与超期
+    可以落在同一个 SKU 上（G604：超期 1 段 + 预警 1 段）。任何界面展示"预警数"
+    都必须说明是段还是 SKU，否则同一个页面会出现两个都对不上账的数字。
+    """
+    alerts = alerts or {}
+    warns = list(alerts.get("warnings") or [])
+    over_rows = list(alerts.get("todayNewOverdue") or []) + \
+        list(alerts.get("ongoingOverdue") or [])
+    return {
+        "warnSegCount": len(warns),
+        "warnSkuCount": len({w.get("sku") for w in warns}),
+        "overdueSegCount": len(over_rows),
+        "overdueSkuCount": len({r.get("sku") for r in over_rows}),
+    }
 
 
 def _seg_time_fields(det, seg_name):
@@ -1384,13 +1425,15 @@ def generate_daily_report(category=None, date_str=None):
     # （2026-10-29：修"残留成永久孤儿"，10-21 的 _141028 即首个受害者）
     stale_cleaned = _drop_stale_fallback_reports(target, stamp)
 
+    counts = alert_counts(alerts)
     entry = {
         "date": today, "category": cat, "path": str(path),
         "skuCount": data["inResearchCount"],
-        # 上报清单总数 = 当日新超期 + 持续超期
-        "overdueCount": (len(alerts["todayNewOverdue"])
-                         + len(alerts["ongoingOverdue"])),
-        "warnCount": len(alerts["warnings"]),
+        # 上报清单总数 = 当日新超期 + 持续超期（**环节行数**，与 sheet 行数一致）
+        "overdueCount": counts["overdueSegCount"],
+        # 预警同为**环节行数**（与「风险预警」sheet 行数、事中页 KPI 完全一致）
+        "warnCount": counts["warnSegCount"],
+        "warnSkuCount": counts["warnSkuCount"],
         "exemptCount": data.get("exemptCount", 0),
         "transportExemptCount": data.get("transportExemptCount", 0),
         "noteCount": note_applied,

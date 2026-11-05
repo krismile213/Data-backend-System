@@ -186,7 +186,7 @@ delayDays = airSpan − loss_route_limit(60)
 
 | # | 方法/路径 | 参数 | 返回要点 |
 |---|---|---|---|
-| 1 | GET `/api/inflight/overview` | — | `{computedAt, inResearchCount, overdueSkuCount, warnCount, multiRoundCount, pipeline: lastRun, items:[{sku, model, worstSeg, worstOverDays, warnSegs, status, multiRound, rootCause}]}`（在研=三部门未全完成 或 任一 Part 审批中；含无已结束单据的 SKU） |
+| 1 | GET `/api/inflight/overview` | — | `{computedAt, inResearchCount, overdueSkuCount, warnCount, warnSkuCount, multiRoundCount, pipeline: lastRun, items:[{sku, model, worstSeg, worstOverDays, warnSegs, status, multiRound, rootCause}]}`（在研=三部门未全完成 或 任一 Part 审批中；含无已结束单据的 SKU）。⚠️ 计数单位（2026-11-05 统一）：`overdueSkuCount`/`warnSkuCount`/`inResearchCount` 是 SKU 数，`warnCount` 是**预警环节数**（= `GET /api/inflight/alerts` 的 `warnings` 行数 = 日报「风险预警」sheet 行数），由 `inflight_service.alert_counts()` 单点派生；**预警与超期不互斥**，不得再由 `status` 枚举反推 |
 | 2 | GET `/api/inflight/sku/{code}` | — | `{segments:[{dept,seg,status(未开始/进行中/预警/超期/已完成),start,end,elapsed,target,judge,executor}], nodes, warnings, rootCause, multiRound, progress7d:[{date,newNodes:[]}]}` |
 | 3 | GET `/api/inflight/alerts` | — | `{todayNewOverdue:[{sku,seg,overDays,owner}], ongoingOverdue:[{sku,seg,cumDays,owner}], warnings:[{sku,seg,elapsed,target,ratio,owner}]}`（P0-7 上报清单数据源） |
 | 4 | GET `/api/inflight/progress` | `?sku=CODE&days=7` | `[{date, newNodes:[{node, at}]}]`（P1-1） |

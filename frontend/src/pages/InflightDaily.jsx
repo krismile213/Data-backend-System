@@ -242,6 +242,10 @@ export default function InflightDaily() {
   const todayNew = alerts.data?.todayNewOverdue || [];
   const ongoing = alerts.data?.ongoingOverdue || [];
   const warns = alerts.data?.warnings || [];
+  // 预警是**环节级**现象：一个 SKU 可能多段同时到 85%，且可以与"超期"并存
+  // （当前停留段已超期、另一段刚到预警线）。所以 KPI 卡片必须与下方预警列表
+  // 用同一个数组计数，绝不能再各自按 status 枚举算一遍（2026-11-05 口径统一）。
+  const warnSkuCount = new Set(warns.map((w) => w.sku)).size;
   const repItems = reports.data?.items || [];
   const latest = repItems[0];
 
@@ -357,10 +361,12 @@ export default function InflightDaily() {
               accent={SEMANTIC.brand} />
             <KpiCard label="超期 SKU" value={kpi.overdueSkuCount ?? 0}
               color={SEMANTIC.danger} accent={SEMANTIC.danger}
-              sub="任一段超过目标天" />
-            <KpiCard label="临近预警" value={kpi.warnCount ?? 0}
+              sub="当前停留环节已超目标天" />
+            <KpiCard label="临近预警·环节" value={alerts.data ? warns.length : (kpi.warnCount ?? 0)}
               color={SEMANTIC.warning} accent={SEMANTIC.warning}
-              sub="已用 ≥85% 目标天" />
+              sub={warnSkuCount > 0
+                ? `已用 ≥85% 目标天 · 涉及 ${warnSkuCount} 个 SKU`
+                : '已用 ≥85% 目标天（未超期）'} />
             <KpiCard label="多轮提交" value={kpi.multiRoundCount ?? 0}
               color={SEMANTIC.caution} accent={SEMANTIC.caution}
               sub="同一单据被撤回重提" />
@@ -415,7 +421,9 @@ export default function InflightDaily() {
             </Box>
             <TableContainer component={Paper} variant="outlined" sx={{ mt: 2 }}>
               <Typography variant="subtitle2" sx={{ p: 1 }}>
-                临近超期预警（{warns.length}）· 达到目标天的 85% 即亮灯
+                临近超期预警（{warns.length} 个环节）· 达到目标天的 85% 即亮灯
+                {warnSkuCount > 0 && warnSkuCount !== warns.length
+                  ? ` · 涉及 ${warnSkuCount} 个 SKU` : ''}
               </Typography>
               <Table size="small">
                 <TableHead>
@@ -644,14 +652,14 @@ export default function InflightDaily() {
           </SectionCard>
 
           <SectionCard title={`已生成日报（${repItems.length}）`}
-            subtitle="按保留期自动清理过期文件">
+            subtitle="按保留期自动清理过期文件 · 超期/预警列是环节行数（= 表内数据行）">
             <Table size="small">
               <TableHead>
                 <TableRow>
                   <TableCell>日期</TableCell>
-                  <TableCell>在研</TableCell>
-                  <TableCell>超期</TableCell>
-                  <TableCell>预警</TableCell>
+                  <TableCell>在研（SKU）</TableCell>
+                  <TableCell>超期（环节）</TableCell>
+                  <TableCell>预警（环节）</TableCell>
                   <TableCell>下载</TableCell>
                 </TableRow>
               </TableHead>
@@ -661,7 +669,12 @@ export default function InflightDaily() {
                     <TableCell>{r.date}</TableCell>
                     <TableCell>{r.skuCount ?? '—'}</TableCell>
                     <TableCell>{r.overdueCount ?? '—'}</TableCell>
-                    <TableCell>{r.warnCount ?? '—'}</TableCell>
+                    <TableCell title={r.warnSkuCount != null
+                      ? `涉及 ${r.warnSkuCount} 个 SKU` : undefined}>
+                      {r.warnCount ?? '—'}
+                      {r.warnSkuCount != null && r.warnSkuCount !== r.warnCount
+                        ? `（${r.warnSkuCount} SKU）` : ''}
+                    </TableCell>
                     <TableCell>
                       <Button size="small" startIcon={<DownloadIcon />}
                         href={buildDailyReportUrl(r.date)}>
