@@ -260,6 +260,58 @@ def test_pick_stay_running_without_target():
 
 
 # ---------------------------------------------------------------------------
+# 运输在途兜底（2026-11-05）：流程段全绿 + 货没到齐 → 停留改为「运输·在途」
+# ---------------------------------------------------------------------------
+def _in_transit():
+    """在途汇总行（displayOnly）：t1 恒空、无目标天，与 review.py 同形。"""
+    r = _row(seg="运输·在途(3票)", dept="运输",
+             t0=datetime(2026, 9, 1), t1=None, target=None)
+    r["displayOnly"] = True
+    r["noteText"] = "已发5·到2·未到3：泰国、加拿大"
+    r["pendingCount"] = 3
+    return (r, svc.seg_state(r, today=TODAY))
+
+
+def test_prefer_in_transit_when_all_process_segments_done():
+    """回归 G587-G597：流程段全完成、货运未闭环 → 停留必须落在「在途」。
+
+    旧行为：`_pick_stay` 退化取「最晚完成的段」，晒出已到货的 运输·海运(5票)、
+    已停留=None —— 看着像货还在海上，其实在等的是那批未到货的票。
+    """
+    done = _row(seg="运输·海运(5票)", dept="运输",
+                t0=datetime(2026, 8, 1), t1=datetime(2026, 8, 20), target=35)
+    st_done = svc.seg_state(done, today=TODAY)
+    assert st_done["state"] == svc.ST_DONE
+    picked = svc._prefer_in_transit(st_done, "pending", _in_transit())
+    assert picked is not None
+    assert picked[0]["seg"].startswith("运输·在途")
+
+
+def test_prefer_in_transit_never_steals_a_real_bottleneck():
+    """有真实卡点时不能被在途抢走（11-01 displayOnly 决定：责任人与距超时不变）。"""
+    # target=30：TODAY 距 t0 21 天 → 70%，稳定落在「进行中」（不受预警线调整影响）
+    running = _row(seg="采购→发货末批", dept="后勤",
+                   t0=datetime(2026, 9, 1), t1=None, target=30)
+    st_running = svc.seg_state(running, today=TODAY)
+    assert st_running["state"] == svc.ST_RUNNING
+    assert st_running["state"] != svc.ST_DONE
+    assert svc._prefer_in_transit(st_running, "pending", _in_transit()) is None
+
+
+def test_prefer_in_transit_requires_pending_closure():
+    """闭环/一票未发（closed/none）时不该兜底 —— 没有"货在路上"这回事。"""
+    done = _row(seg="运输·海运(5票)", dept="运输",
+                t0=datetime(2026, 8, 1), t1=datetime(2026, 8, 20), target=35)
+    st_done = svc.seg_state(done, today=TODAY)
+    assert svc._prefer_in_transit(st_done, "closed", _in_transit()) is None
+    assert svc._prefer_in_transit(st_done, "none", _in_transit()) is None
+    # pending 但压根没有在途行（异常/空数据）→ 不兜底，保持原判定
+    assert svc._prefer_in_transit(st_done, "pending", None) is None
+    # 没有任何段（段模板缺失）→ 也不硬塞在途，交给上游保守处理
+    assert svc._prefer_in_transit(None, "pending", _in_transit()) is not None
+
+
+# ---------------------------------------------------------------------------
 # 甘特记录（_gantt_records：未完成段延伸至今日 / 未开始段跳过 / neutral 标记）
 # ---------------------------------------------------------------------------
 def test_gantt_records_extends_unfinished():
@@ -480,6 +532,17 @@ def test_inflight_structure(inflight_data):
     lefts = [x["stayDaysLeft"] for x in d["items"]
              if x["stayDaysLeft"] is not None]
     assert lefts == sorted(lefts)
+    # 当前停留不得是"已完成"的段：流程段全绿但货没到齐时，真实现场是等货，
+    # 应落在 displayOnly 的「运输·在途」行（2026-11-05 修 G587-G597；
+    # 旧行为退化取最晚完成段 → 停留=已到货的海运段、已停留=None，像货还在海上）。
+    for x in d["items"]:
+        det = d["skuDetails"][x["sku"]]
+        seg = next((s for s in det["segments"] if s["seg"] == x["staySeg"]), None)
+        has_transit = any(s.get("displayOnly") and s.get("state") != "已完成"
+                          for s in det["segments"])
+        if det.get("shipClosure") == "pending" and has_transit:
+            assert not (seg and seg["state"] == "已完成"), (
+                f"{x['sku']} 停留指向已完成段 {x['staySeg']}，但有在途票未到")
 
 
 def test_warn_count_same_source_as_alerts(inflight_data):

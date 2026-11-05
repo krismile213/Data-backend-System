@@ -326,6 +326,27 @@ def _pick_stay(state_rows):
     return row, st, days_left
 
 
+def _prefer_in_transit(stay_st, closure, in_transit_row):
+    """流程段全跑完、货运还没到齐 → 当前停留改用「运输·在途」。
+
+    `_pick_stay` 在没有"进行中/预警/超期"段时会退化成"取最晚完成的段"，那是给
+    「全部完成但仍未闭环（缺终点节点）」这种**数据缺口**用的。可真实现场最常见的
+    是：流程段全绿，货还压在海上/海关 —— 此时晒一个已到货的运输段 + 已停留=None，
+    看起来像货还在路上，而真正在等的是未到货的那批票（G587-G597 实测 10 个）。
+
+    只在这两种情况下兜底，绝不把在途塞进有真实卡点的 SKU（11-01 的 displayOnly
+    决定：在途行 t1 恒空，抢「当前停留」会把责任人和距超时全带偏）：
+      · `closure == "pending"`：确实有已发货未到货的票；
+      · 停留段为空或已完成：没有任何在跑的流程段。
+    `in_transit_row`：(段行, seg_state) 或 None。返回同一形状或 None（不兜底）。
+    """
+    if closure != "pending" or in_transit_row is None:
+        return None
+    if stay_st is None or stay_st.get("state") == ST_DONE:
+        return in_transit_row
+    return None
+
+
 # ---------------------------------------------------------------------------
 # 全量在研计算
 # ---------------------------------------------------------------------------
@@ -534,6 +555,9 @@ def compute_inflight(category=None, *, mute_emag_noship=False):
 
         # ---- 段状态机 + 汇总 ----
         segs_out, warn_list, over_list, state_rows = [], [], [], []
+        # 运输·在途汇总行（displayOnly）：不进状态机，但只要流程段全跑完、货还没到齐，
+        # 它就是唯一真实在跑的事 —— 兜底当「当前停留」用（见下方 stay 判定）。
+        in_transit_row = None
         for r in seg_rows:
             # 流程依赖修正②：Part6 未建单且 Part3 仍审批中 → 本地仓到货检查未
             # 完成，「采购→本地仓到货」按未完成重判（检查动作时间不算完成）。
@@ -551,6 +575,8 @@ def compute_inflight(category=None, *, mute_emag_noship=False):
             # **不进状态机**：它 t1 恒空，若参与 _pick_stay 会把「当前停留」
             # 从真实卡点改成「运输·在途」，责任人/距超时/绩效全跟着变。
             if r.get("displayOnly"):
+                if st["state"] in (ST_RUNNING, ST_WARN, ST_OVER):
+                    in_transit_row = (r, st)
                 continue
             state_rows.append((r, st))
             if st["state"] == ST_OVER:
@@ -682,6 +708,16 @@ def compute_inflight(category=None, *, mute_emag_noship=False):
                         if not is_transport_segment(r.get("dept"),
                                                     r.get("seg"), l4_name)]
         stay_row, stay_st, stay_left = _pick_stay(stay_src or state_rows)
+        # 运输在途兜底（2026-11-05）：流程段**全部走完**、但货还有票没到，此时
+        # `_pick_stay` 会退化成"取最晚完成的段"，把当前停留晒成一个早已到货的
+        # 运输段（G587-G597 实测 10 个：停留=运输·海运(5/7票)、已停留=None），
+        # 看的人会以为货还在海上；而真正在等的是那批未到货的票。
+        # 只在「没有任何进行中/预警/超期的流程段」时兜底 —— 有真实卡点时仍以
+        # 卡点为准（11-01 的 displayOnly 决定不变，那是防止在途抢走卡点）。
+        _fallback = _prefer_in_transit(stay_st, closure, in_transit_row)
+        if _fallback is not None:
+            stay_row, stay_st = _fallback
+            stay_left = None            # 在途票无目标天（target=None），不算距超时
         stay_elapsed = None
         if stay_st is not None:
             stay_elapsed = stay_st.get("elapsed")
