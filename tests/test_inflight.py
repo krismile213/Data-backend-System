@@ -102,6 +102,51 @@ def test_seg_unassessed_no_threshold():
 
 
 # ---------------------------------------------------------------------------
+# 流程依赖修正（2026-11-05 用户口径）：Part3→Part6 硬依赖 + 素材通用跳段
+# ---------------------------------------------------------------------------
+def test_seg_force_open_overrides_done():
+    """force_open：t1 有值也按未完成重判 —— Part3 审批中时检查动作≠检查完成。
+
+    复刻 G602 实测形态：检查动作 09-10 已发生（t1 有值），但 Part3 单据仍在
+    审批中 → 「采购→本地仓到货」仍是当前卡点（08-31 采购起已 22 天/目标 8）。
+    """
+    r = _row(seg="采购→本地仓到货", dept="后勤",
+             t0=_dt("2026-08-31"), t1=_dt("2026-09-10"), target=8)
+    assert svc.seg_state(r, today=TODAY)["state"] == svc.ST_DONE   # 默认口径不变
+    st = svc.seg_state(r, today=TODAY, force_open=True)
+    assert st["state"] == svc.ST_OVER
+    assert st["elapsed"] == 22 and st["over"] == 14
+
+
+def test_dep_rules_part6_missing_blocks_shipping():
+    """Part6 未建单 + Part3 审批中 → 「签样→寄送」摘除，注明卡在本地仓到货检查。"""
+    parts = {"Part3": [{"status": "审批中"}]}
+    p6_missing, p3_running, muted = svc._dep_rules(parts, mat_generic=False)
+    assert p6_missing and p3_running
+    assert "签样→寄送" in muted
+    assert "本地仓到货检查" in muted["签样→寄送"]
+    # 素材通用时 Part6 三段全摘；签样→寄送的原因以「通用跳过」为准（setdefault）
+    _, _, m2 = svc._dep_rules(parts, mat_generic=True)
+    assert set(m2) == {"签样→寄送", "寄送→拍摄交付", "拍摄交付→素材加工"}
+    assert "素材通用" in m2["签样→寄送"]
+
+
+def test_dep_rules_part6_present_no_mute():
+    """Part6 已建单且不通用 → 无摘除（照常按段判定）。"""
+    parts = {"Part3": [{"status": "已结束"}], "Part6": [{"status": "审批中"}]}
+    p6_missing, _p3, muted = svc._dep_rules(parts, mat_generic=False)
+    assert not p6_missing and not muted
+
+
+def test_dep_rules_part6_missing_part3_done():
+    """Part6 未建但 Part3 无审批中单（数据异常边界）：仍摘寄送，文案不写卡检查。"""
+    parts = {"Part3": [{"status": "已结束"}]}
+    p6_missing, p3_running, muted = svc._dep_rules(parts, mat_generic=False)
+    assert p6_missing and not p3_running
+    assert muted["签样→寄送"] == "Part6 单据未建，寄送尚未开始"
+
+
+# ---------------------------------------------------------------------------
 # 快照：写入 / 同日替换 / 逐日 diff（临时 state 文件，不碰真实数据）
 # ---------------------------------------------------------------------------
 @pytest.fixture()
@@ -449,6 +494,42 @@ def test_inflight_g506_queryable(inflight_data, review_g506_done):
     # 全段完成 + 运输已闭环 → 免追踪：不在 items，进 transportExempted
     assert "G506" not in {x["sku"] for x in inflight_data["items"]}
     assert "G506" in {x["sku"] for x in inflight_data["transportExempted"]}
+
+
+def test_part6_blocked_not_urging_shipping(inflight_data):
+    """Part6 未建单 SKU：不催寄送 —— 当前停留/超期明细不得含「签样→寄送」。
+
+    业务口径（2026-11-05 用户确认）：Part6 单据在本地仓到货检查(Part3)通过后才建；
+    G602-G606 实测曾把当前停留误判成「签样→寄送」催产品部寄送，而真实卡点是
+    后勤的本地仓到货检查。
+    """
+    blocked = [x for x in inflight_data["items"] if x.get("part6Blocked")]
+    assert blocked, "本机数据应存在 Part6 未建单的在研 SKU（如 G599-G607）"
+    for x in blocked:
+        assert x["staySeg"] != "签样→寄送", f"{x['sku']} 仍在催寄送"
+        assert all(o["seg"] != "签样→寄送" for o in x["overSegs"]), x["sku"]
+    # 已知锚点：G602 的当前停留应回落到「采购→本地仓到货」（检查未完成）
+    g602 = next((x for x in blocked if x["sku"] == "G602"), None)
+    if g602 is not None:
+        assert g602["staySeg"] == "采购→本地仓到货", g602["staySeg"]
+
+
+def test_generic_material_skips_part6_segments(inflight_data):
+    """素材通用 SKU：Part6 三段不进当前停留/超期/预警；段明细保留并带 skipNote。"""
+    p6_segs = {"签样→寄送", "寄送→拍摄交付", "拍摄交付→素材加工"}
+    generic = [x for x in inflight_data["items"] if x.get("genericMaterial")]
+    for x in generic:
+        assert x["staySeg"] not in p6_segs, f"{x['sku']} 停留在 Part6 段"
+        assert all(o["seg"] not in p6_segs for o in x["overSegs"]), x["sku"]
+        assert all(s not in p6_segs for s in x["warnSegs"]), x["sku"]
+        det = inflight_data["skuDetails"].get(x["sku"]) or {}
+        rows = [s for s in (det.get("segments") or []) if s.get("seg") in p6_segs]
+        assert all(r.get("skipNote") for r in rows), \
+            f"{x['sku']} 被跳过的 Part6 段缺 skipNote 说明"
+    # 全量 items 的通用字段必须成对出现且为 bool（总表「素材」列的数据源）
+    for x in inflight_data["items"]:
+        assert isinstance(x.get("genericMaterial"), bool)
+        assert isinstance(x.get("genericBasis"), str)
 
 
 @pytest.fixture(scope="module")

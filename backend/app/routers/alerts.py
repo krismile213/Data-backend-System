@@ -304,23 +304,12 @@ def _proposal_time(sku_data, part, action):
 
 
 def _generic_material(sku_data):
-    """素材通用判定（route_check.is_generic_material 口径）。"""
-    for d in sorted((sku_data["parts"].get("Part6") or []),
-                    key=lambda x: x["create"] or datetime.min, reverse=True):
-        raw = d["raw"]
-        decide = _clean(raw.get("是否决定拍摄"))
-        ref_sku = _clean(raw.get("素材参考SKU"))
-        ref_model = _clean(raw.get("素材参考型号"))
-        if decide == "否" or ref_sku or ref_model:
-            basis = []
-            if decide == "否":
-                basis.append("是否决定拍摄=否")
-            if ref_sku or ref_model:
-                basis.append(f"素材参考={ref_sku or ref_model}")
-            return True, "；".join(basis)
-        if decide == "是":
-            return False, "是否决定拍摄=是(需真机拍摄)"
-    return False, "未标注拍摄/参考(默认按需拍摄)"
+    """素材通用判定 —— **委托** `app.generic_material.judge`（2026-11-05 单一真源）。
+
+    事中日报总表「素材」列用同一个函数，两处不得再各写一套。
+    """
+    from ..generic_material import judge
+    return judge(sku_data["parts"].get("Part6") or [])
 
 
 def _shipments(sku_data, rs=None):

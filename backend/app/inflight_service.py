@@ -47,6 +47,7 @@ from datetime import date, datetime, timedelta
 
 from . import exemption
 from .category_rules import rules_for
+from .generic_material import judge as judge_generic
 from .config import STATE_DIR, list_batches
 from .transport_closure import (TRACK_ARRIVED_DAYS, arrival_ago_days,
                                 classify_transport, elapsed_days,
@@ -80,7 +81,7 @@ ST_DONE = "已完成"
 ST_GAP = "留空"
 
 
-def seg_state(row, today=None, ratio=0.85):
+def seg_state(row, today=None, ratio=0.85, force_open=False):
     """对一段行（review_sku_segments 产出）做事中状态判定。
 
     today 可注入（测试用）；缺省 = 本地今天。
@@ -89,6 +90,11 @@ def seg_state(row, today=None, ratio=0.85):
       over    = 超期天数（elapsed − target，仅超期段 > 0）。
     不误报已完成段：终点已有时间的段判 ✓/✗（judge 已有），不进预警区。
     noShip 行（渠道未发货异常）终点恒为"至今"，按进行中口径累计。
+
+    force_open（2026-11-05 流程依赖修正）：无视 t1 强制按「未完成」判定。
+    场景：Part6 未建单且 Part3 仍审批中时，「采购→本地仓到货」段虽已有
+    本地仓到货检查的**动作**时间（t1 有值），但 Part3 单据没走完 = 检查没通过
+    = Part6 单据建不出来 —— 检查动作 ≠ 检查完成，该段仍是当前卡点。
     """
     if row.get("gap"):
         return {"state": ST_GAP, "elapsed": None, "target": None,
@@ -97,7 +103,8 @@ def seg_state(row, today=None, ratio=0.85):
     if today is None:
         today = date.today()
     # 已完成：终点有时间（noShip 行的 t1 是"今天"占位，视作未完成）
-    if row.get("t1") is not None and not row.get("noShip"):
+    if (row.get("t1") is not None and not row.get("noShip")
+            and not force_open):
         return {"state": ST_DONE, "elapsed": None, "target": target,
                 "warnLine": None, "over": None}
     t0 = row.get("t0")
@@ -320,6 +327,42 @@ def _pick_stay(state_rows):
 # ---------------------------------------------------------------------------
 # 全量在研计算
 # ---------------------------------------------------------------------------
+def _dep_rules(parts_docs, mat_generic):
+    """流程依赖修正判定（纯函数，2026-11-05 用户口径）。
+
+    业务规则：Part6(寄送拍摄/素材)单据只在 Part3 本地仓到货检查**通过后**创建
+    （实测：108 个可比 SKU 里 85 个与 Part3 完成同一秒建单）。因此——
+      ① Part6 未建单时，「签样→寄送」还没轮到（单据都出不来），不是卡点：
+        从当前停留/超期/预警候选摘除（段行保留仅展示）。否则会催产品部去寄送，
+        而真实卡点是后勤的本地仓到货检查（G602-G606 实测误催寄送）。
+      ② 此时 Part3 单据审批中 = 本地仓到货检查未完成：「采购→本地仓到货」段
+        即使已有检查动作时间（t1 有值）也按未完成重判（seg_state force_open）——
+        检查动作 ≠ 检查完成。
+      ③ 素材通用 SKU 跳过 Part6 三段（签样→寄送/寄送→拍摄交付/拍摄交付→素材
+        加工）：本地仓到货后直接上架 Listing+广告，寄送/拍摄/素材加工永远不会
+        发生，不得按「签样→寄送」长期计超期（否则通用 SKU 在同一段永久挂红）。
+
+    返回 (p6_missing, p3_running, dep_muted)：
+      p6_missing  Part6 未建单 = 本地仓到货检查未通过
+      p3_running  Part3 仍有审批中单据
+      dep_muted   {段名: 摘除原因} —— 命中的段只展示不判定
+    """
+    p6_missing = not (parts_docs.get("Part6") or [])
+    p3_running = any(d.get("status") == "审批中"
+                     for d in (parts_docs.get("Part3") or []))
+    dep_muted = {}
+    if mat_generic:
+        for _s in ("签样→寄送", "寄送→拍摄交付", "拍摄交付→素材加工"):
+            dep_muted[_s] = ("素材通用·跳过寄送拍摄/素材加工，"
+                             "本地仓到货后直进上架 Listing+广告")
+    if p6_missing:
+        dep_muted.setdefault(
+            "签样→寄送",
+            "Part6 单据建不出来·卡在本地仓到货检查(Part3 审批中)，还没轮到寄送"
+            if p3_running else "Part6 单据未建，寄送尚未开始")
+    return p6_missing, p3_running, dep_muted
+
+
 def _dedupe_parts(info):
     """按 SKU 组织 parts_docs（与 compute_review 同规则：同 Part 去重留最新）。"""
     from .routers.review import dedupe_docs
@@ -438,6 +481,12 @@ def compute_inflight(category=None, *, mute_emag_noship=False):
 
         # 去重后的全量单据（新算段级与货件配对共用一份，避免重复去重）
         parts_docs = _dedupe_parts(info)
+        # 素材通用（2026-11-05）：单一真源见 generic_material.py。
+        mat_generic, mat_basis = judge_generic(parts_docs.get("Part6") or [])
+        # 流程依赖修正（2026-11-05 用户口径，规则详见 _dep_rules docstring）：
+        # Part6 未建单 → 「签样→寄送」未轮到，摘出停留/超期/预警；素材通用 →
+        # Part6 三段整段跳过；Part3 审批中 → 「采购→本地仓到货」按未完成重判。
+        p6_missing, p3_running, dep_muted = _dep_rules(parts_docs, mat_generic)
         detail = details.get(sku)
         if detail is not None:
             seg_rows = detail["segments"]
@@ -479,7 +528,17 @@ def compute_inflight(category=None, *, mute_emag_noship=False):
         # ---- 段状态机 + 汇总 ----
         segs_out, warn_list, over_list, state_rows = [], [], [], []
         for r in seg_rows:
-            st = seg_state(r, today=today, ratio=ratio)
+            # 流程依赖修正②：Part6 未建单且 Part3 仍审批中 → 本地仓到货检查未
+            # 完成，「采购→本地仓到货」按未完成重判（检查动作时间不算完成）。
+            force_open = (p6_missing and p3_running
+                          and r.get("seg") == "采购→本地仓到货")
+            st = seg_state(r, today=today, ratio=ratio, force_open=force_open)
+            if r.get("seg") in dep_muted:
+                # 流程依赖修正①③：被依赖/跳段规则摘除的段 —— 只展示不判定，
+                # 不进当前停留/超期/预警（skipNote 说明为什么这一段没有状态）。
+                segs_out.append({**_seg_public(r, st),
+                                 "skipNote": dep_muted[r.get("seg")]})
+                continue
             segs_out.append(_seg_public(r, st))
             # displayOnly 行（运输·在途）只进 segs_out 供甘特图/详情展示，
             # **不进状态机**：它 t1 恒空，若参与 _pick_stay 会把「当前停留」
@@ -658,6 +717,13 @@ def compute_inflight(category=None, *, mute_emag_noship=False):
                           "isCurrent": o[1].get("seg") == (stay_row or {}).get("seg")}
                          for o in over_list],
             "stayOver": cur_over,
+            # 素材通用标注（2026-11-05）：genericMaterial/genericBasis 供总表
+            # 「素材」列与前端展示；Part6 三段的跳过逻辑见上方流程依赖修正③。
+            "genericMaterial": mat_generic,
+            "genericBasis": mat_basis,
+            # Part6 未建单（2026-11-05）：= 本地仓到货检查(Part3)未通过，
+            # 寄送/素材段还没轮到。当前停留已由依赖修正回落到「采购→本地仓到货」。
+            "part6Blocked": p6_missing,
             "status": status, "multiRound": bool(multi_round.get("flag")),
             "rootCause": root_cause, "owner": owner,
             "shipClosure": closure,                   # 运输闭环态（closed/pending/none）

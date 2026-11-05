@@ -21,6 +21,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
+from .generic_material import BASIS_UNKNOWN as _BASIS_UNKNOWN
 from .seg_rules import G_ORDER, ROUTE_TARGETS
 
 # 部门归块色（浅色填充，正文仍用深色字，保证黑白打印可读）
@@ -627,21 +628,26 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
                      f"「{targets_source or '继承名义值'}」判定，仅供预警参考，"
                      "不得作为既定 KPI 引用；业务确认后须重跑本日报。")
         ws1["A2"].font = Font(bold=True, size=10, color="EF6C00")
-        ws1.merge_cells(start_row=2, start_column=1, end_row=2, end_column=14)
+        ws1.merge_cells(start_row=2, start_column=1, end_row=2, end_column=15)
         _legend_row = 3
     # 图例（2026-10-29）：新增标注太多，不写清楚会被误读
     ws1[f"A{_legend_row}"] = (
         "标注：状态「超期❗」= 任一超期段 ≥30 天（长期未决，优先处理）；"
         "部门列「*」= 其他部门段亦超期（明细见「超期环节」列）；"
         "「无目标」= 该段未设目标天，不参与超期/预警判定；"
+        "「素材·通用」= 复用已有素材/不真机拍摄，跳过寄送拍摄(15天)与素材加工(3天)，"
+        "本地仓到货后直进上架 Listing+广告；"
+        "「素材·—」= Part6 单据未建，暂无法判定（默认按需拍摄）；"
+        "流程依赖（2026-11-05）：Part6 单据在本地仓到货检查(Part3)通过后才建 —— "
+        "Part6 未建单时「签样→寄送」未轮到、不判超期，当前停留回落到「采购→本地仓到货」；"
         "人工登记「⚠未豁免」= 已写备注但未匹配任何豁免通道，仍在追踪。")
     ws1[f"A{_legend_row}"].font = Font(size=9, color="616161")
     ws1.merge_cells(start_row=_legend_row, start_column=1,
-                    end_row=_legend_row, end_column=14)
+                    end_row=_legend_row, end_column=15)
     _head_row(ws1, 4, ["SKU", "型号", "状态", "当前停留环节", "部门", "已停留(天)",
                        "目标(天)", "距超时(天)", "超期环节", "预警段数", "多轮提交",
-                       "核心原因", "责任人", "人工登记"],
-              widths=[14, 18, 10, 22, 8, 10, 9, 11, 26, 9, 10, 26, 12, 30])
+                       "核心原因", "责任人", "人工登记", "素材"],
+              widths=[14, 18, 10, 22, 8, 10, 9, 11, 26, 9, 10, 26, 12, 20, 10])
     r = 5
     for it in items or []:
         # 长期未决（≥30 天）→ 整行浅红底纹（麻木效应对策：190 天和 2 天不能同权重）
@@ -727,6 +733,15 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
         if _note:
             c = _put(ws1, r, 14, f"{_note} ⚠未豁免", fill=_row_fill)
             c.font = Font(size=10, bold=True, color="C62828")
+        # 素材（2026-11-05）：通用 = Part6 免寄送拍摄(15天)+素材加工(3天)。
+        # 只作标注，**不改段规则/不参与状态判定** —— 事中口径本轮不动。
+        # 「—」= Part6 单据还没建，拍摄列无处可填，暂判不出（默认按需拍摄）。
+        _mat = "通用" if it.get("genericMaterial") else (
+            "—" if (it.get("genericBasis") or "") == _BASIS_UNKNOWN else "需拍摄")
+        c = _put(ws1, r, 15, _mat, align=Alignment(horizontal="center"),
+                 fill=_row_fill)
+        if _mat == "通用":
+            c.font = Font(size=10, bold=True, color="2E7D32")
         r += 1
     if r == 5:
         _put(ws1, 5, 1, "（当前无在研 SKU）")
