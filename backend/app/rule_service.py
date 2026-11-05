@@ -14,7 +14,7 @@ import json
 import os
 import re
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import select, text
@@ -121,31 +121,103 @@ RULE_META = {
 # 这里历史上放过一个可编辑键 `daily_pipeline_slots`（默认 ["09:05","14:35"]），
 # 但代码里**没有任何消费方**：真正决定触发时刻的是 Windows 计划任务
 # `DataAdmin-AutoPipeline`，由 scripts/install_auto_etl.ps1 注册。那个键于是
-# 既不准（与已注册的 09:20/14:50 不一致）、又具有误导性（在页面上改它并不改调度）。
-# 2026-09-24 删除该键，改为**从真源 ps1 读出实际时刻**只读展示。
+# 既不准、又具有误导性（在页面上改它并不改调度）。2026-09-24 删除该键。
+#
+# 🔴 2026-11-05 修正：原来的"真源"其实是**注册脚本里的字面量**（$At1/$At2），
+# 而不是运行中的计划任务。上游 DingTalkApprovalSync 从 09:00/14:30 改到
+# 08:40/13:59 之后，任务被重新注册为 09:00/14:10，但 ps1 里的默认值仍是
+# 09:20/14:50 —— 页面于是长期展示**一个并不存在的时刻**。
+# ⇒ 真值只有一处：`C:\Windows\System32\Tasks\<任务名>` 这个 XML（任务计划程序
+#   自己写的注册态）。ps1 只作回落，并明确标注"脚本默认值，可能与实际任务不同"。
 _PIPELINE_PS1 = (Path(__file__).resolve().parents[2]
                  / "scripts" / "install_auto_etl.ps1")
 _PIPELINE_TASK = "DataAdmin-AutoPipeline"
+_PIPELINE_TASK_XML = (Path(os.environ.get("SystemRoot") or r"C:\Windows")
+                      / "System32" / "Tasks" / _PIPELINE_TASK)
 
 
-def pipeline_schedule() -> dict:
-    """自动管线的实际触发时刻（只读）。
+def _utc_boundary_to_local_hhmm(boundary: str) -> str | None:
+    """计划任务 XML 里的 `<StartBoundary>` → 本地时区 HH:MM。
 
-    真源 = `scripts/install_auto_etl.ps1` 里的 `$At1/$At2` —— 注册计划任务用的
-    就是这两个值。读不到时 `ok=False`，前端会显示「请看脚本」而不是编一个时刻。
+    XML 存的是 **UTC**（形如 `2026-09-23T01:00:00Z`），直接截字符串会显示 01:00
+    —— 必须按本机时区换算（本机 GMT+8 ⇒ 09:00）。解析失败返回 None 由调用方跳过。
     """
-    info = {"taskName": _PIPELINE_TASK,
-            "times": [], "source": "scripts/install_auto_etl.ps1",
-            "updatedAt": None, "ok": False}
+    s = (boundary or "").strip()
+    if s.endswith("Z") or s.endswith("z"):
+        s = s[:-1] + "+00:00"
     try:
-        txt = _PIPELINE_PS1.read_text(encoding="utf-8-sig")     # ps1 带 UTF-8 BOM
-        times = re.findall(r'^\s*\$At\d+\s*=\s*"([0-2]\d:[0-5]\d)"', txt, re.M)
-        info["times"] = sorted(set(times))
-        info["ok"] = bool(info["times"])
-        info["updatedAt"] = datetime.fromtimestamp(
-            _PIPELINE_PS1.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:                       # 没带时区就当 UTC（任务 XML 的约定）
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone().strftime("%H:%M")
+
+
+def _read_task_times(task_xml: Path) -> tuple[list[str], str]:
+    """读计划任务 XML 的日历触发时刻 → (本地 HH:MM 排序列表, 文件 mtime 文本)。"""
+    raw = task_xml.read_bytes()
+    # 任务计划程序写出的 XML 是 UTF-16LE（带 BOM）；个别环境是 UTF-8，两种都试。
+    for enc in ("utf-16", "utf-8-sig"):
+        try:
+            txt = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        raise ValueError("任务 XML 既非 UTF-16 也非 UTF-8")
+    boundaries = re.findall(r"<StartBoundary>([^<]+)</StartBoundary>", txt)
+    times = sorted({t for t in (_utc_boundary_to_local_hhmm(b) for b in boundaries) if t})
+    mtime = datetime.fromtimestamp(task_xml.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+    return times, mtime
+
+
+def pipeline_schedule(task_xml: Path | None = None,
+                     ps1: Path | None = None) -> dict:
+    """自动管线的**实际**触发时刻（只读）。
+
+    读取顺序（先命中者生效）：
+      ① 计划任务 XML `<SystemRoot>\\System32\\Tasks\\DataAdmin-AutoPipeline`
+         —— 任务计划程序的注册态，唯一真值；`source` 会写成「Windows 计划任务 …」。
+      ② 回落 `scripts/install_auto_etl.ps1` 的 `$At1/$At2` —— 只是**安装时的默认值**，
+         任务后来被改过就不准了，所以 `source` 明确带"脚本默认值"字样。
+    两处都读不到 → `ok=False`、`times=[]`（前端显示"请看脚本"，绝不编一个时刻）。
+
+    `scriptTimes` 始终带出脚本里的值，便于一眼看出「脚本默认值 vs 实际任务」是否已漂移。
+    """
+    task_xml = _PIPELINE_TASK_XML if task_xml is None else Path(task_xml)
+    ps1 = _PIPELINE_PS1 if ps1 is None else Path(ps1)
+
+    info = {"taskName": _PIPELINE_TASK, "times": [], "source": "",
+            "updatedAt": None, "ok": False,
+            "taskFile": str(task_xml), "scriptTimes": []}
+
+    # ① 计划任务（真值）
+    try:
+        times, mtime = _read_task_times(task_xml)
+        if times:
+            info.update(times=times, ok=True, updatedAt=mtime,
+                        source=f"Windows 计划任务 {_PIPELINE_TASK}")
     except Exception:
         pass
+
+    # ② 注册脚本默认值（回落 + 始终带出用于对比）
+    try:
+        txt = ps1.read_text(encoding="utf-8-sig")               # ps1 带 UTF-8 BOM
+        script_times = sorted(set(re.findall(
+            r'^\s*\$At\d+\s*=\s*"([0-2]\d:[0-5]\d)"', txt, re.M)))
+        info["scriptTimes"] = script_times
+        if not info["ok"] and script_times:
+            info.update(
+                times=script_times, ok=True,
+                updatedAt=datetime.fromtimestamp(
+                    ps1.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                source="scripts/install_auto_etl.ps1（脚本默认值，非实际任务）")
+    except Exception:
+        pass
+
+    if not info["source"]:
+        info["source"] = "读不到计划任务与安装脚本"
     return info
 
 

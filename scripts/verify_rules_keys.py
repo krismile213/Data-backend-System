@@ -5,7 +5,8 @@
    以免把用户已调过的规则覆盖成默认值。
 断言：
   GET  /api/rules            -> 新键都在 rules 里，且 meta 有中文说明；
-                                只读调度信息 pipeline 带出实际时刻（不读文件则为空）
+                                只读调度信息 pipeline 带出实际时刻（计划任务 XML 优先，
+                                ps1 兜底；两处都读不到则为空）
   PUT 非法值（比例 1.5 / 已删除的死键 / 未知键）-> 422
   PUT 合法值（与当前值相同）-> 200
 结果写 scripts/_verify_rules.txt（UTF-8）。
@@ -84,18 +85,22 @@ try:
                 if j.get("version"):
                     w(f"  version = {j['version']}")
 
-                # ---- 只读调度信息（真源 scripts/install_auto_etl.ps1）----
+                # ---- 只读调度信息（真源 = 计划任务 XML，ps1 兜底）----
                 pipe = j.get("pipeline") or {}
                 w(f"  pipeline(只读) = {pipe}")
                 if not pipe.get("ok"):
-                    # 不是致命错误（脚本可能被移走），但要显式记一笔
-                    w("  ⚠ pipeline 未读到触发时刻（ps1 缺失或格式变了）")
+                    # 不是致命错误（换机没装任务时正常），但要显式记一笔
+                    w("  ⚠ pipeline 未读到触发时刻（计划任务与 ps1 都不可用）")
                 else:
                     if not pipe.get("times"):
                         fails.append("pipeline.times 为空")
                     for t in pipe["times"]:
                         if not re.match(r"^[0-2]\d:[0-5]\d$", t):
                             fails.append(f"pipeline 时刻格式异常 {t}")
+                    # 脚本默认值 vs 实际任务不一致时提示（不是失败：任务才是真值）
+                    st = pipe.get("scriptTimes") or []
+                    if st and st != pipe["times"]:
+                        w(f"  ⚠ 脚本默认值 {st} 与实际任务 {pipe['times']} 不一致（以任务为准）")
                 # 只读字段不得出现在可编辑 rules 里
                 still = [k for k in DEAD_KEYS if k in rules]
                 w(f"  rules 里残留的已删键: {still or '无'}")

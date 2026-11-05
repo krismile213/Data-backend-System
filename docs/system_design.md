@@ -98,7 +98,7 @@ CREATE TABLE product_catalog (
 |---|---|---|
 | `inflight_warn_ratio` | 0.85 | 段级预警系数（P1-2，界面可改） |
 | `report_retention_days` | 90 | 事中日报保留天数 |
-| ~~`daily_pipeline_slots`~~ | **已删除（2026-09-24）** | 曾为「自动管线时刻」，但与真实调度脱钩（无任何消费方，改它不改计划任务）→ 删键。改为 `GET /api/rules` 的**只读**字段 `pipeline = {taskName, times[], source, updatedAt, ok}`，真源 = `scripts/install_auto_etl.ps1` 的 `$At1/$At2`（`rule_service.pipeline_schedule()`）。规则页只展示、不可编辑 |
+| ~~`daily_pipeline_slots`~~ | **已删除（2026-09-24）** | 曾为「自动管线时刻」，但与真实调度脱钩（无任何消费方，改它不改计划任务）→ 删键。改为 `GET /api/rules` 的**只读**字段 `pipeline = {taskName, times[], source, updatedAt, ok, scriptTimes[]}`，规则页只展示、不可编辑。**真源（2026-11-05 修正）= Windows 计划任务注册态** `<SystemRoot>\System32\Tasks\DataAdmin-AutoPipeline` 的 `<StartBoundary>`（UTC → 本地时区换算）；`scripts/install_auto_etl.ps1` 的 `$At1/$At2` 只作回落，且 `source` 会显式标注「脚本默认值，非实际任务」（`rule_service.pipeline_schedule()`）。原实现直接读 ps1，上游同步改到 08:40/13:59、任务重注册为 09:00/14:10 后，页面长期显示不存在的 09:20/14:50 |
 | `products_xlsx_path` | `C:\Users\dell\Desktop\work-main\资产文件\商品资料.xlsx` | 商品资料路径（机器每月重导的主数据） |
 | `registry_xlsx_path` | `C:\Users\dell\Desktop\work-main\资产文件\SKU登记表.xlsx` | 独立登记表路径（`SKU换号`/`人工登记` 两张人工维护子表）。2026-09-30 新增，见 §9 T15 |
 | `loss_route_limit` | 60 | 损益推迟天数底线（空运口径，与 ROUTE_TARGETS["空运"].limit 对齐） |
@@ -525,6 +525,17 @@ T06 收口。手机壳此前「数据层就绪、后台层完全不可见」，�
 会读到**半截 / 正在写入的 xlsx**。改为 09:20 / 14:50 = 同步写完后仍留约 12 分钟缓冲。
 
 > **改上游同步时间时，必须同步改 `install_auto_etl.ps1` 里的 `$At1` / `$At2`。**
+>
+> ⚠️ **2026-11-05 补正 —— 这句话只对"重新注册"成立**：ps1 里的 `$At1/$At2` 只在
+> **注册任务的那一刻**生效；任务注册完之后再改脚本**不会**改调度。实际发生过一次：
+> 上游 `DingTalkApprovalSync` 从 09:00/14:30 改成 **08:40/13:59**，任务被重新注册为
+> **09:00/14:10**（`--skip-mail`），但 ps1 里的字面量仍留着 09:20/14:50 ——
+> 规则页于是长期展示一个并不存在的时刻。
+> ⇒ 现状（已落地）：`pipeline_schedule()` **以计划任务 XML 为真值**
+> （`<SystemRoot>\System32\Tasks\DataAdmin-AutoPipeline` 的 `<StartBoundary>`，UTC→本地），
+> ps1 只作回落并在 `source` 里自报"脚本默认值"。页面在两者不一致时会显式提示漂移。
+> 要改时刻：`Register-ScheduledTask` 重注册（或 `Set-ScheduledTask`），**顺手把 ps1 改一致**，
+> 否则下次重装会被改回去。
 
 **实跑证据（2026-09-23 17:15 手动触发计划任务）**：`LastTaskResult=0`，管线 `ok=true` / **14.6s**，
 `imported=2 skipped=0`，手机膜与手机壳各产出 `reports\复盘报告_20260923.xlsx`

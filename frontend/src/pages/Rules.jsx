@@ -295,16 +295,26 @@ export default function Rules() {
             <strong>自动管线触发时刻（只读）：</strong>
             {pipeline?.ok
               ? `${(pipeline.times || []).join(' / ')}`
-              : '读不到脚本中的时刻'}
+              : '读不到计划任务与安装脚本'}
             {`　·　计划任务 ${pipeline?.taskName || 'DataAdmin-AutoPipeline'}`}
           </Typography>
           <Typography variant="caption" color="text.secondary" component="div">
-            真源 <code>{pipeline?.source || 'scripts/install_auto_etl.ps1'}</code>
-            {pipeline?.updatedAt ? `（更新于 ${pipeline.updatedAt}）` : ''}
+            真源 <code>{pipeline?.source || 'Windows 计划任务 DataAdmin-AutoPipeline'}</code>
+            {pipeline?.updatedAt ? `（任务更新于 ${pipeline.updatedAt}）` : ''}
             —— 时刻由 Windows 计划任务决定，在页面上无法修改；要改请改脚本后重新注册
             （<code>powershell -NoProfile -ExecutionPolicy Bypass -File
             scripts\install_auto_etl.ps1</code>），并同步确认上游钉钉同步时间。
           </Typography>
+          {/* 脚本默认值 vs 实际任务：两者不一致时必须显式说清，2026-11-05 就是
+              页面照脚本显示 09:20/14:50、实际任务早已是 09:00/14:10。 */}
+          {pipeline?.ok &&
+            (pipeline.scriptTimes || []).length > 0 &&
+            (pipeline.scriptTimes || []).join('/') !== (pipeline.times || []).join('/') && (
+              <Typography variant="caption" color="warning.main" component="div">
+                注意：安装脚本里仍写着 {pipeline.scriptTimes.join(' / ')}，与上面实际任务不一致
+                —— 以上面的任务时刻为准；重装任务前先改脚本，否则会被改回去。
+              </Typography>
+            )}
         </Alert>
 
         {/* 规则快照：只读。离线同源件 `流程复盘/route_check_sys.py` 启动时读取本文件，
