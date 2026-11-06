@@ -55,22 +55,6 @@ function StateChip({ state }) {
   );
 }
 
-/** 段起点展示：有值原样，缺值「—」。 */
-function segStartText(s) {
-  return s.start || '—';
-}
-
-/**
- * 段终点展示：
- *   · 有值 → 原样（含 noShip 的「至今未发货」字面量，不加工）；
- *   · 空值且该段在跑（进行中/预警/超期）→ 「至今」；
- *   · 空值且未开始 / 留空(gap) → 「—」。
- */
-function segEndText(s) {
-  if (s.end) return s.end;
-  return RUNNING_STATES.includes(s.state) ? '至今' : '—';
-}
-
 /**
  * 在研清单「运输」列单元格（结构化展示，优先级）：
  *   ① 未到货国（pendingCountries）→ 未闭环徽标 + 黄色国家胶囊（催物流第一优先）
@@ -149,7 +133,7 @@ function SkuDialog({ sku, onClose }) {
   const cause = det?.rootCause;
 
   return (
-    <Dialog open={!!sku} onClose={onClose} maxWidth="lg" fullWidth>
+    <Dialog open={!!sku} onClose={onClose} maxWidth="xl" fullWidth>
       <DialogTitle>事中档案 · {sku}</DialogTitle>
       <DialogContent dividers>
         {loading && <LoadingState label="加载事中档案…" />}
@@ -188,41 +172,84 @@ function SkuDialog({ sku, onClose }) {
               </SectionCard>
             )}
             <SectionCard title="段级时间轴">
-              <Table size="small">
+              {/* 双轨时间列（2026-11-06，与复盘页段级表同口径「照搬」）：
+                  实际·起/终 = 纯系统业务日期，audit·起/终 = 纯审批上报，两套互不冒充；
+                  耗时（已进行）仍走判定轨，fallback 时数字旁灰字「补」。
+                  甘特图 / 日报 xlsx 不动（用户口径：保持甘特图不变）。 */}
+              <Box sx={{ overflowX: 'auto' }}>
+              <Table size="small" sx={{ minWidth: 1120, tableLayout: 'fixed' }}>
                 <TableHead>
                   <TableRow>
-                    <TableCell sx={{ whiteSpace: 'nowrap' }}>部门</TableCell>
-                    <TableCell>环节</TableCell>
-                    <TableCell sx={{ whiteSpace: 'nowrap' }}>状态</TableCell>
-                    <TableCell sx={{ whiteSpace: 'nowrap' }}>开始</TableCell>
-                    <TableCell>结束</TableCell>
-                    <TableCell>已进行</TableCell>
-                    <TableCell>目标</TableCell>
-                    <TableCell>预警线</TableCell>
-                    <TableCell>负责人</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap', width: 44 }}>部门</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap', width: 132 }}>环节</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap', width: 76 }}>状态</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap', width: 104 }}>实际·起点</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap', width: 104 }}>实际·终点</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap', width: 104 }}>audit·起点</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap', width: 108 }}>audit·终点</TableCell>
+                    <TableCell align="right" sx={{ whiteSpace: 'nowrap', width: 72 }}>已进行</TableCell>
+                    <TableCell align="right" sx={{ whiteSpace: 'nowrap', width: 60 }}>目标</TableCell>
+                    <TableCell align="right" sx={{ whiteSpace: 'nowrap', width: 60 }}>预警线</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap', width: 66 }}>负责人</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {segs.map((s, i) => (
-                    <TableRow key={i}>
-                      <TableCell>{s.dept || '—'}</TableCell>
-                      <TableCell>{s.seg || '—'}</TableCell>
+                    <TableRow key={i} sx={s.gap ? { bgcolor: 'action.hover' } : undefined}>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>{s.gap ? '留空' : (s.dept || '—')}</TableCell>
+                      <TableCell sx={{ fontWeight: 600, wordBreak: 'keep-all' }}>{s.seg || '—'}</TableCell>
                       <TableCell><StateChip state={s.state} /></TableCell>
-                      <TableCell>{segStartText(s)}</TableCell>
-                      <TableCell>{segEndText(s)}</TableCell>
-                      <TableCell>{s.elapsed ?? '—'}</TableCell>
-                      <TableCell>{s.target ?? '—'}</TableCell>
-                      <TableCell>{s.warnLine ?? '—'}</TableCell>
-                      <TableCell>{s.owner || s.executor || '—'}</TableCell>
+                      {/* 纯轨四列：缺就写「缺」（斜体灰），不用另一轨的值冒充（复盘页同款） */}
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                        {s.startReal
+                          || <Typography component="span" variant="caption"
+                            sx={{ fontStyle: 'italic', color: 'text.disabled' }}>缺</Typography>}
+                      </TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                        {s.endReal
+                          || <Typography component="span" variant="caption"
+                            sx={{ fontStyle: 'italic', color: 'text.disabled' }}>缺</Typography>}
+                      </TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                        {s.auditFrom
+                          || <Typography component="span" variant="caption"
+                            sx={{ fontStyle: 'italic', color: 'text.disabled' }}>缺</Typography>}
+                      </TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                        {s.auditTo
+                          || <Typography component="span" variant="caption"
+                            sx={{ fontStyle: 'italic', color: 'text.disabled' }}>缺</Typography>}
+                      </TableCell>
+                      <TableCell align="right">
+                        {s.gap ? '—'
+                          : <>{s.elapsed ?? '—'}
+                            {s.fallback && s.elapsed != null && (
+                              <Typography component="span" variant="caption"
+                                sx={{ color: 'text.disabled', ml: 0.5 }}
+                                title="判定轨起点/终点有补位（兜底列或 audit），时间戳列看不到它">
+                                补
+                              </Typography>)}
+                          </>}
+                      </TableCell>
+                      <TableCell align="right">{s.target ?? '—'}</TableCell>
+                      <TableCell align="right">{s.warnLine ?? '—'}</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>{s.owner || s.executor || '—'}</TableCell>
                     </TableRow>
                   ))}
                   {!segs.length && (
                     <TableRow>
-                      <TableCell colSpan={9}>暂无段级数据</TableCell>
+                      <TableCell colSpan={11}>暂无段级数据</TableCell>
                     </TableRow>
                   )}
                 </TableBody>
               </Table>
+              </Box>
+              <Typography variant="caption" color="text.secondary"
+                sx={{ display: 'block', mt: 0.5 }}>
+                实际·起/终 = 纯系统业务日期（表单主字段；兜底列不算 → 写「缺」）；
+                audit·起/终 = 纯审批上报时间。两套互不冒充。
+                「已进行」走判定轨（系统&gt;audit&gt;动作），数字旁「补」= 判定轨里有补位。
+              </Typography>
             </SectionCard>
           </>
         )}

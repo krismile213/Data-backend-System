@@ -215,6 +215,19 @@ def _seg_public(row, st):
         "state": st["state"],
         "start": row.get("start"), "end": row.get("end"),
         "src0": row.get("src0"), "src1": row.get("src1"),
+        # ---- 纯轨时间戳（2026-11-06，与复盘页段级表同口径）----
+        # 实际·起/终 = 真系统业务日期（主字段命中才给）；audit·起/终 = 纯审批。
+        # review_sku_segments 的 row 自带（G600 定稿），这里只透传不计算 ——
+        # 旧快照里的 row 没有这些 key，row.get() → None，前端显示「缺」。
+        # 甘特图 / 日报 xlsx 不动（用户口径：保持甘特图不变）。
+        "startReal": row.get("startReal"), "endReal": row.get("endReal"),
+        "fallback": bool(row.get("fallback")),
+        "auditFrom": row.get("auditFrom"), "auditTo": row.get("auditTo"),
+        "auditDays": row.get("auditDays"),
+        "auditMissing": row.get("auditMissing") or [],
+        "dualGap": row.get("dualGap"),
+        "dualVerdict": row.get("dualVerdict"),
+        "dualVerdictText": row.get("dualVerdictText"),
         "days": row.get("days"),
         "t0": (t0.strftime("%Y-%m-%d %H:%M:%S") if t0 else None),
         "t1": (t1.strftime("%Y-%m-%d %H:%M:%S") if t1 else None),

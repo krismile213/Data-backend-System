@@ -324,3 +324,54 @@ def test_payload_carries_pure_track_fields():
         assert qs["fallback"] is False            # 两端都是主字段，无补位
     for name, nd in j["nodes"].items():
         assert "sysReal" in nd, f"{name} 缺 sysReal"
+
+
+def test_seg_public_passes_pure_track_fields():
+    """事中档案 _seg_public 必须透传纯轨字段（与复盘页段级表同口径）。
+
+    2026-11-06 用户口径「保持甘特图不变，显示双轨时间列」：只透传不计算 ——
+    review_sku_segments 的 row 已带（G600 定稿），这里守契约防有人顺手删。
+    """
+    from app.inflight_service import _seg_public
+    row = {
+        "dept": "运营", "seg": "提案→取数", "from": "提案", "to": "取数",
+        "start": "2026-10-08", "end": "2026-10-11",
+        "src0": "系统", "src1": "系统", "days": "3.0",
+        "t0": datetime(2026, 10, 8), "t1": datetime(2026, 10, 11),
+        "startReal": "2026-10-08", "endReal": "2026-10-11",
+        "fallback": False,
+        "auditFrom": "2026-10-09", "auditTo": "2026-10-11",
+        "auditDays": "2.0", "auditMissing": [],
+        "dualGap": -1.0, "dualVerdict": "agree", "dualVerdictText": "",
+    }
+    st = {"state": "已完成", "elapsed": 3.0, "target": 4, "warnLine": 3.6,
+          "over": None}
+    pub = _seg_public(row, st)
+    for k in ("startReal", "endReal", "fallback", "auditFrom", "auditTo",
+              "auditDays", "auditMissing", "dualGap", "dualVerdict",
+              "dualVerdictText"):
+        assert k in pub, f"_seg_public 缺纯轨字段 {k}"
+    assert pub["startReal"] == "2026-10-08"
+    assert pub["auditFrom"] == "2026-10-09"
+    assert pub["fallback"] is False
+    assert pub["t0"] == "2026-10-08 00:00:00"    # datetime 仍转 ISO，不泄漏
+
+
+def test_seg_public_tolerates_legacy_snapshot_rows():
+    """旧事中快照里的 row 没有纯轨 key → 输出 None/[]，不得炸。"""
+    from app.inflight_service import _seg_public
+    row = {                      # 模拟 G600 之前的旧快照段行
+        "dept": "运营", "seg": "取数→签样", "from": "取数", "to": "签样",
+        "start": "2026-10-11", "end": "2026-10-14",
+        "src0": "系统", "src1": "系统", "days": "3.0",
+        "t0": datetime(2026, 10, 11), "t1": datetime(2026, 10, 14),
+    }
+    st = {"state": "进行中", "elapsed": 1.0, "target": 3, "warnLine": 2.7,
+          "over": None}
+    pub = _seg_public(row, st)
+    assert pub["startReal"] is None
+    assert pub["endReal"] is None
+    assert pub["auditFrom"] is None
+    assert pub["auditDays"] is None
+    assert pub["auditMissing"] == []
+    assert pub["fallback"] is False
