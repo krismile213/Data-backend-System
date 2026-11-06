@@ -189,11 +189,11 @@ def test_daily_report_without_notes_backwards_compatible():
     assert ws.cell(row=4, column=14).value == "人工登记"
     for r in (5, 6):
         assert ws.cell(row=r, column=14).value in (None, "")
-    # 其它 sheet 不受影响（2026-10-29：+2 固定 sheet 本月已消化超期/本月绩效视角）
+    # 其它 sheet 不受影响（2026-11-06：+久悬单 / 按责任人·催办 → 固定 9 张）
     wb = load_workbook(io.BytesIO(content))
-    assert wb.sheetnames == ["在研SKU状态总表", "超期明细", "风险预警",
-                             "在研SKU甘特图", "异常上报清单",
-                             "本月已消化超期", "本月绩效视角"]
+    assert wb.sheetnames == ["在研SKU状态总表", "超期明细", "久悬单",
+                             "风险预警", "在研SKU甘特图", "异常上报清单",
+                             "本月已消化超期", "本月绩效视角", "按责任人·催办"]
 
 
 def test_note_does_not_leak_into_other_sheets():

@@ -43,6 +43,31 @@ HEAD_FONT = Font(color="FFFFFF", bold=True, size=10)
 TITLE_FONT = Font(bold=True, size=13)
 CELL_FONT = Font(size=10)
 
+# 久悬阈值（天）：当前停留段超期 ≥ 此值 → 「催一下」已经失效，转为决策
+# （重启评估 / 登记豁免 / 关闭）。2026-11-06 方案4 用户确认。
+# 与 OVER_ESCALATE(30, 长期未决) 是两条线：30 天 = 升级提醒，90 天 = 该拍板了。
+# G538 卡 205 天是典型：挂在「运输」段，谁都不敢关、也没人重启。
+OVER_STALE = 90
+
+
+def _is_transportish(dept, seg):
+    """运输域段的轻量判断（与前端 makeIsTransportSeg 同口径，不引 transport_closure
+    避免渲染层依赖计算层）。只用于久悬单「建议动作」分叉，不参与任何判定。"""
+    d, s = dept or "", seg or ""
+    return d in ("运输", "4国") or "运输" in s or s.endswith("·未发货")
+
+
+def stale_action(it):
+    """久悬单的建议动作（唯一实现在这里，日报两个 sheet 共用）。
+
+    只出「该做什么」的建议文案，不改任何状态 —— 关单/豁免仍走人工登记通道。
+    """
+    if _is_transportish(it.get("staySegDept"), it.get("staySeg")):
+        return "核对货件：丢件 / 已到货未回传"
+    if it.get("stayTarget") is None:
+        return "无目标段久悬：确认是否已终止、该不该登记豁免"
+    return "重启评估 / 登记豁免 / 关闭"
+
 
 def _judge_color(judge):
     s = str(judge or "")
@@ -581,7 +606,8 @@ def route_limits(ruleset=None):
 
 
 # ---------------------------------------------------------------------------
-# P0-4 · 事中日报（5 张固定：在研总表 / 超期明细 / 风险预警 / 在研SKU甘特图 / 上报清单；
+# P0-4 · 事中日报（9 张固定：在研总表 / 超期明细 / 久悬单 / 风险预警 / 在研SKU甘特图 /
+#                   上报清单 / 本月已消化超期 / 本月绩效视角 / 按责任人·催办；
 #                   按需 +2：货件运输 / 豁免备查）
 # ---------------------------------------------------------------------------
 def daily_report(*, category, computed_at, date_str, items, alerts,
@@ -837,6 +863,52 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
     if r == 4:
         _put(ws2, 4, 1, "（无进行中超期段）")
 
+    # ---- Sheet 久悬单（2026-11-06 方案4）----
+    # 当前停留段超期 ≥ OVER_STALE(90) 天：这类单子已经不能靠"催"解决 ——
+    # 责任人在不在都两说，要的是**决策**：重启评估 / 登记豁免 / 关闭。
+    # ⚠️ 只算**当前停留段**：历史段曾超 90 天但当前段在跑的不算（已经过去了，
+    #    留在「本月已消化超期」对账）。恒产本表，0 条时有占位说明行。
+    _stale = []
+    for it in items or []:
+        _dl = it.get("stayDaysLeft")
+        if not isinstance(_dl, (int, float)) or _dl >= 0:
+            continue
+        _over_days = round(-float(_dl), 1)
+        if _over_days >= OVER_STALE:
+            _stale.append((_over_days, it))
+    _stale.sort(key=lambda x: -x[0])
+    ws_st = wb.create_sheet("久悬单")
+    ws_st["A1"] = (f"久悬单：当前停留段超期 ≥{OVER_STALE} 天 —— "
+                   "已不是「催一下」能解决的，需决策（重启评估 / 登记豁免 / 关闭）；"
+                   "「建议动作」仅为提示，关单/豁免仍走人工登记通道")
+    ws_st["A1"].font = TITLE_FONT
+    _head_row(ws_st, 3, ["SKU", "型号", "当前停留环节", "部门", "已停留(天)",
+                         "目标(天)", "超期(天)", "责任人", "建议动作"],
+              widths=[14, 18, 22, 8, 10, 9, 10, 12, 36])
+    r = 4
+    for _over_days, it in _stale:
+        _put(ws_st, r, 1, it.get("sku"))
+        _put(ws_st, r, 2, it.get("model") or "—")
+        _put(ws_st, r, 3, it.get("staySeg") or "—")
+        _put(ws_st, r, 4, it.get("staySegDept") or "—",
+             align=Alignment(horizontal="center"))
+        _put(ws_st, r, 5, it.get("stayElapsed"),
+             align=Alignment(horizontal="center"))
+        _put(ws_st, r, 6, it.get("stayTarget"),
+             align=Alignment(horizontal="center"))
+        c = _put(ws_st, r, 7, _over_days, align=Alignment(horizontal="center"))
+        c.font = Font(size=10, bold=True, color="7B0000")
+        if it.get("owner"):
+            _put(ws_st, r, 8, it["owner"])
+        else:
+            _put(ws_st, r, 8, "⚠未配置",
+                 font=Font(size=10, bold=True, color="C62828"))
+        c = _put(ws_st, r, 9, stale_action(it))
+        c.font = Font(size=10, color="7B0000")
+        r += 1
+    if r == 4:
+        _put(ws_st, 4, 1, f"（无超期 ≥{OVER_STALE} 天的久悬单——好现象）")
+
     # ---- Sheet3 风险预警（85% 环节工期阈值，P1-2） ----
     # 2026-10-29：标题写明实际预警系数（此前只写"预警系数"没给值，像黑箱）；
     # 底部加「无目标段」小节 —— target=null 的段（如 G597 亚马逊沙特 43 天未发货）
@@ -1079,6 +1151,96 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
         r += 1
     if r == 4:
         _put(ws_pf, 4, 1, "（本月无任何超期记录——好现象）")
+
+    # ---- Sheet 按责任人 · 催办清单（2026-11-06 方案1）----
+    # 与上一张「本月绩效视角」的分工：
+    #   · 本月绩效视角 = **段级考核**（超期段数 / 长期未决 / 本月消化量）→ 给 HR/主管；
+    #   · 本表 = **SKU 级催办**（谁名下哪几个 SKU、各自卡在哪、该做什么）→ 给干活的人。
+    # 一张表按责任人分块，块内按「距超时」升序（超最多的排最前）。恒产本表。
+    ws_ow = wb.create_sheet("按责任人·催办")
+    ws_ow["A1"] = ("按责任人 · 催办清单 —— 块内按「距超时」升序（超最多的在最上）；"
+                   "汇总列只在每块首行；" + f"超期 ≥{OVER_STALE} 天的见「久悬单」")
+    ws_ow["A1"].font = TITLE_FONT
+    _head_row(ws_ow, 3, ["责任人", "名下在研", "超期", "久悬", "SKU", "型号",
+                         "状态", "当前停留环节", "已停留(天)", "距超时", "建议动作"],
+              widths=[12, 10, 8, 8, 14, 18, 8, 22, 10, 12, 30])
+
+    def _urge_text(it):
+        """催办动作文案（久悬走 stale_action，其余按状态分档）。不改任何状态。"""
+        _dl = it.get("stayDaysLeft")
+        if isinstance(_dl, (int, float)) and _dl < 0:
+            if round(-float(_dl), 1) >= OVER_STALE:
+                return stale_action(it)
+            return "催当前环节"
+        if it.get("stayTarget") is None:
+            return "无目标：人工判断要不要催"
+        if it.get("warnSegs"):
+            return "临近超线，提前干预"
+        return "正常跟进"
+
+    def _left_text(it):
+        """距超时（人话）：已超N天 / 剩N天 / 无目标 / —"""
+        _dl = it.get("stayDaysLeft")
+        if it.get("stayTarget") is None:
+            return "无目标"
+        if not isinstance(_dl, (int, float)):
+            return "—"
+        return f"已超{round(-_dl)}天" if _dl < 0 else f"剩{round(_dl)}天"
+
+    _by_owner = {}
+    for it in items or []:
+        _by_owner.setdefault(it.get("owner") or "(未配置)", []).append(it)
+    _ow_list = []
+    for _name, _rows in _by_owner.items():
+        _rows.sort(key=lambda x: (x.get("stayDaysLeft") is None,
+                                  x.get("stayDaysLeft")
+                                  if x.get("stayDaysLeft") is not None else 0,
+                                  x.get("sku") or ""))
+        _over_cnt = sum(1 for x in _rows if x.get("status") == "超期")
+        _stale_cnt = sum(1 for x in _rows
+                         if isinstance(x.get("stayDaysLeft"), (int, float))
+                         and x["stayDaysLeft"] < 0
+                         and round(-float(x["stayDaysLeft"]), 1) >= OVER_STALE)
+        _ow_list.append((_name, _rows, _over_cnt, _stale_cnt))
+    # 块排序：久悬多 → 超期多 → 在研多 → 名字（最该找的人排最前）
+    _ow_list.sort(key=lambda v: (-v[3], -v[2], -len(v[1]), v[0]))
+
+    r = 4
+    for _name, _rows, _over_cnt, _stale_cnt in _ow_list:
+        _first = True
+        for it in _rows:
+            if _first:
+                c = _put(ws_ow, r, 1, _name)
+                c.font = Font(size=10, bold=True)
+                _put(ws_ow, r, 2, len(_rows), align=Alignment(horizontal="center"))
+                c = _put(ws_ow, r, 3, _over_cnt,
+                         align=Alignment(horizontal="center"))
+                c.font = Font(size=10, bold=_over_cnt > 0,
+                              color="C62828" if _over_cnt else "000000")
+                c = _put(ws_ow, r, 4, _stale_cnt,
+                         align=Alignment(horizontal="center"))
+                c.font = Font(size=10, bold=_stale_cnt > 0,
+                              color="7B0000" if _stale_cnt else "000000")
+                _first = False
+            else:
+                for _col in (1, 2, 3, 4):        # 块内续行不重复汇总列
+                    _put(ws_ow, r, _col, None)
+            _put(ws_ow, r, 5, it.get("sku"))
+            _put(ws_ow, r, 6, it.get("model") or "—")
+            _put(ws_ow, r, 7, it.get("status") or "—",
+                 align=Alignment(horizontal="center"))
+            _put(ws_ow, r, 8, it.get("staySeg") or "—")
+            _put(ws_ow, r, 9, it.get("stayElapsed"),
+                 align=Alignment(horizontal="center"))
+            _dl = it.get("stayDaysLeft")
+            c = _put(ws_ow, r, 10, _left_text(it),
+                     align=Alignment(horizontal="center"))
+            if isinstance(_dl, (int, float)) and _dl < 0:
+                c.font = Font(size=10, bold=True, color="C62828")
+            _put(ws_ow, r, 11, _urge_text(it))
+            r += 1
+    if r == 4:
+        _put(ws_ow, 4, 1, "（当前无在研 SKU）")
 
     # ---- Sheet7 豁免备查（2026-10-06 口径合并：不进追踪的 SKU 单列备查） ----
     # 2026-10-29 排序修正：人工主动豁免（人工登记/换号/末端终止）在前，

@@ -198,9 +198,9 @@ def test_daily_report_exempt_sheet(tmp_path):
                 items=[], alerts=empty_alerts, gantts=[])
     from openpyxl import load_workbook
 
-    # 5 张主表 + 2026-10-29 加的两张月度表；「货件运输」按需（本例无 shipments）
-    FIXED = ["在研SKU状态总表", "超期明细", "风险预警", "在研SKU甘特图",
-             "异常上报清单", "本月已消化超期", "本月绩效视角"]
+    # 9 张固定表（2026-11-06 +久悬单 / 按责任人·催办）；「货件运输」按需（本例无 shipments）
+    FIXED = ["在研SKU状态总表", "超期明细", "久悬单", "风险预警", "在研SKU甘特图",
+             "异常上报清单", "本月已消化超期", "本月绩效视角", "按责任人·催办"]
 
     with_ex = reporting.daily_report(**base, exempts=[
         {"sku": "G495", "model": "S26U", "kind": "hold",
@@ -284,7 +284,7 @@ def test_daily_report_transport_exempt_sheet():
         {"sku": "G700", "model": "M7", "kind": "运输闭环",
          "closure": "closed", "reason": "运输已闭环：已发货货件全部到货（免追踪）"}])
     wb = load_workbook(io.BytesIO(content))
-    assert len(wb.sheetnames) == 8 and wb.sheetnames[-1] == "豁免备查"
+    assert len(wb.sheetnames) == 10 and wb.sheetnames[-1] == "豁免备查"
     ws6 = wb["豁免备查"]
     assert ws6.cell(row=4, column=1).value == "G700"
     assert ws6.cell(row=4, column=3).value == "运输闭环"

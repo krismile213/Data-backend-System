@@ -1508,9 +1508,10 @@ def generate_daily_report(category=None, date_str=None):
         entries.append(entry)
         _save_report_index(entries)
     cleanup_expired_reports()
-    # sheets = 总表/超期/预警/甘特/上报（5）+ 货件运输（有货件时）+ 豁免备查（有豁免时）
+    # sheets = 总表/超期/久悬单/预警/甘特/上报/已消化/绩效/按责任人·催办（9）
+    #          + 货件运输（有货件时）+ 豁免备查（有豁免时）
     return {"path": str(path),
-            "sheets": 5 + (1 if shipments else 0) + (1 if exempts else 0),
+            "sheets": 9 + (1 if shipments else 0) + (1 if exempts else 0),
             "date": today,
             "skuCount": entry["skuCount"], "overdueCount": entry["overdueCount"],
             "warnCount": entry["warnCount"],

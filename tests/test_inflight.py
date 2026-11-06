@@ -384,9 +384,10 @@ def test_daily_report_sheets():
     wb = load_workbook(io.BytesIO(content))
     # 2026-10-29：固定 sheet 从 5 张 → 7 张（+本月已消化超期 / 本月绩效视角，
     # 修复"完成即蒸发"并提供按责任人汇总；两张恒产，空数据也有占位说明行）
-    assert wb.sheetnames == ["在研SKU状态总表", "超期明细", "风险预警",
-                             "在研SKU甘特图", "异常上报清单",
-                             "本月已消化超期", "本月绩效视角"]
+    # 2026-11-06：固定 sheet 7 → 9 张（+久悬单 / 按责任人·催办；方案4/方案1）
+    assert wb.sheetnames == ["在研SKU状态总表", "超期明细", "久悬单",
+                             "风险预警", "在研SKU甘特图", "异常上报清单",
+                             "本月已消化超期", "本月绩效视角", "按责任人·催办"]
     ws1, ws4, ws5 = (wb["在研SKU状态总表"], wb["在研SKU甘特图"],
                      wb["异常上报清单"])
     # 2026-10-29 总表加图例行（A2）：表头 3→4、数据行 4→5
@@ -428,7 +429,7 @@ def test_daily_report_empty():
                           gantts=[])
     from openpyxl import load_workbook
     wb = load_workbook(io.BytesIO(content))
-    assert len(wb.sheetnames) == 7
+    assert len(wb.sheetnames) == 9
 
 
 def test_report_prefix_is_daily_not_review():

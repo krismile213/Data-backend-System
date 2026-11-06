@@ -27,8 +27,25 @@ const STATUS_COLOR = {
   '留空': SEMANTIC.neutral,
 };
 
-/** 仍在跑的段状态（终点未填 → 展示「至今」） */
-const RUNNING_STATES = ['进行中', '预警', '超期'];
+/**
+ * 久悬线（天）：当前停留段超期 ≥ 此值 → 「催一下」已失效，转决策（重启评估/豁免/关闭）。
+ * 与后端 reporting.py 的 OVER_STALE 同值（2026-11-06 方案4）；30 天是升级提醒，90 天是该拍板。
+ */
+const STALE_DAYS = 90;
+
+/**
+ * 久悬单建议动作 —— 与后端 reporting.stale_action 同文案（两处展示同一句话）。
+ * 只出建议文案，不改任何状态：关单/豁免仍走人工登记通道。
+ */
+function staleAction(it) {
+  const dept = it.staySegDept || '';
+  const seg = it.staySeg || '';
+  if (dept === '运输' || dept === '4国' || seg.includes('运输') || seg.endsWith('·未发货')) {
+    return '核对货件：丢件 / 已到货未回传';
+  }
+  if (it.stayTarget == null) return '无目标段久悬：确认是否已终止、该不该登记豁免';
+  return '重启评估 / 登记豁免 / 关闭';
+}
 
 /**
  * 运输域段判定 —— 与后端 `app/transport_closure.is_transport_segment` 同口径：
@@ -273,6 +290,7 @@ export default function InflightDaily() {
   const [fDept, setFDept] = useState('');
   const [fSeg, setFSeg] = useState('');
   const [fStatus, setFStatus] = useState('');
+  const [fOwner, setFOwner] = useState('');
   const [fTransport, setFTransport] = useState('');
   const [fQ, setFQ] = useState('');
   const [onlyTransport, setOnlyTransport] = useState(false);
@@ -323,6 +341,8 @@ export default function InflightDaily() {
     () => [...new Set(items.map((it) => it.staySeg).filter(Boolean))].sort(), [items]);
   const statusOpts = useMemo(
     () => [...new Set(items.map((it) => it.status).filter(Boolean))].sort(), [items]);
+  const ownerOpts = useMemo(
+    () => [...new Set(items.map((it) => it.owner).filter(Boolean))].sort(), [items]);
 
   const filtered = useMemo(() => {
     const isTransportSeg = makeIsTransportSeg(l4Name);
@@ -331,6 +351,7 @@ export default function InflightDaily() {
       if (fDept && it.staySegDept !== fDept) return false;
       if (fSeg && it.staySeg !== fSeg) return false;
       if (fStatus && it.status !== fStatus) return false;
+      if (fOwner && it.owner !== fOwner) return false;
       if (fTransport === 'closed' && it.shipClosure !== 'closed') return false;
       if (fTransport === 'pending' && !(it.pendingCountries || []).length) return false;
       if (fTransport === 'unshipped' && !(it.notShippedHubs || []).length) return false;
@@ -341,10 +362,10 @@ export default function InflightDaily() {
     });
   }, [items, fDept, fSeg, fStatus, fTransport, fQ, onlyTransport, l4Name]);
 
-  const hasFilter = Boolean(fDept || fSeg || fStatus || fTransport || fQ.trim()
+  const hasFilter = Boolean(fDept || fSeg || fStatus || fOwner || fTransport || fQ.trim()
     || onlyTransport);
   const clearFilters = () => {
-    setFDept(''); setFSeg(''); setFStatus(''); setFTransport('');
+    setFDept(''); setFSeg(''); setFStatus(''); setFOwner(''); setFTransport('');
     setFQ(''); setOnlyTransport(false);
   };
 
@@ -357,6 +378,41 @@ export default function InflightDaily() {
       && it.stayElapsed != null && it.stayElapsed > 0)
       .sort((a, b) => (b.stayElapsed || 0) - (a.stayElapsed || 0)),
     [items]);
+
+  // 久悬单（2026-11-06 方案4，口径同后端 reporting.py 的 OVER_STALE）：
+  // **当前停留段**超期 ≥90 天才算 —— 历史段超 90 但当前段在跑的不算（过去了）。
+  // 这批 SKU 已经不是「催一下」的事：要么重启评估、要么登记豁免/关闭。
+  const staleItems = useMemo(() => items
+    .map((it) => ({ it, overDays: it.stayDaysLeft != null && it.stayDaysLeft < 0
+      ? Math.round(-it.stayDaysLeft * 10) / 10 : null }))
+    .filter((x) => x.overDays != null && x.overDays >= STALE_DAYS)
+    .sort((a, b) => b.overDays - a.overDays),
+    [items]);
+
+  // 按责任人聚合（方案1：催办视角 —— 日报是拿去催人的，按人分组才顺手）。
+  // 块排序与后端「按责任人·催办」sheet 同序：久悬多 → 超期多 → 在研多 → 名字。
+  const ownerGroups = useMemo(() => {
+    const map = new Map();
+    items.forEach((it) => {
+      const key = it.owner || '(未配置)';
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(it);
+    });
+    const rows = [...map.entries()].map(([owner, list]) => {
+      const sorted = [...list].sort((a, b) => {
+        const av = a.stayDaysLeft == null ? Infinity : a.stayDaysLeft;
+        const bv = b.stayDaysLeft == null ? Infinity : b.stayDaysLeft;
+        return av - bv || String(a.sku).localeCompare(String(b.sku));
+      });
+      const overCount = sorted.filter((x) => x.status === '超期').length;
+      const staleCount = sorted.filter((x) => x.stayDaysLeft != null
+        && x.stayDaysLeft < 0 && -x.stayDaysLeft >= STALE_DAYS).length;
+      return { owner, rows: sorted, overCount, staleCount };
+    });
+    return rows.sort((a, b) => b.staleCount - a.staleCount
+      || b.overCount - a.overCount || b.rows.length - a.rows.length
+      || a.owner.localeCompare(b.owner));
+  }, [items]);
 
   // KPI：运输未闭环 = 有未到货渠道的在研 SKU 数（不与筛选联动）
   const pendingTransportCount = items.filter(
@@ -434,9 +490,9 @@ export default function InflightDaily() {
             <KpiCard label="运输未闭环" value={pendingTransportCount}
               color={SEMANTIC.warning} accent={SEMANTIC.warning}
               sub="有已发货未到货渠道" />
-            <KpiCard label="运输已闭环·免追踪" value={kpi.transportExemptCount ?? 0}
-              color={SEMANTIC.success} accent={SEMANTIC.success}
-              sub="所有段已完成且运输无未到货（在售品）" />
+            <KpiCard label={`久悬单(≥${STALE_DAYS}天)`} value={staleItems.length}
+              color={SEMANTIC.danger} accent={SEMANTIC.danger}
+              sub="当前停留段超期 ≥90 天 · 催不动了，需决策" />
           </Box>
 
           <SectionCard title="风险预警区" sx={{ mb: 2 }}
@@ -517,9 +573,131 @@ export default function InflightDaily() {
             </TableContainer>
           </SectionCard>
 
+          {/* 按责任人 · 催办视角（2026-11-06 方案1）：日报是拿去催人的 ——
+              在研 SKU 摊在几个人头上，按人分组才顺手。点行 → 在研清单只看此人。
+              排序与后端日报「按责任人·催办」sheet 同序：久悬多 → 超期多 → 在研多。 */}
+          <SectionCard title={`按责任人 · 催办视角（${ownerGroups.length} 人）`} sx={{ mb: 2 }}
+            subtitle="点一行 → 下方在研清单只看这个人名下的 SKU；块排序 = 久悬多 → 超期多 → 在研多">
+            <TableContainer component={Paper} variant="outlined">
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell sx={{ width: '16%' }}>责任人</TableCell>
+                    <TableCell align="right" sx={{ width: '10%' }}>名下在研</TableCell>
+                    <TableCell align="right" sx={{ width: '8%' }}>超期</TableCell>
+                    <TableCell align="right" sx={{ width: '8%' }}>久悬</TableCell>
+                    <TableCell sx={{ width: '18%' }}>最该催（SKU · 环节）</TableCell>
+                    <TableCell>已停留</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {ownerGroups.map((g) => {
+                    const top = g.rows[0];
+                    return (
+                      <TableRow key={g.owner} hover sx={{ cursor: 'pointer' }}
+                        onClick={() => setFOwner(g.owner === '(未配置)' ? '' : g.owner)}>
+                        <TableCell sx={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
+                          {g.owner}
+                        </TableCell>
+                        <TableCell align="right">{g.rows.length}</TableCell>
+                        <TableCell align="right">
+                          {g.overCount > 0
+                            ? <Box component="span" sx={{ color: SEMANTIC.danger, fontWeight: 600 }}>
+                                {g.overCount}
+                              </Box>
+                            : g.overCount}
+                        </TableCell>
+                        <TableCell align="right">
+                          {g.staleCount > 0
+                            ? <Box component="span" sx={{ color: 'error.dark', fontWeight: 700 }}>
+                                {g.staleCount}
+                              </Box>
+                            : g.staleCount}
+                        </TableCell>
+                        <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                          {top
+                            ? `${top.sku} · ${top.staySeg || '—'}`
+                            : '—'}
+                        </TableCell>
+                        <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                          {top && top.stayElapsed != null ? `${top.stayElapsed} 天` : '—'}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                  {!ownerGroups.length && (
+                    <TableRow><TableCell colSpan={6}>当前无在研 SKU</TableCell></TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </SectionCard>
+
+          {/* 久悬单（2026-11-06 方案4）：当前停留段超期 ≥90 天 —— 这批已不是「催一下」的事，
+              要么重启评估、要么登记豁免/关闭。口径写进 KPI 卡片副标题与表头，避免误读为普通超期。
+              「建议动作」只出文案，不改任何状态；真关单/豁免仍走人工登记通道。 */}
+          <SectionCard title={`久悬单（≥${STALE_DAYS} 天 · ${staleItems.length}）`} sx={{ mb: 2 }}
+            subtitle={`当前停留段超期 ≥${STALE_DAYS} 天 —— 催已失效，需决策：重启评估 / 登记豁免 / 关闭`}>
+            <TableContainer component={Paper} variant="outlined">
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>SKU</TableCell>
+                    <TableCell>机型</TableCell>
+                    <TableCell>当前停留环节</TableCell>
+                    <TableCell>部门</TableCell>
+                    <TableCell align="right">已停留</TableCell>
+                    <TableCell align="right">目标</TableCell>
+                    <TableCell align="right">超期</TableCell>
+                    <TableCell>责任人</TableCell>
+                    <TableCell>建议动作</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {staleItems.map(({ it, overDays }) => (
+                    <TableRow key={it.sku} hover sx={{ cursor: 'pointer' }}
+                      onClick={() => setSelSku(it.sku)}>
+                      <TableCell sx={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{it.sku}</TableCell>
+                      <TableCell>{it.model || '—'}</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>{it.staySeg || '—'}</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>{it.staySegDept || '—'}</TableCell>
+                      <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
+                        {it.stayElapsed == null ? '—' : `${it.stayElapsed} 天`}
+                      </TableCell>
+                      <TableCell align="right">{it.stayTarget ?? '无目标'}</TableCell>
+                      <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
+                        <Box component="span" sx={{ color: 'error.dark', fontWeight: 700 }}>
+                          {`${overDays} 天`}
+                        </Box>
+                      </TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>{it.owner || '⚠未配置'}</TableCell>
+                      <TableCell>
+                        <Typography variant="caption" sx={{ color: 'error.dark' }}>
+                          {staleAction(it)}
+                        </Typography>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  {!staleItems.length && (
+                    <TableRow>
+                      <TableCell colSpan={9}>
+                        {`无超期 ≥${STALE_DAYS} 天的久悬单`}
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </SectionCard>
+
           <SectionCard title={`在研清单（${filtered.length}/${items.length}）`} sx={{ mb: 2 }}>
             <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center',
               flexWrap: 'wrap', mb: 0.5 }}>
+              <TextField size="small" select label="责任人" value={fOwner}
+                onChange={(e) => setFOwner(e.target.value)} sx={{ width: 130 }}>
+                <MenuItem value="">全部</MenuItem>
+                {ownerOpts.map((o) => <MenuItem key={o} value={o}>{o}</MenuItem>)}
+              </TextField>
               <TextField size="small" select label="部门" value={fDept}
                 onChange={(e) => setFDept(e.target.value)} sx={{ width: 130 }}>
                 <MenuItem value="">全部</MenuItem>
