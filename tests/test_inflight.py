@@ -782,7 +782,10 @@ def test_inflight_exposes_transport_keys(inflight_data):
 def test_gantt_label_columns_have_dates():
     """在研甘特学复盘 dates_mode（2026-10-19 用户要求"把日期也带上"）。
 
-    标签列：A部门 B环节 C起点 D终点 E耗时 F目标 G判定 H执行人，日历轴从 I(9)。
+    标签列：A部门 B环节 C起点 D终点 E audit起点 F audit终点 G耗时 H目标
+    I判定 J执行人，日历轴从 K(11)。C/D 是画图依据（实际优先、缺则兜底），
+    E/F 只放纯 audit 审批时间（缺失写「缺」，不拿 C/D 回填）——
+    2026-11-06 用户要求「日期旁边再加两列」，条形画法不变。
     未完成段的终点是"延伸到今日"的填充值 → 必须写「进行中」，不能伪造完成日期。
     """
     from openpyxl import load_workbook
@@ -795,26 +798,32 @@ def test_gantt_label_columns_have_dates():
                    {"dept": "产品", "seg": "取数→签样",
                     "t0": datetime(2026, 10, 12, 9, 30), "t1": datetime(2026, 10, 14),
                     "days": 2, "target": 12, "judge": "✓", "owner": "李四",
-                    "open": False, "neutral": False},
+                    "open": False, "neutral": False,
+                    "auditFrom": "2026-10-12 09:35", "auditTo": "2026-10-14"},
                    {"dept": "运营", "seg": "采购→上架",
                     "t0": datetime(2026, 10, 15), "t1": datetime(2026, 10, 19, 12),
                     "days": 4, "target": 7, "judge": "⏳进行中(已4天)",
-                    "owner": "张三", "open": True, "neutral": False}]}]
+                    "owner": "张三", "open": True, "neutral": False,
+                    "auditFrom": None, "auditTo": None}]}]
     wb = load_workbook(io.BytesIO(_daily_xlsx(
         category="手机膜", computed_at="2026-10-19 10:00", date_str="2026-10-19",
         items=[], alerts={"todayNewOverdue": [], "ongoingOverdue": [],
                           "warnings": []}, gantts=gantts)))
     ws = wb["在研SKU甘特图"]
-    assert G_CAL0 == 9                     # 标签列 8 列，日历从 I
+    assert G_CAL0 == 11                    # 标签列 10 列，日历从 K
     # 区块：3=标题 4=月份 5=日期 6/7=两条条形
     assert ws.cell(row=6, column=3).value == "10-12 09:30"   # 起点（带时刻）
     assert ws.cell(row=6, column=4).value == "10-14"         # 终点（纯日期）
-    assert ws.cell(row=6, column=5).value == 2               # 耗时
-    assert ws.cell(row=6, column=6).value == "≤12"           # 目标
-    assert ws.cell(row=6, column=7).value == "✓"             # 判定
-    assert ws.cell(row=6, column=8).value == "李四"          # 执行人
+    assert ws.cell(row=6, column=5).value == "10-12 09:35"   # audit·起点（原样秒级）
+    assert ws.cell(row=6, column=6).value == "10-14"         # audit·终点
+    assert ws.cell(row=6, column=7).value == 2               # 耗时
+    assert ws.cell(row=6, column=8).value == "≤12"           # 目标
+    assert ws.cell(row=6, column=9).value == "✓"             # 判定
+    assert ws.cell(row=6, column=10).value == "李四"         # 执行人
     assert ws.cell(row=7, column=4).value == "进行中"        # 未完成段不伪造日期
-    assert ws.cell(row=7, column=8).value == "张三"
-    # 日历轴首格在 I 列（日期数字），且冻结在 I3
+    assert ws.cell(row=7, column=5).value == "缺"            # audit 缺失显式写「缺」
+    assert ws.cell(row=7, column=6).value == "缺"
+    assert ws.cell(row=7, column=10).value == "张三"
+    # 日历轴首格在 K 列（日期数字），且冻结在 K3
     assert isinstance(ws.cell(row=5, column=G_CAL0).value, int)
-    assert ws.freeze_panes == "I3"
+    assert ws.freeze_panes == "K3"

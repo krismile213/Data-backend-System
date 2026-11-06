@@ -1359,10 +1359,15 @@ def _fill_report_row(ws, r, x):
 # 事中差异：未完成段条形延伸至今日（当前停留可见）、只画在研 SKU、区块新→旧。
 # 2026-10-19 用户要求"学复盘的程序，把日期也带上"→ 标签列由 6 列扩到 8 列，
 # 与复盘 dates_mode 完全一致：A部门 B环节 C起点 D终点 E耗时 F目标 G判定 H执行人。
+# 2026-11-06 用户要求「日期旁边再加两列」看双轨（条形画法一字不动）：
+# A部门 B环节 C起点 D终点 E audit起点 F audit终点 G耗时 H目标 I判定 J执行人，
+# 日历轴由 I(9) 右移到 K(11)。C/D 仍是画图用的合并时间（实际优先、缺则 audit
+# 兜底），fallback 行字色转橙；E/F 只放纯审批时间，缺失写「缺」——两轨并排，
+# 一眼能看出这条"系统业务日期到底有没有"。
 # ---------------------------------------------------------------------------
-G_CAL0 = 9                              # 日历轴起始列（I；标签列 A-H）
-G_LABEL_W = {"A": 7, "B": 38, "C": 11, "D": 10, "E": 8.5, "F": 8.5,
-             "G": 10, "H": 10}
+G_CAL0 = 11                             # 日历轴起始列（K；标签列 A-J）
+G_LABEL_W = {"A": 7, "B": 38, "C": 11, "D": 10, "E": 11, "F": 10,
+             "G": 8.5, "H": 8.5, "I": 10, "J": 10}
 G_DEPT_FILL = {"产品": "4472C4", "运营": "70AD47", "后勤": "ED7D31",
                "运输": "7030A0", "4国": "BF8F00", "应发未发": "C00000"}
 G_DEPT_HEAD = {"产品": "D9E1F2", "运营": "E2EFDA", "后勤": "FCE4D6",
@@ -1462,6 +1467,22 @@ def _g_fmt_dt(t):
     return f"{t:%m-%d %H:%M}"
 
 
+def _g_audit_text(s):
+    """audit 轨时间（review 侧 _fmt 产物字符串）→ 甘特标签列展示。
+
+    '2026-04-15 09:43' → '04-15 09:43'；'2026-04-15' → '04-15'；
+    空 = 该段没有审批时间 → 「缺」（显式写出来，不留白被当成漏画）。
+    """
+    if not s:
+        return "缺"
+    t = str(s).strip()
+    if len(t) >= 16:
+        return t[5:16]
+    if len(t) >= 10:
+        return t[5:10]
+    return t
+
+
 def _g_left_text(dl):
     """距超时天数的展示文案（与总表第 8 列同口径）。"""
     if dl is None:
@@ -1482,7 +1503,9 @@ def _gantt_sheet_inflight(ws, records, date_str):
     ws.cell(1, 1, (
         f"在研 SKU 流程甘特图（截至 {today:%Y-%m-%d} · 每格=1天 · "
         "条形超出目标的部分=红色 · 未完成段延伸至今日、终点列写「进行中」）   "
-        "C/D=该段起点/终点（有具体时刻的显示 MM-DD HH:MM，纯日期只显 MM-DD）· "
+        "C/D=画图用起点/终点（实际优先，缺则 audit 兜底；有具体时刻的显示 "
+        "MM-DD HH:MM）· E/F=纯 audit 审批上报时间（缺失写「缺」，不与实际混用）· "
+        "橙字=该段判定按兜底时间算（实际缺失）· "
         "颜色：■产品部(蓝) ■运营部(绿) ■后勤部(橙) ■运输(紫) ■4国(金) "
         "■留空/无目标(灰) · SKU 区块按新→旧排列")).font = Font(bold=True, size=11)
 
@@ -1602,16 +1625,26 @@ def _g_block(ws, top, rec, axis_start, n_days, last_col, over_col, today,
         # 标签列与复盘 dates_mode 一致：C 起点 / D 终点（未完成段写「进行中」，
         # 因为它的终点是"延伸到今日"的填充值，不能伪装成完成日期）
         ws.cell(r, 2, item.get("seg")).font = Font(size=9)
-        ws.cell(r, 3, _g_fmt_dt(item.get("t0"))).font = Font(size=8, color="404040")
+        # C/D 仍是**画图依据**（实际优先、缺则 audit 兜底），条形也按它画；
+        # fallback 行（实际缺失、判定靠兜底）字色转橙 —— 数值不变，只标出来。
+        fb = bool(item.get("fallback"))
+        c_color = "B36A00" if fb else "404040"
+        ws.cell(r, 3, _g_fmt_dt(item.get("t0"))).font = Font(size=8, color=c_color)
         if item.get("open"):
             ws.cell(r, 4, "进行中").font = Font(size=8, color="1F4E79")
         else:
-            ws.cell(r, 4, _g_fmt_dt(item.get("t1"))).font = Font(size=8, color="404040")
-        ws.cell(r, 5, cost if cost is not None else "—").font = Font(size=9)
-        ws.cell(r, 6, f"≤{target:g}" if target is not None else "—").font = Font(size=9)
-        ws.cell(r, 7, judge).font = Font(size=9, bold=judge.startswith(("✓", "✗")),
+            ws.cell(r, 4, _g_fmt_dt(item.get("t1"))).font = Font(size=8, color=c_color)
+        # E/F 纯 audit 轨（2026-11-06 用户要求"日期旁边再加两列方便观察"）：
+        # 只放审批上报时间，缺失写「缺」—— 绝不拿 C/D 的值回填，否则两轨混成一轨。
+        for _col, _val in ((5, item.get("auditFrom")), (6, item.get("auditTo"))):
+            _txt = _g_audit_text(_val)
+            ws.cell(r, _col, _txt).font = Font(
+                size=8, color="9E9E9E" if _txt == "缺" else "404040")
+        ws.cell(r, 7, cost if cost is not None else "—").font = Font(size=9)
+        ws.cell(r, 8, f"≤{target:g}" if target is not None else "—").font = Font(size=9)
+        ws.cell(r, 9, judge).font = Font(size=9, bold=judge.startswith(("✓", "✗")),
                                          color=jc)
-        ws.cell(r, 8, item.get("owner") or "—").font = Font(size=9)
+        ws.cell(r, 10, item.get("owner") or "—").font = Font(size=9)
         for cc in range(2, G_CAL0):
             ws.cell(r, cc).border = G_THIN_BOTTOM
             ws.cell(r, cc).alignment = Alignment(vertical="center", wrap_text=False)

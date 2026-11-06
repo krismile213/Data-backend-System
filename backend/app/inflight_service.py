@@ -1392,6 +1392,12 @@ def _gantt_records(data, today=None):
                          "t0": t0, "t1": t1, "days": days,
                          "target": s.get("target"), "judge": judge,
                          "owner": s.get("executor") or s.get("owner") or "",
+                         # 双轨（2026-11-06）：甘特标签列 E/F 与 C/D 并排显示纯
+                         # audit 时间（缺 = 「缺」）。只透传，判定仍走 _seg_judge；
+                         # 旧快照段行没有这些 key → None → 显示「缺」，不造假值。
+                         "auditFrom": s.get("auditFrom"),
+                         "auditTo": s.get("auditTo"),
+                         "fallback": bool(s.get("fallback")),
                          # 未完成段：t1 是"延伸到今日"的填充值，甘特终点列要写
                          # 「进行中」而不是伪造一个完成日期（2026-10-19）
                          "open": open_seg,
