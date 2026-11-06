@@ -203,6 +203,7 @@ delayDays = airSpan − loss_route_limit(60)
 | 10 | GET `/api/review/sku/{code}/checkreport` | **新增**：xlsx 核查报告下载（甘特图按 G_ORDER 部门归块 + 段级明细 + 末尾"人工核对"空白列；文件名 `SKU核查报告_{code}_{YYYYMMDD}.xlsx`）（P0-6） |
 | 11 | GET `/api/review/assessment` | **新增**：`{items:[{sku,grade,delayDays,direction,qtyMin,qtyMax,amountMin,amountMax,basis,degraded}], summary:{lossTotalMin/Max, gainTotalMin/Max, degradedCount}}`（P1-4 三指标） |
 | 12 | GET `/api/review/assessment/export` | **新增**：三指标 xlsx 导出（时效/销量/毛利三 sheet） |
+| 13 | GET `/api/review/sku/{code}` | **2026-11-06 双时间并列**：`nodes[节点]` 除 `at/src/iso`（实际采用）外，新增 `sys`（系统业务日期，没填就是 null）、`sysField`（命中的列名）、`audit`、`auditOp`、`action`、`actionOp`。新增 `sampleCycle: {from:"签样", to:"拍摄交付", limit:15, start, end, days, ok, missing[]}` —— **只认系统业务日期**，任一端缺失则 `days=null`（前端写空），不拿 audit 补录时间顶替。真源 `seg_rules.SAMPLE_CYCLE`（= 签样→寄送 5 + 寄送→拍摄交付 10，有 pytest 等值断言盯着）。背景：G600 的寄送没有系统列，只有 audit 11-05，而拍摄交付系统列 10-22 → 段值 -14 天 |
 
 ### 4.3 扩展 `/api/etl/*`（dataadmin.py）
 

@@ -539,6 +539,35 @@ export default function Review() {
                   </Typography>
                 </Box>
               )}
+              {detail.sampleCycle && (
+                <Box sx={{ mb: 2, p: 1.5, borderRadius: 1,
+                  border: '1px dashed', borderColor: 'divider' }}>
+                  <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+                    样机流转：签样 → 拍摄交付
+                  </Typography>
+                  {detail.sampleCycle.days == null ? (
+                    <Typography variant="body2" color="text.secondary">
+                      实际日期缺失{detail.sampleCycle.missing?.length
+                        ? `（${detail.sampleCycle.missing.join('、')} 没有系统业务日期）` : ''}
+                      ，间隔不计算 —— 不拿 audit 补录时间冒充实际
+                    </Typography>
+                  ) : (
+                    <Typography variant="body2">
+                      {detail.sampleCycle.start} → {detail.sampleCycle.end}
+                      {' · '}
+                      <strong>{detail.sampleCycle.days} 天</strong>
+                      {' · '}
+                      <Box component="span" sx={{
+                        fontWeight: 600,
+                        color: detail.sampleCycle.ok ? SEMANTIC.success : SEMANTIC.danger,
+                      }}>
+                        {detail.sampleCycle.ok ? '✓ 合格' : '✗ 超线'}
+                      </Box>
+                      {`（合格线 < ${detail.sampleCycle.limit} 天）`}
+                    </Typography>
+                  )}
+                </Box>
+              )}
               <Table size="small">
                 <TableHead>
                   <TableRow>
@@ -584,6 +613,45 @@ export default function Review() {
                   ))}
                 </TableBody>
               </Table>
+              <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>
+                节点取数核对（系统业务日期 vs audit 上报）
+              </Typography>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>节点</TableCell>
+                    <TableCell>系统业务日期</TableCell>
+                    <TableCell>audit 上报</TableCell>
+                    <TableCell>实际采用</TableCell>
+                    <TableCell>来源</TableCell>
+                    <TableCell>上报/执行人</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {Object.entries(detail.nodes || {}).map(([name, n]) => (
+                    <TableRow key={name}>
+                      <TableCell sx={{ fontWeight: 600 }}>{name}</TableCell>
+                      <TableCell sx={{ color: n.sys ? 'inherit' : 'text.disabled',
+                        fontStyle: n.sys ? 'normal' : 'italic' }}>
+                        {n.sys || '空'}
+                      </TableCell>
+                      <TableCell sx={{ color: n.audit ? 'inherit' : 'text.disabled',
+                        fontStyle: n.audit ? 'normal' : 'italic' }}>
+                        {n.audit || '空'}
+                      </TableCell>
+                      <TableCell>{n.at || '—'}</TableCell>
+                      <TableCell>{n.src || '—'}</TableCell>
+                      <TableCell>{n.auditOp || n.actionOp || '—'}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              <Typography variant="caption" color="text.secondary">
+                系统业务日期 = 钉钉表单里人填的日期（人填才有，空就是空）；audit = 审批时
+                带 audit 备注的上报时间，属补录，常晚于实际发生。实际采用按
+                「系统 &gt; audit &gt; 动作」取 —— 所以会出现「系统空、实际却是 audit」的节点
+                （如 G600 的寄送：表单没这列，只有 11-05 的补录）。看时效时以系统日期为准。
+              </Typography>
               {(detail.shipments?.length || 0) > 0 && (
                 <>
                   <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>
