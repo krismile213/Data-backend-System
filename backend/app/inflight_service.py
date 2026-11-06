@@ -620,6 +620,10 @@ def compute_inflight(category=None, *, mute_emag_noship=False):
                 "dept": _r.get("dept"), "seg": _r.get("seg"),
                 "start": _r.get("start"), "src0": _r.get("src0"),
                 "end": _r.get("end"), "src1": _r.get("src1"),
+                # 纯轨四列（2026-11-06）：与超期明细同口径，只透传段行已有字段
+                "startReal": _r.get("startReal"), "endReal": _r.get("endReal"),
+                "auditFrom": _r.get("auditFrom"), "auditTo": _r.get("auditTo"),
+                "fallback": bool(_r.get("fallback")),
                 "days": _days, "target": _tg,
                 "over": round(_days - float(_tg), 2),
                 "owner": _r.get("executor") or _r.get("owner") or "",
@@ -1103,8 +1107,17 @@ def _seg_time_fields(det, seg_name):
     for s in det.get("segments") or []:
         if s.get("seg") == seg_name:
             return {"start": s.get("start"), "src0": s.get("src0"),
-                    "end": s.get("end"), "src1": s.get("src1")}
-    return {"start": None, "src0": None, "end": None, "src1": None}
+                    "end": s.get("end"), "src1": s.get("src1"),
+                    # 纯轨四列（2026-11-06 用户口径，照搬复盘页 G600 定稿）：
+                    # 实际 = 系统业务列（候选链主字段命中才算），audit = 审批上报；
+                    # 两轨并列、互不兜底，空就是空。这里只**透传**段行已有字段，
+                    # 不重算（真源仍是 review_sku_segments 的段行，双轨不产第二套判定）。
+                    "startReal": s.get("startReal"), "endReal": s.get("endReal"),
+                    "auditFrom": s.get("auditFrom"), "auditTo": s.get("auditTo"),
+                    "fallback": bool(s.get("fallback"))}
+    return {"start": None, "src0": None, "end": None, "src1": None,
+            "startReal": None, "endReal": None, "auditFrom": None,
+            "auditTo": None, "fallback": False}
 
 
 def _seg_start_node(det, seg_name):

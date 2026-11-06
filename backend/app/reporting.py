@@ -24,6 +24,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from .generic_material import BASIS_UNKNOWN as _BASIS_UNKNOWN
 from .sample_cycle import label as _sc_label
 from .seg_rules import G_ORDER, ROUTE_TARGETS
+from .transport_closure import is_muted_noship_hub
 
 # 部门归块色（浅色填充，正文仍用深色字，保证黑白打印可读）
 DEPT_COLOR = {
@@ -822,17 +823,18 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
         _put(ws1, 5, 1, "（当前无在研 SKU）")
 
     # ---- Sheet2 超期明细 ----
-    # 2026-10-29：+4 列段时间追溯（起点/起点来源/终点/终点来源）——
-    # 天数怎么算出来的要能对到原始字段（系统业务列 / audit上报 / 审批动作），
-    # 催办时直接甩证据；责任人缺失显式标「⚠未配置」，别再以「—」蒙混。
-    _TIME_COLS = ["起点时间", "起点来源", "终点时间", "终点来源"]
+    # 2026-11-06：时间追溯由「混轨 + 来源标注」改为**纯轨四列**（照搬复盘页
+    # G600 定稿口径）——实际就是实际（系统业务列）、audit 就是 audit（审批上报），
+    # 两轨并列不互相兜底，实际缺失就留空（不拿 audit 值冒充）。
+    # 判定轨（已进行/超期/结论）不动：双轨只回答"判定站不站得住"，不产第二套结论。
+    _TIME_COLS = ["实际·起点", "实际·终点", "audit·起点", "audit·终点"]
     ws2 = wb.create_sheet("超期明细")
     ws2["A1"] = "进行中超期段（终点未完成，elapsed > 目标天）"
     ws2["A1"].font = TITLE_FONT
     _head_row(ws2, 3, ["SKU", "部门", "环节", "已进行(天)", "目标(天)",
-                       "超期(天)", "责任人", "起点时间", "起点来源",
-                       "终点时间", "终点来源"],
-              widths=[14, 8, 22, 10, 9, 9, 12, 17, 9, 17, 9])
+                       "超期(天)", "责任人", "实际·起点", "实际·终点",
+                       "audit·起点", "audit·终点", "说明"],
+              widths=[14, 8, 22, 10, 9, 9, 12, 17, 17, 17, 17, 24])
     r = 4
     det_src = []
     for it in items or []:
@@ -852,13 +854,15 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
         else:
             _put(ws2, r, 7, "⚠未配置",
                  font=Font(size=10, bold=True, color="C62828"))
-        _put(ws2, r, 8, x.get("start") or "—")
-        _put(ws2, r, 9, x.get("src0") or "—",
-             align=Alignment(horizontal="center"))
-        _put(ws2, r, 10, x.get("end") or "进行中",
-             font=None if x.get("end") else Font(size=10, color="1F4E79"))
-        _put(ws2, r, 11, x.get("src1") or "—",
-             align=Alignment(horizontal="center"))
+        # 实际轨：空就写空（用户口径「实际没有就不取」）——空格在这一列里
+        # 就代表"没有系统业务时间"，比「—」更不容易被误读成 0 或缺失待补。
+        _put(ws2, r, 8, x.get("startReal") or "")
+        _put(ws2, r, 9, x.get("endReal") or "")
+        _put(ws2, r, 10, x.get("auditFrom") or "")
+        _put(ws2, r, 11, x.get("auditTo") or "")
+        _put(ws2, r, 12, "判定取 audit 兜底（实际缺失）"
+             if x.get("fallback") else "",
+             font=Font(size=9, color="9E9E9E"))
         r += 1
     if r == 4:
         _put(ws2, 4, 1, "（无进行中超期段）")
@@ -977,8 +981,9 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
                  "「已备注未豁免」= 登记了备注但未匹配豁免通道，仍在追踪）")
     ws5["A1"].font = TITLE_FONT
     _head_row(ws5, 3, ["类型", "SKU", "部门", "环节", "超期(天)", "已进行(天)",
-                       "责任人", "起点时间", "起点来源", "终点时间", "终点来源"],
-              widths=[16, 14, 8, 22, 10, 10, 12, 17, 9, 17, 9])
+                       "责任人", "实际·起点", "实际·终点", "audit·起点",
+                       "audit·终点", "说明"],
+              widths=[16, 14, 8, 22, 10, 10, 12, 17, 17, 17, 17, 24])
     r = 4
     for x in (alerts or {}).get("todayNewOverdue", []):
         _put(ws5, r, 1, "当日新超期", font=Font(size=10, bold=True,
@@ -1021,10 +1026,13 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
         else:
             _put(ws5, r, 7, "⚠未配置",
                  font=Font(size=10, bold=True, color="C62828"))
-        _put(ws5, r, 8, x.get("ship") or "—")
-        _put(ws5, r, 9, "系统", align=Alignment(horizontal="center"))
-        _put(ws5, r, 10, "在途", font=Font(size=10, color="1F4E79"))
-        _put(ws5, r, 11, "—", align=Alignment(horizontal="center"))
+        # 货件超期只有实际轨（Part5 发货日期是系统业务时间，运输没有审批轨）
+        _put(ws5, r, 8, x.get("ship") or "")
+        _put(ws5, r, 9, "")
+        _put(ws5, r, 10, "")
+        _put(ws5, r, 11, "")
+        _put(ws5, r, 12, "运输口径：发货日期取 Part5", font=Font(size=9,
+                                                               color="9E9E9E"))
         r += 1
     if r == 4:
         _put(ws5, 4, 1, "（无待上报异常）")
@@ -1034,7 +1042,7 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
         ws_ship = wb.create_sheet("货件运输")
         ws_ship["A1"] = ("在研 SKU 货件运输（Part5 发货 × Part8 到货按货件号配对 · "
                          "全量保留：SKU 在研期间每一票都列，到货 ≤5 天标「留观N/5天」、"
-                         "超出标「已归档(到货N天)」· 未发货渠道无货件号不进本表）")
+                         "超出标「已归档(到货N天)」· 已立项但未发货的渠道见表尾占位行）")
         ws_ship["A1"].font = TITLE_FONT
         _head_row(ws_ship, 3, ["SKU", "型号", "货件号", "发往地区", "运输方式",
                                "发货日期", "到货日期", "已运输(天)", "目标(天)",
@@ -1074,6 +1082,44 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
             c.font = Font(size=10, color=color)
             r += 1
 
+        # ---- 未发货渠道占位行（2026-11-06 用户要求）----
+        # 本表此前只列"真货件"（有货件号）—— 一个已立项却还没发货的 SKU 在这张
+        # 表里等于不存在，看不出"哪个 SKU 有地区没发货、需要去登记/催物流"。
+        # 现在按 items.notShippedHubs（Part5 已立项渠道 − 已发货渠道）补占位行：
+        #   红色「未发货·待登记」  = 该催的
+        #   灰色「未发货·emag不催」= emag 走 2026-10-15 口径「有发货才标记」
+        _unsh = [(it.get("sku"), it.get("model"), hub)
+                 for it in (items or [])
+                 for hub in (it.get("notShippedHubs") or [])]
+        # 待登记（红）在前、emag 不催（灰）沉到每个 SKU 末尾 —— 登记时按顺序往下走；
+        # 块序保持 items（紧迫度）不变，同 SKU 内才按 red→gray
+        _ord = {it.get("sku"): i for i, it in enumerate(items or [])}
+        _unsh.sort(key=lambda t: (_ord.get(t[0], 9999),
+                                  is_muted_noship_hub(t[2])))
+        if _unsh:
+            r += 1
+            _put(ws_ship, r, 1,
+                 ("以下为 Part5 已立项但尚未发货的渠道（无货件号、未进上表）"
+                  " —— 红字＝待登记/催物流；灰字 emag＝按「有发货才标记」口径不催"),
+                 font=Font(size=10, bold=True, color="C62828"))
+            r += 1
+            for _sku, _model, _hub in _unsh:
+                _muted = is_muted_noship_hub(_hub)
+                _put(ws_ship, r, 1, _sku)
+                _put(ws_ship, r, 2, _model or "—")
+                _put(ws_ship, r, 3, "—")
+                _put(ws_ship, r, 4, _hub)
+                _put(ws_ship, r, 5, "—")
+                for _c in range(6, 10):
+                    _put(ws_ship, r, _c, "—",
+                         align=Alignment(horizontal="center"))
+                c = _put(ws_ship, r, 10,
+                         "未发货·emag不催" if _muted else "未发货·待登记",
+                         align=Alignment(horizontal="center"))
+                c.font = Font(size=10, color="9E9E9E" if _muted else "C62828",
+                              bold=not _muted)
+                r += 1
+
     # ---- Sheet8 本月已消化超期（2026-10-29 修复"完成即蒸发"）----
     # 此前完成段（✗超期）一走完，超期痕迹就从日报消失，要等复盘才统计得到。
     # 现在终点落在本月的消化超期按月留痕，也直接喂给绩效视角。
@@ -1081,22 +1127,20 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
     ws_dg["A1"] = ("本月已完成但超期的段（终点落在本月；按超期天数降序）——"
                    "超期了但按时补完的在这里对账，不再蒸发")
     ws_dg["A1"].font = TITLE_FONT
-    _head_row(ws_dg, 3, ["SKU", "型号", "部门", "环节", "起点时间", "起点来源",
-                         "终点时间", "终点来源", "耗时(天)", "目标(天)",
-                         "超期(天)", "责任人"],
-              widths=[14, 18, 8, 20, 17, 9, 17, 9, 10, 9, 10, 12])
+    _head_row(ws_dg, 3, ["SKU", "型号", "部门", "环节", "实际·起点", "实际·终点",
+                         "audit·起点", "audit·终点", "耗时(天)", "目标(天)",
+                         "超期(天)", "责任人", "说明"],
+              widths=[14, 18, 8, 20, 17, 17, 17, 17, 10, 9, 10, 12, 24])
     r = 4
     for x in sorted(digested or [], key=lambda v: -(v.get("over") or 0)):
         _put(ws_dg, r, 1, x.get("sku"))
         _put(ws_dg, r, 2, x.get("model") or "—")
         _put(ws_dg, r, 3, x.get("dept") or "—")
         _put(ws_dg, r, 4, x.get("seg"))
-        _put(ws_dg, r, 5, x.get("start") or "—")
-        _put(ws_dg, r, 6, x.get("src0") or "—",
-             align=Alignment(horizontal="center"))
-        _put(ws_dg, r, 7, x.get("end") or "—")
-        _put(ws_dg, r, 8, x.get("src1") or "—",
-             align=Alignment(horizontal="center"))
+        _put(ws_dg, r, 5, x.get("startReal") or "")
+        _put(ws_dg, r, 6, x.get("endReal") or "")
+        _put(ws_dg, r, 7, x.get("auditFrom") or "")
+        _put(ws_dg, r, 8, x.get("auditTo") or "")
         c = _put(ws_dg, r, 9, x.get("days"), align=Alignment(horizontal="center"))
         c.font = Font(size=10, color="C62828", bold=True)
         _put(ws_dg, r, 10, x.get("target"), align=Alignment(horizontal="center"))
@@ -1107,6 +1151,15 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
         else:
             _put(ws_dg, r, 12, "⚠未配置",
                  font=Font(size=10, bold=True, color="C62828"))
+        # 说明列：已完成段的终点必须有值，两轨都空说明耗时取的是兜底列
+        # （实际缺、audit 也没有）—— 这种「判定站不住」的行要显式标出来，
+        # 否则读者只看到耗时却对不上任何时间列。
+        _note = ""
+        if x.get("fallback"):
+            _note = "判定取 audit 兜底（实际缺失）"
+        elif not x.get("endReal") and not x.get("auditTo"):
+            _note = "终点实际缺失，耗时按兜底列计"
+        _put(ws_dg, r, 13, _note, font=Font(size=9, color="9E9E9E"))
         r += 1
     if r == 4:
         _put(ws_dg, 4, 1, "（本月暂无已消化超期段——好现象）")
@@ -1288,12 +1341,15 @@ def _fill_report_row(ws, r, x):
         _put(ws, r, 7, x["owner"])
     else:
         _put(ws, r, 7, "⚠未配置", font=Font(size=10, bold=True, color="C62828"))
-    # 段时间追溯（2026-10-29）：起点/终点原始时间 + 来源（系统/audit/动作）
-    _put(ws, r, 8, x.get("start") or "—")
-    _put(ws, r, 9, x.get("src0") or "—", align=Alignment(horizontal="center"))
-    _put(ws, r, 10, x.get("end") or "进行中",
-         font=None if x.get("end") else Font(size=10, color="1F4E79"))
-    _put(ws, r, 11, x.get("src1") or "—", align=Alignment(horizontal="center"))
+    # 纯轨四列（2026-11-06，照搬复盘页 G600 定稿）：实际=系统业务列、
+    # audit=审批上报，两轨并列互不兜底；实际缺失留空，不拿 audit 佐值。
+    _put(ws, r, 8, x.get("startReal") or "")
+    _put(ws, r, 9, x.get("endReal") or "")
+    _put(ws, r, 10, x.get("auditFrom") or "")
+    _put(ws, r, 11, x.get("auditTo") or "")
+    _put(ws, r, 12, "判定取 audit 兜底（实际缺失）"
+         if x.get("fallback") else "",
+         font=Font(size=9, color="9E9E9E"))
 
 
 # ---------------------------------------------------------------------------
