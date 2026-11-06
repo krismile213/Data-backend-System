@@ -263,6 +263,14 @@ def _docs_oldest_first(docs):
     return sorted(docs, key=lambda d: d.get("create_time") or datetime.min)
 
 
+def _primary_sys_field(cands):
+    """sys 候选链的主字段：链（tuple/list）取首项（空链 → None，如素材加工无系统列）。
+    「真系统业务日期」= 命中主字段；兜底列（如提案的「创建时间」）不算。"""
+    if isinstance(cands, (tuple, list)):
+        return cands[0] if cands else None
+    return cands
+
+
 def extract_node_times(parts_docs, restrict=None, ruleset=None):
     """parts_docs: {part: [去重后单据]} → {节点名: 节点时间字典}。
 
@@ -342,9 +350,17 @@ def extract_node_times(parts_docs, restrict=None, ruleset=None):
                         break
                 if latest_op:
                     break
+        # 真系统业务日期（2026-11-06 用户口径「实际就是实际」）：只有命中候选链
+        # **主字段**（cands[0]）才算 —— 兜底列不算。典型：提案节点候选 ("提案日期",
+        # "创建时间")，G600 那批表单没有提案日期列 → 命中「创建时间」兜底，该节点
+        # 的真系统日期 = 无（段级「实际·起点」必须空，不能用创建时间冒充）。
+        # 判定轨 adopted **保持原样**（含兜底），两套口径并存、互不污染。
+        sys_real = sys_dt if (sys_field == _primary_sys_field(cands)) else None
         nodes[name] = {
             "part": part, "sys": sys_dt, "sys_raw": sys_raw,
             "sys_field": sys_field,          # 实际命中的列（候选链时便于排查）
+            "sys_field_primary": _primary_sys_field(cands),   # 主字段名（sys_real 的判定依据）
+            "sys_real": sys_real,
             "sys_date_only": bool(sys_raw) and len(sys_raw) <= 10,
             "audit": audit_dt, "audit_op": audit_op,
             "action": act_dt, "action_op": act_op,
@@ -752,6 +768,7 @@ def transport_rows(items, ruleset=None, ship_op="", today=None):
             "dept": "运输", "seg": f"运输·在途({len(pend)}票)",
             "from": "发货(最早)", "to": "未到货(截至今日)",
             "t0": s0, "t1": None,          # 未完成：甘特图延伸至今日、终点写「进行中」
+            "startReal": None, "endReal": None, "fallback": False,
             "days": None,                  # 不参与耗时/卡点统计（见 displayOnly）
             "target": None,
             "judge": f"⏳在途{len(pend)}票",
@@ -831,6 +848,13 @@ def review_sku_segments(sku, parts_docs, rules, restrict=None, ruleset=None):
         seg_rows.append({
             "dept": dept, "seg": name, "from": n0, "to": n1,
             "start": _disp(t0, src0), "end": _disp(t1, src1),
+            # ---- 纯轨时间戳（2026-11-06 用户口径「实际就是实际，audit就是audit」）----
+            # 实际·起/终 = 真系统业务日期（主字段命中才给，兜底列/audit 补位一律空）；
+            # audit·起/终 = 纯审批上报。两套互不冒充。耗时/判定仍走判定轨（adopted），
+            # fallback=True 表示判定轨里有补位（时间戳列看不到那个值，耗时数字旁标灰字）。
+            "startReal": _fmt(nd0["sys_real"]), "endReal": _fmt(nd1["sys_real"]),
+            "fallback": bool((t0 is not None and nd0["sys_real"] is None)
+                             or (t1 is not None and nd1["sys_real"] is None)),
             "t0": t0, "t1": t1, "src0": src0, "src1": src1,
             "days": _fmt_days(d), "target": None if is_gap else target,
             "judge": judge, "owner": owner, "executor": executor,
@@ -863,6 +887,9 @@ def review_sku_segments(sku, parts_docs, rules, restrict=None, ruleset=None):
         "dept": dept, "seg": name, "from": n0, "to": "发货末批(Part5)",
         "start": _disp(nd_purchase["adopted"], nd_purchase["src"]),
         "end": _fmt(last_ship), "t0": nd_purchase["adopted"], "t1": last_ship,
+        "startReal": _fmt(nd_purchase["sys_real"]), "endReal": None,
+        "fallback": bool(nd_purchase["adopted"] is not None
+                         and nd_purchase["sys_real"] is None),
         "src0": nd_purchase["src"], "src1": "系统",
         "days": _fmt_days(d_l4), "target": target,
         "judge": _seg_judge(d_l4, target), "owner": owner,
@@ -897,6 +924,9 @@ def review_sku_segments(sku, parts_docs, rules, restrict=None, ruleset=None):
             "start": _disp(t_purchase, nd_purchase["src"]),
             "end": "至今未发货",
             "t0": t_purchase, "t1": today if t_purchase else None,
+            "startReal": _fmt(nd_purchase["sys_real"]), "endReal": None,
+            "fallback": bool(t_purchase is not None
+                             and nd_purchase["sys_real"] is None),
             "src0": nd_purchase["src"], "src1": "系统",
             "days": _fmt_days(stall_days), "target": target,
             "judge": it["judge"], "owner": owner, "executor": owner,
@@ -1200,6 +1230,10 @@ def compute_review(category=None):
                              # 两者都给出，判 "取数口径对不对" 时不用再翻原始单据。
                              "sys": _fmt(nd["sys"]),
                              "sysField": nd["sys_field"],
+                             # 真系统业务日期 = 主字段命中才给（兜底列不算，见
+                             # extract_node_times.sys_real）；G600 提案=创建时间兜底
+                             # → 空，G602 起有「提案日期」→ 有值
+                             "sysReal": _fmt(nd["sys_real"]),
                              "audit": _fmt(nd["audit"]),
                              "auditOp": nd["audit_op"],
                              "action": _fmt(nd["action"]),
@@ -1364,7 +1398,7 @@ _cache_lock = threading.Lock()
 # 复盘 payload 结构版本。改了返回字段/语义就 +1。
 # 指纹只看数据与规则版本，改代码不改指纹 —— 若不加这个版本号，热更新后旧缓存
 # 会继续把**旧结构**端出去，新字段在页面上永远是空的（2026-11-06 踩过）。
-_PAYLOAD_VERSION = 2
+_PAYLOAD_VERSION = 3
 
 
 def _db_fingerprint(category=None):

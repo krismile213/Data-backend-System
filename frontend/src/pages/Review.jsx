@@ -427,7 +427,7 @@ export default function Review() {
       </Paper>
 
       {/* SKU 复盘档案弹窗 */}
-      <Dialog open={!!detailSku} onClose={() => setDetailSku(null)} maxWidth="lg" fullWidth>
+      <Dialog open={!!detailSku} onClose={() => setDetailSku(null)} maxWidth="xl" fullWidth>
         <DialogTitle>
           复盘档案 · {detailSku}
           {detail && (
@@ -568,29 +568,67 @@ export default function Review() {
                   )}
                 </Box>
               )}
-              {/* 段级表 10 列：加 minWidth 防止窄屏把「部门/执行人」压成竖排字 */}
-              <Table size="small" sx={{ minWidth: 860 }}>
+              {/* 段级表 15 列（2026-11-06 纯轨拆列）：实际两列=纯系统业务日期（主字段
+                  命中才给，兜底/补位一律空）；audit 两列=纯审批上报。耗时/判定走判定轨。
+                  15 列 > lg Dialog 宽度 → 包横向滚动容器，minWidth 撑开防压竖排 */}
+              <Box sx={{ overflowX: 'auto' }}>
+              <Table size="small" sx={{ minWidth: 1340, tableLayout: 'fixed' }}>
                 <TableHead>
                   <TableRow>
-                    <TableCell sx={{ whiteSpace: 'nowrap' }}>部门</TableCell>
-                    <TableCell>环节</TableCell>
-                    <TableCell>起点 → 终点</TableCell>
-                    <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>实际(天)</TableCell>
-                    <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>audit(天)</TableCell>
-                    <TableCell sx={{ whiteSpace: 'nowrap' }}>双轨</TableCell>
-                    <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>目标(天)</TableCell>
-                    <TableCell>判定</TableCell>
-                    <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>贡献(天)</TableCell>
-                    <TableCell sx={{ whiteSpace: 'nowrap' }}>执行人</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap', width: 44 }}>部门</TableCell>
+                    <TableCell sx={{ width: 128 }}>环节</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap', width: 104 }}>实际·起点</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap', width: 104 }}>实际·终点</TableCell>
+                    <TableCell align="right" sx={{ whiteSpace: 'nowrap', width: 64 }}>实际(天)</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap', width: 128 }}>audit·起点</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap', width: 132 }}>audit·终点</TableCell>
+                    <TableCell align="right" sx={{ whiteSpace: 'nowrap', width: 64 }}>audit(天)</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap', width: 96 }}>双轨</TableCell>
+                    <TableCell align="right" sx={{ whiteSpace: 'nowrap', width: 64 }}>目标(天)</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap', width: 96 }}>判定</TableCell>
+                    <TableCell align="right" sx={{ whiteSpace: 'nowrap', width: 64 }}>贡献(天)</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap', width: 66 }}>执行人</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap', width: 76 }}>最新审批人</TableCell>
+                    <TableCell sx={{ width: 162 }}>说明</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {detail.segments.map((s, i) => (
                     <TableRow key={i} sx={s.gap ? { bgcolor: 'action.hover' } : undefined}>
                       <TableCell sx={{ whiteSpace: 'nowrap' }}>{s.gap ? '留空' : s.dept}</TableCell>
-                      <TableCell sx={{ fontWeight: 600 }}>{s.seg}</TableCell>
-                      <TableCell>{s.start || '—'} → {s.end || '—'}</TableCell>
-                      <TableCell align="right">{s.gap ? '—' : (s.days ?? '—')}</TableCell>
+                      <TableCell sx={{ fontWeight: 600, wordBreak: 'keep-all' }}>{s.seg}</TableCell>
+                      {/* 纯轨四列：缺就写「缺」（斜体灰），不用另一轨的值冒充 */}
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                        {s.startReal
+                          || <Typography component="span" variant="caption"
+                            sx={{ fontStyle: 'italic', color: 'text.disabled' }}>缺</Typography>}
+                      </TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                        {s.endReal
+                          || <Typography component="span" variant="caption"
+                            sx={{ fontStyle: 'italic', color: 'text.disabled' }}>缺</Typography>}
+                      </TableCell>
+                      <TableCell align="right">
+                        {s.gap ? '—'
+                          : <>{s.days ?? '—'}
+                            {s.fallback && s.days != null && (
+                              <Typography component="span" variant="caption"
+                                sx={{ color: 'text.disabled', ml: 0.5 }}
+                                title="判定轨起点/终点有补位（兜底列或 audit），时间戳列看不到它">
+                                补
+                              </Typography>)}
+                          </>}
+                      </TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                        {s.auditFrom
+                          || <Typography component="span" variant="caption"
+                            sx={{ fontStyle: 'italic', color: 'text.disabled' }}>缺</Typography>}
+                      </TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                        {s.auditTo
+                          || <Typography component="span" variant="caption"
+                            sx={{ fontStyle: 'italic', color: 'text.disabled' }}>缺</Typography>}
+                      </TableCell>
                       <TableCell align="right" sx={{
                         color: s.auditDays == null ? 'text.disabled' : 'text.secondary',
                       }}
@@ -634,15 +672,24 @@ export default function Review() {
                         {s.gap ? '—' : (s.contribution == null ? '—' : s.contribution)}
                       </TableCell>
                       <TableCell sx={{ whiteSpace: 'nowrap' }}>{s.executor || '—'}</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>{s.latestOp || '—'}</TableCell>
+                      <TableCell>
+                        <Typography variant="caption" color="text.secondary"
+                          sx={{ display: 'block', maxWidth: 180 }}>
+                          {s.noteText || s.note || '—'}
+                        </Typography>
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
+              </Box>
               <Typography variant="caption" color="text.secondary"
                 sx={{ display: 'block', mt: 0.5 }}>
-                audit(天) = 该段起点、终点都取审批上报时间算出的耗时，只做交叉核对，
-                判定仍只看「实际(天)」（系统轨）。「仅系统轨超线」表示换成审批时间算并不超
-                —— 超的是系统日期，值得回查填报。
+                实际·起/终 = 纯系统业务日期（表单主字段，如提案日期；兜底列不算 → 写「缺」）；
+                audit·起/终 = 纯审批上报时间。两套互不冒充。实际(天)/判定走判定轨
+                （系统&gt;audit&gt;动作），数字旁「补」= 该段判定轨里有补位。
+                audit(天) 只做交叉核对；「仅系统轨超线」= 换成审批时间并不超，超的是系统日期。
               </Typography>
               <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>
                 节点取数核对（系统业务日期 vs audit 上报）

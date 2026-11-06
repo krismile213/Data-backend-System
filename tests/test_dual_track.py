@@ -265,3 +265,62 @@ def test_payload_judge_still_system_only():
             continue
         assert s["judge"] == _seg_judge(s["days"], s["target"], s["seg"]), (
             f"{s['seg']} 判定不是按系统轨算的：{s['judge']}")
+
+
+# ---------------------------------------------------------------------------
+# 7. 纯轨时间戳（2026-11-06 用户口径「实际就是实际，audit就是audit」）
+# ---------------------------------------------------------------------------
+def test_sys_real_only_primary_field():
+    """真系统日期只认候选链主字段，兜底列不算。
+
+    用户口径的事实依据：提案候选链 = ("提案日期", "创建时间")，G600 那批
+    Part1 没有「提案日期」列（G602 起才加）→ G600 提案命中「创建时间」兜底，
+    段级「实际·起点」必须空，不能用创建时间冒充；判定轨 adopted 照旧可用。
+    """
+    from app.category_rules import rules_for
+    from app.routers.review import extract_node_times
+
+    t0 = datetime(2026, 9, 28, 17, 30)
+    rs = rules_for("手机膜")
+    docs = {"Part1": [{
+        "doc_id": "d1", "part": "Part1", "sku": "G600", "model": "M",
+        "approval_no": "1", "status": "已结束", "create_time": t0,
+        "raw": {"创建时间": t0, "手机数据取得日期": "2026-09-28"},
+        "nodes": [],
+    }]}
+    nd = extract_node_times(docs, ruleset=rs)
+    assert nd["提案"]["sys_field"] == "创建时间"
+    assert nd["提案"]["sys_real"] is None          # 兜底列 → 真系统日期为空
+    assert nd["提案"]["adopted"] == t0             # 判定轨照旧
+    assert nd["取数"]["sys_field"] == "手机数据取得日期"
+    assert nd["取数"]["sys_real"] == datetime(2026, 9, 28)   # 主字段命中 → 真
+    assert nd["素材加工"]["sys_real"] is None      # 本来就没有系统列
+
+    # G602 形态：有「提案日期」→ 真系统日期成立
+    docs2 = {"Part1": [{
+        "doc_id": "d2", "part": "Part1", "sku": "G602", "model": "M",
+        "approval_no": "2", "status": "已结束", "create_time": t0,
+        "raw": {"创建时间": t0, "提案日期": "2026-10-05"},
+        "nodes": [],
+    }]}
+    nd2 = extract_node_times(docs2, ruleset=rs)
+    assert nd2["提案"]["sys_field"] == "提案日期"
+    assert nd2["提案"]["sys_real"] == datetime(2026, 10, 5)
+
+
+def test_payload_carries_pure_track_fields():
+    """段级 payload 必须带 startReal/endReal/fallback；纯轨空就是 null。"""
+    j = _sku_payload("G600")
+    for s in j["segments"]:
+        for k in ("startReal", "endReal", "fallback"):
+            assert k in s, f"{s['seg']} 缺纯轨字段 {k}"
+    by_seg = {s["seg"]: s for s in j["segments"]}
+    ps = by_seg.get("提案→取数")
+    if ps:                                        # 库里 G600 提案走创建时间兜底
+        assert ps["startReal"] is None, "G600 提案·实际起点应为空（创建时间兜底）"
+        assert ps["fallback"] is True
+    qs = by_seg.get("取数→签样")
+    if qs:
+        assert qs["fallback"] is False            # 两端都是主字段，无补位
+    for name, nd in j["nodes"].items():
+        assert "sysReal" in nd, f"{name} 缺 sysReal"
