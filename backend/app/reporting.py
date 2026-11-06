@@ -22,6 +22,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
 from .generic_material import BASIS_UNKNOWN as _BASIS_UNKNOWN
+from .sample_cycle import label as _sc_label
 from .seg_rules import G_ORDER, ROUTE_TARGETS
 
 # 部门归块色（浅色填充，正文仍用深色字，保证黑白打印可读）
@@ -585,7 +586,7 @@ def route_limits(ruleset=None):
 # ---------------------------------------------------------------------------
 def daily_report(*, category, computed_at, date_str, items, alerts,
                  gantts=None, provisional=False, targets_source="", exempts=None,
-                 notes=None, shipments=None, digested=None):
+                 notes=None, shipments=None, digested=None, sample_cycles=None):
     """生成事中日报 xlsx（bytes）。
 
     items    ：inflight overview 的在研 SKU 行（staySeg=当前停留环节，
@@ -610,11 +611,24 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
                已运输天数 + 追踪状态（在途 / 留观N/5天 / 已归档(到货N天)）；
                **全量保留**，5 天只降级状态文案不删行（2026-11-01 改）；
                未发货渠道无货件号不进本表。空 → 不产生空页。
+    sample_cycles：{SKU: sampleCycle}（**直接取复盘缓存** skuDetails[*].sampleCycle，
+               计算入口 = app/sample_cycle.py，与复盘页同一实现）。非空时总表末
+               追加 4 列：签样(系统) / 拍摄交付(系统) / 样机流转(天) / 流转判定。
+               口径（2026-11-06 用户定）：**只认系统业务日期**，任一端缺失就留空、
+               判「待补」（不拿 audit 补录顶替，否则 G600 会算出 -14 天的负段）；
+               合格线 = seg_rules.SAMPLE_CYCLE["limit"]（15 = 5 + 10），严格小于。
+               不传 → 不产生这 4 列时表宽保持 15 列（行为与本功能上线前一致）。
+               ⚠️ 甘特图 sheet 不动 —— 样机流转只做指标，不改时间轴画法。
     """
     wb = Workbook()
     dir_label = {"loss": "亏损", "gain": "增益", "none": "无"}
     owner_of = {it.get("sku"): (it.get("owner") or "") for it in items or []}
     OVER_ESCALATE = 30                     # 长期未决阈值（天）：超期 ≥30 天升级
+
+    # 样机流转 4 列（2026-11-06）：只有传了 sample_cycles 才追加 —— 缺省时
+    # 表宽仍是 15 列，行为与本功能上线前完全一致（老调用方/老测试不受影响）。
+    _SC = sample_cycles or {}
+    _NCOL = 19 if _SC else 15
 
     # ---- Sheet1 在研 SKU 状态总表 ----
     ws1 = wb.active
@@ -628,7 +642,7 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
                      f"「{targets_source or '继承名义值'}」判定，仅供预警参考，"
                      "不得作为既定 KPI 引用；业务确认后须重跑本日报。")
         ws1["A2"].font = Font(bold=True, size=10, color="EF6C00")
-        ws1.merge_cells(start_row=2, start_column=1, end_row=2, end_column=15)
+        ws1.merge_cells(start_row=2, start_column=1, end_row=2, end_column=_NCOL)
         _legend_row = 3
     # 图例（2026-10-29）：新增标注太多，不写清楚会被误读
     ws1[f"A{_legend_row}"] = (
@@ -640,14 +654,20 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
         "「素材·—」= Part6 单据未建，暂无法判定（默认按需拍摄）；"
         "流程依赖（2026-11-05）：Part6 单据在本地仓到货检查(Part3)通过后才建 —— "
         "Part6 未建单时「签样→寄送」未轮到、不判超期，当前停留回落到「采购→本地仓到货」；"
+        "「样机流转」= 签样→拍摄交付 的间隔，**只认系统业务日期**、<15 天合格；"
+        "任一端没填就留空判「待补」（不拿 audit 补录顶替，补录一拖会算成负段）；"
         "人工登记「⚠未豁免」= 已写备注但未匹配任何豁免通道，仍在追踪。")
     ws1[f"A{_legend_row}"].font = Font(size=9, color="616161")
     ws1.merge_cells(start_row=_legend_row, start_column=1,
-                    end_row=_legend_row, end_column=15)
-    _head_row(ws1, 4, ["SKU", "型号", "状态", "当前停留环节", "部门", "已停留(天)",
-                       "目标(天)", "距超时(天)", "超期环节", "预警段数", "多轮提交",
-                       "核心原因", "责任人", "人工登记", "素材"],
-              widths=[14, 18, 10, 22, 8, 10, 9, 11, 26, 9, 10, 26, 12, 20, 10])
+                    end_row=_legend_row, end_column=_NCOL)
+    _hdr = ["SKU", "型号", "状态", "当前停留环节", "部门", "已停留(天)",
+            "目标(天)", "距超时(天)", "超期环节", "预警段数", "多轮提交",
+            "核心原因", "责任人", "人工登记", "素材"]
+    _w = [14, 18, 10, 22, 8, 10, 9, 11, 26, 9, 10, 26, 12, 20, 10]
+    if _SC:
+        _hdr += ["签样(系统)", "拍摄交付(系统)", "样机流转(天)", "流转判定"]
+        _w += [13, 15, 12, 14]
+    _head_row(ws1, 4, _hdr, widths=_w)
     r = 5
     for it in items or []:
         # 长期未决（≥30 天）→ 整行浅红底纹（麻木效应对策：190 天和 2 天不能同权重）
@@ -742,6 +762,35 @@ def daily_report(*, category, computed_at, date_str, items, alerts,
                  fill=_row_fill)
         if _mat == "通用":
             c.font = Font(size=10, bold=True, color="2E7D32")
+        # 样机流转（2026-11-06）：签样 → 拍摄交付。日期列没填就留**空白**
+        # （用户口径「实际没有就写空」），判定写「待补」而不是「不合格」——
+        # 数据没填不该算到业务头上；间隔与合格线由 sample_cycle.label 统一定义，
+        # 复盘页与日报共用同一套措辞（不在这里另写一套 15 天）。
+        if _SC:
+            _cyc = _SC.get(it.get("sku")) or {}
+            _lb = _sc_label(_cyc) if _cyc else {"days": "—", "judge": "—",
+                                                "tone": "muted", "note": ""}
+            _put(ws1, r, 16, _cyc.get("start") or "", fill=_row_fill,
+                 font=Font(size=10, color="616161")
+                 if not _cyc.get("start") else None,
+                 align=Alignment(horizontal="center"))
+            _put(ws1, r, 17, _cyc.get("end") or "", fill=_row_fill,
+                 font=Font(size=10, color="616161")
+                 if not _cyc.get("end") else None,
+                 align=Alignment(horizontal="center"))
+            # 天数算不出来就写**空**（不是「—」）：用户口径「实际没有就写空」，
+            # 空格在这一列里就代表「还起算不了」，比符号更不容易被误读成 0。
+            _sc_days = "" if _lb["days"] in ("—", "-", None) else _lb["days"]
+            _put(ws1, r, 18, _sc_days, fill=_row_fill,
+                 font=Font(size=10, bold=_lb["tone"] == "bad",
+                           color={"ok": "2E7D32", "bad": "C62828",
+                                  "muted": "9E9E9E"}[_lb["tone"]]),
+                 align=Alignment(horizontal="center"))
+            _put(ws1, r, 19, _lb["judge"], fill=_row_fill,
+                 font=Font(size=10, bold=_lb["tone"] != "muted",
+                           color={"ok": "2E7D32", "bad": "C62828",
+                                  "muted": "9E9E9E"}[_lb["tone"]]),
+                 align=Alignment(horizontal="center"))
         r += 1
     if r == 5:
         _put(ws1, 5, 1, "（当前无在研 SKU）")

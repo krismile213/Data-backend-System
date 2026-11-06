@@ -42,7 +42,9 @@ from ..reporting import route_limits
 from ..reporting import sku_check_report as _skucard_xlsx
 from ..review_rules import DEPARTMENTS, PART_NAMES
 from ..rule_service import get_rules, seg_target
-from ..seg_rules import SAMPLE_CYCLE
+# 样机流转（2026-11-06）：计算/合格线收口在 app/sample_cycle.py，复盘与日报共用同一实现。
+# 这里保留 `_sample_cycle` 旧名做别名，调用点与既有测试无需改动，口径只有一个。
+from ..sample_cycle import compute as _sample_cycle
 # 手机膜口径仅作为 ruleset=None 时的兜底默认值（品类规则统一由 category_rules 分发）
 from ..seg_rules import AIR_TARGET, FOUR_COUNTRIES, SEA_TARGET
 from ..sku_alias import load_aliases
@@ -106,28 +108,10 @@ def _dday(a, b):
     return (b - a).total_seconds() / 86400.0
 
 
-def _sample_cycle(nodes, limit=None):
-    """签样 → 拍摄交付 的实际间隔（**只认系统业务日期**）。
-
-    为什么不用 adopted：寄送/素材这些节点常年没有系统列，adopted 会退回 audit
-    （钉钉补录上报时间），补录一拖就倒挂成负段 —— G600 实测：寄送只有 audit
-    2026-11-05 17:11，而拍摄交付系统列 2026-10-22 → 段值 -14 天。本条要考核的是
-    「签样后多久真的拿到素材」，必须用业务日期；任一端缺失就给 None（前端写空），
-    **绝不拿 audit 冒充实际**。
-    """
-    cfg = SAMPLE_CYCLE
-    lim = cfg["limit"] if limit is None else limit
-    a = (nodes.get(cfg["from"]) or {}).get("sys")
-    b = (nodes.get(cfg["to"]) or {}).get("sys")
-    out = {"from": cfg["from"], "to": cfg["to"], "limit": lim,
-           "start": _fmt(a), "end": _fmt(b),
-           "days": None, "ok": None,
-           "missing": [n for n, v in ((cfg["from"], a), (cfg["to"], b))
-                       if v is None]}
-    if a is not None and b is not None:
-        out["days"] = int((b.date() - a.date()).days)
-        out["ok"] = out["days"] < lim
-    return out
+# _sample_cycle = app.sample_cycle.compute（2026-11-06 收口，见文件顶部导入）。
+# 曾经在这里各写一份：复盘算间隔、日报另算一遍，结果 15 天线改了只生效一处。
+# 现在两处共用同一函数，且只认系统业务日期 —— 寄送/素材常年只有 audit 补录，
+# 拿它算会把 G600 的「寄送→拍摄交付」算成 -14 天。
 
 
 def _clean(v):

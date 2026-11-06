@@ -203,7 +203,7 @@ delayDays = airSpan − loss_route_limit(60)
 | 10 | GET `/api/review/sku/{code}/checkreport` | **新增**：xlsx 核查报告下载（甘特图按 G_ORDER 部门归块 + 段级明细 + 末尾"人工核对"空白列；文件名 `SKU核查报告_{code}_{YYYYMMDD}.xlsx`）（P0-6） |
 | 11 | GET `/api/review/assessment` | **新增**：`{items:[{sku,grade,delayDays,direction,qtyMin,qtyMax,amountMin,amountMax,basis,degraded}], summary:{lossTotalMin/Max, gainTotalMin/Max, degradedCount}}`（P1-4 三指标） |
 | 12 | GET `/api/review/assessment/export` | **新增**：三指标 xlsx 导出（时效/销量/毛利三 sheet） |
-| 13 | GET `/api/review/sku/{code}` | **2026-11-06 双时间并列**：`nodes[节点]` 除 `at/src/iso`（实际采用）外，新增 `sys`（系统业务日期，没填就是 null）、`sysField`（命中的列名）、`audit`、`auditOp`、`action`、`actionOp`。新增 `sampleCycle: {from:"签样", to:"拍摄交付", limit:15, start, end, days, ok, missing[]}` —— **只认系统业务日期**，任一端缺失则 `days=null`（前端写空），不拿 audit 补录时间顶替。真源 `seg_rules.SAMPLE_CYCLE`（= 签样→寄送 5 + 寄送→拍摄交付 10，有 pytest 等值断言盯着）。背景：G600 的寄送没有系统列，只有 audit 11-05，而拍摄交付系统列 10-22 → 段值 -14 天 |
+| 13 | GET `/api/review/sku/{code}` | **2026-11-06 双时间并列**：`nodes[节点]` 除 `at/src/iso`（实际采用）外，新增 `sys`（系统业务日期，没填就是 null）、`sysField`（命中的列名）、`audit`、`auditOp`、`action`、`actionOp`。新增 `sampleCycle: {from:"签样", to:"拍摄交付", limit:15, start, end, days, ok, missing[], recordedMissing[]}` —— **只认系统业务日期**，任一端缺失则 `days=null`（写空），不拿 audit 补录时间顶替；`recordedMissing` = 缺系统日期但**已有 audit/动作**的节点（单据建了没填 → 判「待补」，与「流程还没到」区分）。真源 `seg_rules.SAMPLE_CYCLE`（= 签样→寄送 5 + 寄送→拍摄交付 10，有 pytest 等值断言盯着）；计算入口 `app/sample_cycle.py`，复盘与事中日报共用。背景：G600 的寄送没有系统列，只有 audit 11-05，而拍摄交付系统列 10-22 → 段值 -14 天 |
 
 ### 4.3 扩展 `/api/etl/*`（dataadmin.py）
 
@@ -475,7 +475,7 @@ T06 收口。手机壳此前「数据层就绪、后台层完全不可见」，�
 |---|---|---|
 | `backend/app/inflight_service.py`（新） | ✅ | 在研判定（**任一 Part 处于审批中即算在研**，含「无任何已结束单据」的 SKU，口径与复盘集合不同）、段级 85% 预警（`elapsed ∈ (0.85t, t)`，已完成段不进预警区）、当日新超期/持续超期清单、7 天进度快照 diff、日报生成、保留期清理 |
 | `backend/app/routers/inflight.py`（新） | ✅ | §4.1 全部 **8** 个接口落地：overview / sku·{code} / alerts / progress / daily-report（生成·列表·下载）/ pipeline·run |
-| `backend/app/reporting.py` → `daily_report()` | ✅ | 事中日报 **5 sheets**（在研总表 / 超期明细 / 风险预警 / 今日进度 / 上报清单）；同日重跑覆盖同名文件（幂等）；元数据入 `backend/state/daily_reports_index.json` |
+| `backend/app/reporting.py` → `daily_report()` | ✅ | 事中日报 **7 sheets**（在研总表 / 超期明细 / 风险预警 / 在研SKU甘特图 / 异常上报清单 / 本月已消化超期 / 本月绩效视角，按需追加「货件运输」「豁免备查」）；同日重跑覆盖同名文件（幂等）；元数据入 `backend/state/daily_reports_index.json`。**2026-11-06**：在研总表末追加「样机流转」4 列（签样(系统)/拍摄交付(系统)/流转间隔(天)/流转判定，只认系统业务日期、<15 天合格，计算入口 `app/sample_cycle.py` 与复盘页共用）；不传 `sample_cycles` 时表宽仍为 15 列；**甘特图 sheet 不变** |
 | `backend/app/main.py` | ✅ | 注册 inflight 路由 |
 | **动态批次防护** `review._live_batch_ids()` | ✅ | `_load_sku_docs` / `_db_fingerprint` / `alerts._load_all_docs` 只统计「目录仍存在」的批次 —— 旧批次目录被移走后，DB 里的死记录不再混进复盘 / 指纹 / 预警 |
 | `tests/test_inflight.py`（新，15 例） | ✅ | 纯逻辑 + 真数据集成用例（无数据自动 `pytest.skip`） |

@@ -1441,6 +1441,15 @@ def generate_daily_report(category=None, date_str=None):
     # 货件运输·逐票（在研 SKU 真货件；到货 >5 天已在 compute 侧丢弃）
     shipments = data.get("shipmentTracking") or None
     gantts = _gantt_records(data)
+    # 样机流转（2026-11-06）：签样→拍摄交付 的间隔与合格判定。
+    # **直接取复盘缓存** skuDetails[*].sampleCycle —— 与复盘页同一个 compute()
+    # （app/sample_cycle.py），这里不再算第二遍，否则两处口径迟早分叉。
+    # 只取在研 SKU（总表就是这几十行），缓存命中零额外 IO。
+    from .routers.review import get_review_data
+    _rev_details = (get_review_data(cat) or {}).get("skuDetails") or {}
+    sample_cycles = {
+        it.get("sku"): (_rev_details.get(it.get("sku")) or {}).get("sampleCycle")
+        for it in (data["items"] or [])}
     notes, note_warns = read_notes()   # 登记表异常只随返回值告警，不阻断日报
     # 落值条数 = 登记表里**本批次在研**的 SKU 命中的备注数（不是登记表总条数：
     # 备注表不按品类分，手机壳的日报不该把膜的 SKU 备注计进去）
@@ -1451,7 +1460,8 @@ def generate_daily_report(category=None, date_str=None):
         items=data["items"], alerts=alerts, gantts=gantts,
         provisional=rs.provisional, targets_source=rs.targets_source,
         exempts=exempts, notes=notes, shipments=shipments,
-        digested=data.get("digestedOverdue") or None)
+        digested=data.get("digestedOverdue") or None,
+        sample_cycles=sample_cycles)
     # 撞锁改名约定见 _write_report_bytes：正式名优先，Excel/WPS 占用时落
     # 真名_HHMMSS 后缀。auto_pipeline 的 _with_lock_retry 仍会先等 60s×5——
     # 那是给「瞬时锁」（~$ 刚生成即消失）的机会；用户长期开着日报属于常态，
