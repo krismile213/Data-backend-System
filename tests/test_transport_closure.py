@@ -352,7 +352,18 @@ def test_alerts_shipments_builder_parity():
     }}
     new = _sorted(alerts._shipments(sku_data, rs))
     old = _sorted(_legacy_shipments(sku_data, rs))
-    assert new == old, f"委托后与旧实现不一致：\nnew={new}\nold={old}"
+    # 2026-11-06 双轨：build_shipments 新增 6 个 audit 对照字段 → 逐条 dict 相等必然不等。
+    # 这里改成两层断言，比原来的 `new == old` 更严：
+    #   ① 旧字段一个不许变（老调用方/alerts/闭环判定读的都是这些）
+    #   ② 新增的键必须正好是这 6 个（多塞字段 = 没人消费的死数据，立刻红）
+    assert len(new) == len(old), f"条目数变了：{len(new)} vs {len(old)}"
+    for n, o in zip(new, old):
+        assert {k: n[k] for k in o} == o, f"旧字段被改了：\nnew={n}\nold={o}"
+    assert set(new[0]) - set(old[0]) == {
+        "shipAudit", "shipAuditOp", "arrAudit", "arrAuditOp", "shipGap", "arrGap"}
+    # 这组样本没有审批上报记录 → audit 轨必须全空，不能拿业务日期冒充
+    assert all(n["shipAudit"] is None and n["arrAudit"] is None
+               and n["shipGap"] is None for n in new)
 
 
 def test_alerts_shipped_exempt_rows(monkeypatch):

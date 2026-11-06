@@ -427,7 +427,7 @@ export default function Review() {
       </Paper>
 
       {/* SKU 复盘档案弹窗 */}
-      <Dialog open={!!detailSku} onClose={() => setDetailSku(null)} maxWidth="md" fullWidth>
+      <Dialog open={!!detailSku} onClose={() => setDetailSku(null)} maxWidth="lg" fullWidth>
         <DialogTitle>
           复盘档案 · {detailSku}
           {detail && (
@@ -568,26 +568,51 @@ export default function Review() {
                   )}
                 </Box>
               )}
-              <Table size="small">
+              {/* 段级表 10 列：加 minWidth 防止窄屏把「部门/执行人」压成竖排字 */}
+              <Table size="small" sx={{ minWidth: 860 }}>
                 <TableHead>
                   <TableRow>
-                    <TableCell>部门</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap' }}>部门</TableCell>
                     <TableCell>环节</TableCell>
                     <TableCell>起点 → 终点</TableCell>
-                    <TableCell align="right">实际(天)</TableCell>
-                    <TableCell align="right">目标(天)</TableCell>
+                    <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>实际(天)</TableCell>
+                    <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>audit(天)</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap' }}>双轨</TableCell>
+                    <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>目标(天)</TableCell>
                     <TableCell>判定</TableCell>
-                    <TableCell align="right">贡献(天)</TableCell>
-                    <TableCell>执行人</TableCell>
+                    <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>贡献(天)</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap' }}>执行人</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {detail.segments.map((s, i) => (
                     <TableRow key={i} sx={s.gap ? { bgcolor: 'action.hover' } : undefined}>
-                      <TableCell>{s.gap ? '留空' : s.dept}</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>{s.gap ? '留空' : s.dept}</TableCell>
                       <TableCell sx={{ fontWeight: 600 }}>{s.seg}</TableCell>
                       <TableCell>{s.start || '—'} → {s.end || '—'}</TableCell>
                       <TableCell align="right">{s.gap ? '—' : (s.days ?? '—')}</TableCell>
+                      <TableCell align="right" sx={{
+                        color: s.auditDays == null ? 'text.disabled' : 'text.secondary',
+                      }}
+                        title={`${s.auditFrom || '?'} → ${s.auditTo || '?'}`
+                          + (s.dualGap == null ? '' : `（比系统轨 ${s.dualGap > 0 ? '+' : ''}${s.dualGap} 天）`)
+                          + ((s.auditMissing || []).length
+                            ? `　缺 audit：${s.auditMissing.join('、')}` : '')}>
+                        {s.auditDays ?? '—'}
+                      </TableCell>
+                      <TableCell>
+                        {s.dualVerdict === 'agree' ? (
+                          <Typography variant="caption" color="text.secondary">一致</Typography>
+                        ) : (s.dualVerdict === 'system_only'
+                          || s.dualVerdict === 'audit_worse') ? (
+                          <Typography variant="caption"
+                            sx={{ color: SEMANTIC.warning, fontWeight: 600 }}>
+                            {s.dualVerdictText}
+                          </Typography>
+                        ) : (
+                          <Typography variant="caption" color="text.disabled">—</Typography>
+                        )}
+                      </TableCell>
                       <TableCell align="right">
                         {s.gap || !s.assessed
                           ? <Typography variant="caption">{s.gap ? '—' : '不考核'}</Typography>
@@ -608,23 +633,31 @@ export default function Review() {
                           : s.contribution >= 0 ? SEMANTIC.success : SEMANTIC.danger }}>
                         {s.gap ? '—' : (s.contribution == null ? '—' : s.contribution)}
                       </TableCell>
-                      <TableCell>{s.executor || '—'}</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>{s.executor || '—'}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
+              <Typography variant="caption" color="text.secondary"
+                sx={{ display: 'block', mt: 0.5 }}>
+                audit(天) = 该段起点、终点都取审批上报时间算出的耗时，只做交叉核对，
+                判定仍只看「实际(天)」（系统轨）。「仅系统轨超线」表示换成审批时间算并不超
+                —— 超的是系统日期，值得回查填报。
+              </Typography>
               <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>
                 节点取数核对（系统业务日期 vs audit 上报）
               </Typography>
-              <Table size="small">
+              <Table size="small" sx={{ minWidth: 760 }}>
                 <TableHead>
                   <TableRow>
                     <TableCell>节点</TableCell>
                     <TableCell>系统业务日期</TableCell>
                     <TableCell>audit 上报</TableCell>
+                    <TableCell align="right">差异(天)</TableCell>
                     <TableCell>实际采用</TableCell>
                     <TableCell>来源</TableCell>
                     <TableCell>上报/执行人</TableCell>
+                    <TableCell>最新审批人</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -639,9 +672,21 @@ export default function Review() {
                         fontStyle: n.audit ? 'normal' : 'italic' }}>
                         {n.audit || '空'}
                       </TableCell>
+                      <TableCell align="right" sx={{
+                        color: n.diffDays == null ? 'text.disabled'
+                          : Math.abs(n.diffDays) >= 3 ? SEMANTIC.warning : 'text.secondary',
+                        fontWeight: Math.abs(n.diffDays || 0) >= 3 ? 600 : 400,
+                      }}
+                        title="audit − 系统业务日期：正数=上报晚于单据日期（补录常态），负数=系统日期填晚了">
+                        {n.diffDays == null ? '—'
+                          : `${n.diffDays > 0 ? '+' : ''}${n.diffDays}`}
+                      </TableCell>
                       <TableCell>{n.at || '—'}</TableCell>
                       <TableCell>{n.src || '—'}</TableCell>
                       <TableCell>{n.auditOp || n.actionOp || '—'}</TableCell>
+                      <TableCell sx={{ color: n.latestOp ? 'inherit' : 'text.disabled' }}>
+                        {n.latestOp || '—'}
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -651,6 +696,7 @@ export default function Review() {
                 带 audit 备注的上报时间，属补录，常晚于实际发生。实际采用按
                 「系统 &gt; audit &gt; 动作」取 —— 所以会出现「系统空、实际却是 audit」的节点
                 （如 G600 的寄送：表单没这列，只有 11-05 的补录）。看时效时以系统日期为准。
+                差异(天) = audit − 系统业务日期：正数是补录常态，负数说明系统日期填晚了。
               </Typography>
               {(detail.shipments?.length || 0) > 0 && (
                 <>
@@ -675,8 +721,28 @@ export default function Review() {
                           sx={{ bgcolor: s.noShip ? SEMANTIC.dangerBg : 'inherit' }}>
                           <TableCell sx={{ fontFamily: 'monospace' }}>{s.trk || '—'}</TableCell>
                           <TableCell>{s.hub || '—'}</TableCell>
-                          <TableCell>{s.ship || '—'}</TableCell>
-                          <TableCell>{s.arr || '—'}</TableCell>
+                          <TableCell>
+                            {s.ship || '—'}
+                            {s.shipAudit && (
+                              <Typography variant="caption"
+                                sx={{ display: 'block', color: 'text.disabled' }}>
+                                {`audit ${s.shipAudit}`}
+                                {s.shipGap == null ? ''
+                                  : `（${s.shipGap > 0 ? '+' : ''}${s.shipGap} 天）`}
+                              </Typography>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            {s.arr || '—'}
+                            {s.arrAudit && (
+                              <Typography variant="caption"
+                                sx={{ display: 'block', color: 'text.disabled' }}>
+                                {`audit ${s.arrAudit}`}
+                                {s.arrGap == null ? ''
+                                  : `（${s.arrGap > 0 ? '+' : ''}${s.arrGap} 天）`}
+                              </Typography>
+                            )}
+                          </TableCell>
                           <TableCell align="right">{s.days ?? '—'}</TableCell>
                           <TableCell align="right">{s.target}</TableCell>
                           <TableCell>
@@ -692,6 +758,10 @@ export default function Review() {
                       ))}
                     </TableBody>
                   </Table>
+                  <Typography variant="caption" color="text.secondary">
+                    灰色 audit 行 = 这件货自己的发货/到货审批上报时间，仅作对照；运输(天) 与判定
+                    仍按业务日期算。负数表示审批时间早于业务日期（业务日期填晚了）。
+                  </Typography>
                 </>
               )}
             </>

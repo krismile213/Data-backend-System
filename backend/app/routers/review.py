@@ -35,6 +35,13 @@ from ..assessment import summarize as _assess_summary
 from ..causal import locate as _locate_root_cause
 from ..category_rules import DEFAULT_CATEGORY, category_of_text, rules_for
 from ..db import SessionLocal
+# 双轨时间判定（2026-11-06）：系统轨判、audit 轨只对照。口径收口在 app/dual_track.py，
+# 本文件只做装配 —— 判定函数仍只有 _seg_judge 一个，dual 层靠注入拿它。
+from ..dual_track import cross as _dual_cross
+from ..dual_track import node_diff as _dual_node_diff
+from ..dual_track import seg_audit_days as _dual_audit_span
+from ..dual_track import seg_gap as _dual_seg_gap
+from ..dual_track import ship_gap as _dual_ship_gap
 from ..models import ApprovalNode, Batch, PartDoc, ProductCatalog
 from ..product_rules import range_of
 from ..reporting import assessment_report as _assessment_xlsx
@@ -318,12 +325,30 @@ def extract_node_times(parts_docs, restrict=None, ruleset=None):
             adopted, src = act_dt, "动作"
         else:
             adopted, src = None, "缺失"
+        # 最新审批人（对齐 route_check_sys.latest_op）：**最新那张单据**里该动作的经办人。
+        # 离线注释写的是「动作时间最晚那条」，但它自己的实现是按单据创建时间倒序取第一条
+        # —— 与「时间最晚」在多张单据顺序颠倒时结果不同（G602 采购：实现给夏康富、
+        # 按时间取会给李杰华）。这里跟**实现**走，保证与离线件逐格对得上。
+        latest_op = ""
+        if act:
+            for d in reversed(docs):          # docs 已按创建时间升序 → 倒过来即最新在前
+                for n in d["nodes"]:          # 单据内保持审批顺序
+                    if (n["action"] or "") != act:
+                        continue
+                    if any(k in (n["action"] or "") for k in ("通知", "抄送")):
+                        continue
+                    if n["operator"]:
+                        latest_op = n["operator"]
+                        break
+                if latest_op:
+                    break
         nodes[name] = {
             "part": part, "sys": sys_dt, "sys_raw": sys_raw,
             "sys_field": sys_field,          # 实际命中的列（候选链时便于排查）
             "sys_date_only": bool(sys_raw) and len(sys_raw) <= 10,
             "audit": audit_dt, "audit_op": audit_op,
             "action": act_dt, "action_op": act_op,
+            "latest_op": latest_op,
             "adopted": adopted, "src": src,
         }
     return nodes
@@ -554,10 +579,36 @@ def _seg_judge(d, target, seg_name="", backfill_ok=False):
 # ---------------------------------------------------------------------------
 # 货件配对与运输段
 # ---------------------------------------------------------------------------
+def _audit_action_time(doc, action):
+    """单张单据里匹配 action 的 audit 上报 → (时间, 执行人)。
+
+    备注含 audit 优先，否则取第一条 —— 与 route_check_sys._row_audit_action 同义。
+    逐货件用它自己的 Part5/Part8 单据，**不能**拿 SKU 级「最早一轮」的节点值顶替：
+    一批货一条单据，取错单据等于把别的货件的日期安到这件上。
+
+    ⚠️ 离线件还有「Part8 Sheet2 审批时间」兜底，后台不读导出文件的第二个 sheet，
+    这一路缺失 → 宁可留空，也不拿业务日期冒充 audit。
+    """
+    if not doc:
+        return None, ""
+    hit_audit = hit_any = None
+    for n in doc.get("nodes") or []:
+        if action not in (n.get("action") or "") or n.get("action_time") is None:
+            continue
+        if "audit" in (n.get("remark") or "") and hit_audit is None:
+            hit_audit = (n["action_time"], n.get("operator") or "")
+        elif hit_any is None:
+            hit_any = (n["action_time"], n.get("operator") or "")
+    return hit_audit or hit_any or (None, "")
+
+
 def build_shipments(parts_docs, ruleset=None):
     """Part5 发货 × Part8 到货按货件号配对（同货件号保留有业务时间的最新记录）。
     另：Part5 中只有发往渠道仓库、无货件号的记录 → 渠道未发货占位条目
     （货件号/发货/到货均留空，渠道仓保留，供货件明细/甘特/异常判定展示）。
+
+    每件货件另带一条 audit 轨（shipAudit/arrAudit + 差值），**仅供对照**：
+    运输天数 days 仍只按业务日期算，判定不受 audit 影响。
 
     ruleset：品类规则集（运输方式判定/目标天）；None = 手机膜默认。
     """
@@ -577,29 +628,38 @@ def build_shipments(parts_docs, ruleset=None):
         sd = _parse_dt(_clean(raw.get("发货日期")))
         prev = p5.get(trk)
         if prev is None or (sd and not prev[1]):
-            p5[trk] = (hub, sd)
+            p5[trk] = (hub, sd, d)
     for d in (parts_docs.get("Part8") or []):
         trk = _clean(d["raw"].get("货件号"))
         if not trk:
             continue
         ad = _parse_dt(_clean(d["raw"].get("渠道仓到货时间")))
         prev = p8.get(trk)
-        if prev is None or (ad and not prev):
-            p8[trk] = ad
+        if prev is None or (ad and not prev[0]):
+            p8[trk] = (ad, d)
     items = []
-    for trk, (hub, sd) in p5.items():
-        arr = p8.get(trk)
+    for trk, (hub, sd, d5) in p5.items():
+        arr, d8 = p8.get(trk, (None, None))
         mode, tgt = rs.transport_mode(hub)
+        ship_au, ship_au_op = _audit_action_time(d5, "发货")
+        arr_au, arr_au_op = _audit_action_time(d8, "到货通知")
         items.append({"trk": trk, "hub": hub, "ship": sd, "arr": arr,
                       "days": _dday(sd, arr), "mode": mode, "target": tgt,
-                      "cls": rs.ship_class(mode), "noShip": False})
+                      "cls": rs.ship_class(mode), "noShip": False,
+                      "shipAudit": ship_au, "shipAuditOp": ship_au_op,
+                      "arrAudit": arr_au, "arrAuditOp": arr_au_op,
+                      "shipGap": _dual_ship_gap(sd, ship_au),
+                      "arrGap": _dual_ship_gap(arr, arr_au)})
     for hub in no_trk_hubs:
         if hub in hubs_with_trk:
             continue                       # 该渠道已有正式货件，不重复列
         mode, tgt = rs.transport_mode(hub)
         items.append({"trk": "", "hub": hub, "ship": None, "arr": None,
                       "days": None, "mode": mode, "target": tgt,
-                      "cls": rs.ship_class(mode), "noShip": True})
+                      "cls": rs.ship_class(mode), "noShip": True,
+                      "shipAudit": None, "shipAuditOp": "",
+                      "arrAudit": None, "arrAuditOp": "",
+                      "shipGap": None, "arrGap": None})
     items.sort(key=lambda x: (x["ship"] or datetime.max,
                               x["trk"] or "￿", x["hub"]))
     return items
@@ -760,6 +820,14 @@ def review_sku_segments(sku, parts_docs, rules, restrict=None, ruleset=None):
             # 小负值是业务现实而非配对错误，加注说明避免被误读为数据异常
             if n0 == ORIGIN_NODE and d is not None and d < 0:
                 note = f"{note}；{n1}早于本单建单日 → 先线下办理、后补录审批"
+        # 双轨对照（2026-11-06）：同一段再用 audit 两端算一遍，只为交叉核验。
+        # 判定仍只有 judge 那一票（系统轨）；留空段不评（未参与考核，比了是噪音）。
+        if is_gap:
+            _span = {"from": None, "to": None, "days": None, "missing": []}
+            _dual = {"auditJudge": None, "verdict": "na", "verdictText": ""}
+        else:
+            _span = _dual_audit_span(nodes, n0, n1)
+            _dual = _dual_cross(judge, _span["days"], target, _seg_judge)
         seg_rows.append({
             "dept": dept, "seg": name, "from": n0, "to": n1,
             "start": _disp(t0, src0), "end": _disp(t1, src1),
@@ -767,6 +835,17 @@ def review_sku_segments(sku, parts_docs, rules, restrict=None, ruleset=None):
             "days": _fmt_days(d), "target": None if is_gap else target,
             "judge": judge, "owner": owner, "executor": executor,
             "execSrc": exec_src,
+            # ---- 双轨（仅对照，不参与判定）----
+            "auditDays": _fmt_days(_span["days"]),
+            "auditFrom": _fmt(_span["from"]), "auditTo": _fmt(_span["to"]),
+            "auditMissing": _span["missing"],
+            "auditJudge": _dual["auditJudge"],
+            "dualGap": _dual_seg_gap(_fmt_days(d), _fmt_days(_span["days"])),
+            "dualVerdict": _dual["verdict"],
+            "dualVerdictText": _dual["verdictText"],
+            # 最新审批人取「经办该节点的人」（寄送→拍摄交付 取起点，其余取终点），
+            # 与离线段级明细同列口径
+            "latestOp": "" if is_gap else (nodes[op_node].get("latest_op") or ""),
             "note": note, "gap": is_gap, "assessed": available and not is_gap,
         })
 
@@ -789,6 +868,11 @@ def review_sku_segments(sku, parts_docs, rules, restrict=None, ruleset=None):
         "judge": _seg_judge(d_l4, target), "owner": owner,
         "executor": ship_op or owner,
         "execSrc": "审批动作·发货" if ship_op else ("配置" if owner else ""),
+        # 双轨：终点是货件末批发货日、不是节点，没有 audit 对照（离线件同样留空）
+        "auditDays": None, "auditFrom": None, "auditTo": None, "auditMissing": [],
+        "auditJudge": None, "dualGap": None,
+        "dualVerdict": "na", "dualVerdictText": "",
+        "latestOp": ship_op or "",
         "note": note, "gap": False,
         "assessed": bool(cfg.get("available", True)),
     })
@@ -817,6 +901,11 @@ def review_sku_segments(sku, parts_docs, rules, restrict=None, ruleset=None):
             "days": _fmt_days(stall_days), "target": target,
             "judge": it["judge"], "owner": owner, "executor": owner,
             "execSrc": "配置" if owner else "",
+            # 双轨：「至今未发货」不是节点，无 audit 对照
+            "auditDays": None, "auditFrom": None, "auditTo": None, "auditMissing": [],
+            "auditJudge": None, "dualGap": None,
+            "dualVerdict": "na", "dualVerdictText": "",
+            "latestOp": "",
             "note": "Part5渠道已立项但无货件号·超时未发货异常(独立于采购→发货末批)",
             "gap": False, "assessed": False, "noShip": True,
         })
@@ -1114,7 +1203,10 @@ def compute_review(category=None):
                              "audit": _fmt(nd["audit"]),
                              "auditOp": nd["audit_op"],
                              "action": _fmt(nd["action"]),
-                             "actionOp": nd["action_op"]}
+                             "actionOp": nd["action_op"],
+                             # 双轨差（audit − 系统，天）+ 最新审批人（2026-11-06）
+                             "diffDays": _dual_node_diff(nd),
+                             "latestOp": nd.get("latest_op") or ""}
                       for name, nd in nodes.items()},
             "sampleCycle": _sample_cycle(nodes),
             "partStat": part_stat,
@@ -1124,6 +1216,13 @@ def compute_review(category=None):
                            "ship": _fmt(it["ship"]), "arr": _fmt(it["arr"]),
                            "days": _fmt_days(it["days"]), "mode": it["mode"],
                            "target": it["target"], "cls": it.get("cls", ""),
+                           # 货件级双轨（2026-11-06）：业务日期 vs 审批上报，只对照
+                           "shipAudit": _fmt(it.get("shipAudit")),
+                           "shipAuditOp": it.get("shipAuditOp") or "",
+                           "arrAudit": _fmt(it.get("arrAudit")),
+                           "arrAuditOp": it.get("arrAuditOp") or "",
+                           "shipGap": it.get("shipGap"),
+                           "arrGap": it.get("arrGap"),
                            "noShip": it.get("noShip", False),
                            "stallDays": it.get("stallDays"),
                            "judge": (it.get("judge")
@@ -1262,6 +1361,11 @@ _cache = {"fp": None, "data": None}          # 兼容旧引用：镜像"最近�
 _cache_by_cat = {}                           # 品类 key -> {"fp", "data"}（真正的缓存）
 _cache_lock = threading.Lock()
 
+# 复盘 payload 结构版本。改了返回字段/语义就 +1。
+# 指纹只看数据与规则版本，改代码不改指纹 —— 若不加这个版本号，热更新后旧缓存
+# 会继续把**旧结构**端出去，新字段在页面上永远是空的（2026-11-06 踩过）。
+_PAYLOAD_VERSION = 2
+
 
 def _db_fingerprint(category=None):
     """批次表状态指纹。按品类过滤 —— 手机壳导批次不该让手机膜缓存失效
@@ -1314,11 +1418,12 @@ def get_review_data(category=None):
     fp = fingerprint_for(category)
     with _cache_lock:
         slot = _cache_by_cat.get(cat)
-        if slot is not None and slot["fp"] == fp:
+        if (slot is not None and slot["fp"] == fp
+                and slot.get("pv") == _PAYLOAD_VERSION):
             data = slot["data"]
         else:
             data = compute_review(cat)
-            _cache_by_cat[cat] = {"fp": fp, "data": data}
+            _cache_by_cat[cat] = {"fp": fp, "pv": _PAYLOAD_VERSION, "data": data}
         # 镜像给"最近一次计算"，history._current_fingerprint() 与旧引用读这里
         _cache["fp"] = fp
         _cache["data"] = data
