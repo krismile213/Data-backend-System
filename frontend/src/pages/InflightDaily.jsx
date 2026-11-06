@@ -10,9 +10,7 @@ import KpiCard from '../components/KpiCard.jsx';
 import SectionCard from '../components/SectionCard.jsx';
 import RegistryImport from '../components/RegistryImport.jsx';
 import { ErrorState, LoadingState } from '../components/StateViews.jsx';
-import TransportClosure, {
-  ClosureBadge, PendingCountries,
-} from '../components/TransportClosure.jsx';
+import TransportClosure, { ClosureBadge } from '../components/TransportClosure.jsx';
 import useApi from '../hooks/useApi.js';
 import {
   fetchInflightOverview, fetchInflightSku, fetchInflightAlerts,
@@ -91,18 +89,35 @@ function TransportCell({ it }) {
   const sc = it.shipCounts || {};
   const closure = it.shipClosure;
   if (pend.length) {
+    // 同上：列宽固定 12% 后，「运输未闭环」徽标 + 「未到货:」+ 国家胶囊会竖着堆
+    // 三行把行高撑爆。计数徽标 + Tooltip 名单，一行解决。
     return (
-      <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, flexWrap: 'wrap' }}>
-        <ClosureBadge closure="pending" />
-        <PendingCountries hubs={pend} />
-      </Box>
+      <Tooltip arrow enterDelay={150}
+        title={
+          <Box sx={{ lineHeight: 1.7, maxWidth: 240 }}>
+            {pend.map((h) => <Box key={h}>{h}</Box>)}
+          </Box>
+        }>
+        <Chip size="small" label={`未到货 ${pend.length} 国`}
+          sx={{ bgcolor: SEMANTIC.warning, color: SEMANTIC.onColor, height: 22 }} />
+      </Tooltip>
     );
   }
   if (unshipped.length) {
+    // 一个 SKU 常有 15 个渠道同时「未发货」（货都还没采购到，必然状态），
+    // 全名铺进单元格会把行高撑到 3~4 行、同样内容重复 6 行（2026-11-06 实测）。
+    // 这里只给计数徽标，渠道名单放 Tooltip 里按需展开。
     return (
-      <Box component="span" sx={{ fontSize: 12, color: SEMANTIC.warning }}>
-        未发货：{unshipped.join('、')}
-      </Box>
+      <Tooltip arrow enterDelay={150}
+        title={
+          <Box sx={{ lineHeight: 1.7, maxWidth: 240 }}>
+            {unshipped.map((h) => <Box key={h}>{h}</Box>)}
+          </Box>
+        }>
+        <Chip size="small" variant="outlined"
+          label={`未发货 ${unshipped.length} 渠道`}
+          sx={{ color: SEMANTIC.warning, borderColor: SEMANTIC.warning, height: 22 }} />
+      </Tooltip>
     );
   }
   if (closure === 'closed') {
@@ -134,7 +149,7 @@ function SkuDialog({ sku, onClose }) {
   const cause = det?.rootCause;
 
   return (
-    <Dialog open={!!sku} onClose={onClose} maxWidth="md" fullWidth>
+    <Dialog open={!!sku} onClose={onClose} maxWidth="lg" fullWidth>
       <DialogTitle>事中档案 · {sku}</DialogTitle>
       <DialogContent dividers>
         {loading && <LoadingState label="加载事中档案…" />}
@@ -176,10 +191,10 @@ function SkuDialog({ sku, onClose }) {
               <Table size="small">
                 <TableHead>
                   <TableRow>
-                    <TableCell>部门</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap' }}>部门</TableCell>
                     <TableCell>环节</TableCell>
-                    <TableCell>状态</TableCell>
-                    <TableCell>开始</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap' }}>状态</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap' }}>开始</TableCell>
                     <TableCell>结束</TableCell>
                     <TableCell>已进行</TableCell>
                     <TableCell>目标</TableCell>
@@ -234,6 +249,8 @@ export default function InflightDaily() {
   const [fTransport, setFTransport] = useState('');
   const [fQ, setFQ] = useState('');
   const [onlyTransport, setOnlyTransport] = useState(false);
+  // 逐票表默认不展开「已到货」票（见 transitRows 注释）
+  const [showArrived, setShowArrived] = useState(false);
 
   const items = data?.items || [];
   const kpi = data || {};
@@ -249,20 +266,27 @@ export default function InflightDaily() {
   const repItems = reports.data?.items || [];
   const latest = repItems[0];
 
-  // 运输在途·逐票（前端④）：把 transportInTransit 的 tickets + unshippedHubs 摊平成行
-  const transitRows = useMemo(() => {
-    const out = [];
+  // 运输在途·逐票（前端④）：把 transportInTransit 的 tickets + unshippedHubs 摊平成行。
+  // 拆两组 —— 待办（未到货 / 未发货）与已到货。后端 transportInTransit 按 SKU 给，
+  // 一个 SKU 只要还有 1 张票没到，整组 15 张票（含十几张早已到货）都会带出来：
+  // 全铺开时 345 行里 173 行是「已到货」，标题写"用于催物流"却一半是已完成历史
+  // （2026-11-06 实测）。已到货降级成一行计数，点开才铺。
+  const { transitRows, arrivedRows } = useMemo(() => {
+    const all = [];
     (data?.transportInTransit || []).forEach((e) => {
       (e.tickets || []).forEach((t) => {
-        out.push({ sku: e.sku, model: e.model, hub: t.hub, trk: t.trk,
+        all.push({ sku: e.sku, model: e.model, hub: t.hub, trk: t.trk,
           ship: t.ship, arr: t.arr, state: t.state });
       });
       (e.unshippedHubs || []).forEach((h) => {
-        out.push({ sku: e.sku, model: e.model, hub: h, trk: '',
+        all.push({ sku: e.sku, model: e.model, hub: h, trk: '',
           ship: '', arr: '', state: '未发货' });
       });
     });
-    return out;
+    return {
+      transitRows: all.filter((r) => r.state !== '已到货'),
+      arrivedRows: all.filter((r) => r.state === '已到货'),
+    };
   }, [data]);
 
   // 筛选选项从当前清单动态汇总（不硬编码部门/环节名）
@@ -296,6 +320,16 @@ export default function InflightDaily() {
     setFDept(''); setFSeg(''); setFStatus(''); setFTransport('');
     setFQ(''); setOnlyTransport(false);
   };
+
+  // 无目标段（口径同日报 reporting.py 的 `_no_tgt`）：当前停留段没设目标天 →
+  // 后端 stay_left 恒为 None，这批 SKU 既不进「超期」也不进「预警」，等于在所有
+  // 风险列表里隐身（2026-11-06：33 个在研里 16 个是这种）。日报 xlsx 早有这张表，
+  // 页面一直没有 —— 这里补齐，并单列成独立小节而不是混在清单里沉底。
+  const noTarget = useMemo(
+    () => items.filter((it) => it.stayTarget == null
+      && it.stayElapsed != null && it.stayElapsed > 0)
+      .sort((a, b) => (b.stayElapsed || 0) - (a.stayElapsed || 0)),
+    [items]);
 
   // KPI：运输未闭环 = 有未到货渠道的在研 SKU 数（不与筛选联动）
   const pendingTransportCount = items.filter(
@@ -494,51 +528,77 @@ export default function InflightDaily() {
               )}
             </Box>
             <Typography variant="caption" color="text.secondary"
+              sx={{ display: 'block' }}>
+              筛选仅影响本表，上方 KPI 为全量。「无目标」= 该段未设目标天（运输在途 / 渠道未发货），
+              不参与超期与预警判定，只看「已停留」自行判断要不要催。
+            </Typography>
+            <Typography variant="caption" color="text.secondary"
               sx={{ display: 'block', mb: 1 }}>
-              筛选仅影响本表，上方 KPI 为全量。
+              emag「·未发货」在日报里按「有发货才标记」不计入（2026-10-15 口径）——
+              本页展示它，不代表欠账。
             </Typography>
             <TableContainer component={Paper} variant="outlined">
-              <Table size="small">
+              <Table size="small" sx={{ tableLayout: 'fixed' }}>
                 <TableHead>
                   <TableRow>
-                    <TableCell>SKU</TableCell>
-                    <TableCell>机型</TableCell>
-                    <TableCell>当前停留环节</TableCell>
-                    <TableCell>部门</TableCell>
-                    <TableCell>距超时</TableCell>
-                    <TableCell>预警段</TableCell>
-                    <TableCell>状态</TableCell>
-                    <TableCell>运输</TableCell>
-                    <TableCell>多轮</TableCell>
-                    <TableCell>负责人</TableCell>
+                    <TableCell sx={{ width: '7%' }}>SKU</TableCell>
+                    <TableCell sx={{ width: '15%' }}>机型</TableCell>
+                    <TableCell sx={{ width: '14%' }}>当前停留环节</TableCell>
+                    <TableCell sx={{ width: '6%' }}>部门</TableCell>
+                    <TableCell sx={{ width: '7%' }} align="right">已停留</TableCell>
+                    <TableCell sx={{ width: '9%' }}>距超时</TableCell>
+                    <TableCell sx={{ width: '10%' }}>预警段</TableCell>
+                    <TableCell sx={{ width: '7%' }}>状态</TableCell>
+                    <TableCell sx={{ width: '12%' }}>运输</TableCell>
+                    <TableCell sx={{ width: '6%' }}>多轮</TableCell>
+                    <TableCell sx={{ width: '7%' }}>负责人</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {filtered.map((it) => (
                     <TableRow key={it.sku} hover sx={{ cursor: 'pointer' }}
                       onClick={() => setSelSku(it.sku)}>
-                      <TableCell>{it.sku}</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap', fontWeight: 600 }}>
+                        {it.sku}
+                      </TableCell>
                       <TableCell>{it.model || '—'}</TableCell>
-                      <TableCell>{it.staySeg || '—'}</TableCell>
-                      <TableCell>{it.staySegDept || '—'}</TableCell>
-                      <TableCell sx={it.stayDaysLeft != null && it.stayDaysLeft < 0
-                        ? { color: SEMANTIC.danger, fontWeight: 600 } : undefined}>
-                        {it.stayDaysLeft == null
-                          ? '—'
-                          : (it.stayDaysLeft < 0
-                            ? `已超${Math.round(-it.stayDaysLeft)}天`
-                            : `剩${Math.round(it.stayDaysLeft)}天`)}
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>{it.staySeg || '—'}</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>{it.staySegDept || '—'}</TableCell>
+                      {/* 已停留：后端一直有 stayElapsed，之前没渲染 —— 运输/未发货段
+                          没有目标天，「距超时」必然是空，这一列成了那 16 行唯一的时钟 */}
+                      <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
+                        {it.stayElapsed == null ? '—' : `${it.stayElapsed} 天`}
+                      </TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                        {it.stayTarget == null
+                          ? (
+                            <Box component="span" sx={{ fontSize: 12, color: SEMANTIC.muted }}>
+                              无目标
+                            </Box>
+                          )
+                          : (it.stayDaysLeft == null
+                            ? '—'
+                            : (it.stayDaysLeft < 0
+                              ? <Box component="span"
+                                  sx={{ color: SEMANTIC.danger, fontWeight: 600 }}>
+                                  {`已超${Math.round(-it.stayDaysLeft)}天`}
+                                </Box>
+                              : `剩${Math.round(it.stayDaysLeft)}天`))}
                       </TableCell>
                       <TableCell>{(it.warnSegs || []).join('、') || '—'}</TableCell>
-                      <TableCell><StateChip state={it.status} /></TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                        <StateChip state={it.status} />
+                      </TableCell>
                       <TableCell><TransportCell it={it} /></TableCell>
-                      <TableCell>{it.multiRound ? '⚠ 多轮' : '—'}</TableCell>
-                      <TableCell>{it.owner || '—'}</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                        {it.multiRound ? '⚠ 多轮' : '—'}
+                      </TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>{it.owner || '—'}</TableCell>
                     </TableRow>
                   ))}
                   {!filtered.length && (
                     <TableRow>
-                      <TableCell colSpan={10}>
+                      <TableCell colSpan={11}>
                         {items.length
                           ? '当前筛选无匹配 SKU（可从上方清空条件）'
                           : '当前没有在研 SKU'}
@@ -550,8 +610,48 @@ export default function InflightDaily() {
             </TableContainer>
           </SectionCard>
 
+          <SectionCard title={`无目标段（${noTarget.length}）`} sx={{ mb: 2 }}
+            subtitle="当前停留段未设目标天 → 不参与超期/预警判定；按「已停留」人工判断要不要催">
+            <TableContainer component={Paper} variant="outlined">
+              <Table size="small" sx={{ tableLayout: 'fixed' }}>
+                <TableHead>
+                  <TableRow>
+                    <TableCell sx={{ width: '9%' }}>SKU</TableCell>
+                    <TableCell sx={{ width: '22%' }}>机型</TableCell>
+                    <TableCell sx={{ width: '20%' }}>当前停留环节</TableCell>
+                    <TableCell sx={{ width: '10%' }} align="right">已停留</TableCell>
+                    <TableCell sx={{ width: '25%' }}>运输进度</TableCell>
+                    <TableCell sx={{ width: '14%' }}>负责人</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {noTarget.map((it) => (
+                    <TableRow key={it.sku} hover sx={{ cursor: 'pointer' }}
+                      onClick={() => setSelSku(it.sku)}>
+                      <TableCell sx={{ whiteSpace: 'nowrap', fontWeight: 600 }}>
+                        {it.sku}
+                      </TableCell>
+                      <TableCell>{it.model || '—'}</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>{it.staySeg || '—'}</TableCell>
+                      <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
+                        {it.stayElapsed} 天
+                      </TableCell>
+                      <TableCell><TransportCell it={it} /></TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>{it.owner || '—'}</TableCell>
+                    </TableRow>
+                  ))}
+                  {!noTarget.length && (
+                    <TableRow>
+                      <TableCell colSpan={6}>无 —— 所有在研段都设了目标天</TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </SectionCard>
+
           <SectionCard title={`运输在途 · 逐票（${transitRows.length}）`} sx={{ mb: 2 }}
-            subtitle="有已发货未到货的票 / 有已立项未发货的渠道 —— 用于催物流（数据 = 逐货件同源）">
+            subtitle="只列未到货的票 + 未发货的渠道 —— 用于催物流（已到货票默认折叠）">
             <TableContainer component={Paper} variant="outlined">
               <Table size="small">
                 <TableHead>
@@ -566,29 +666,41 @@ export default function InflightDaily() {
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {transitRows.map((r, i) => (
-                    <TableRow key={`${r.sku}-${r.trk || r.hub}-${i}`} hover
-                      sx={{ cursor: 'pointer' }}
-                      onClick={() => setSelSku(r.sku)}>
-                      <TableCell sx={{ fontWeight: 600 }}>{r.sku}</TableCell>
-                      <TableCell>{r.model || '—'}</TableCell>
-                      <TableCell>{r.hub || '—'}</TableCell>
-                      <TableCell sx={{ fontFamily: 'monospace' }}>{r.trk || '—'}</TableCell>
-                      <TableCell>{r.ship || '—'}</TableCell>
-                      <TableCell>{r.arr || '—'}</TableCell>
-                      <TableCell>
-                        <Chip size="small" label={r.state}
-                          variant={r.state === '已到货' ? 'outlined' : 'filled'}
-                          sx={r.state === '已到货'
-                            ? { color: SEMANTIC.success, borderColor: SEMANTIC.success }
-                            : { bgcolor: SEMANTIC.warning, color: SEMANTIC.onColor }} />
+                  {(showArrived ? [...transitRows, ...arrivedRows] : transitRows)
+                    .map((r, i) => (
+                      <TableRow key={`${r.sku}-${r.trk || r.hub}-${i}`} hover
+                        sx={{ cursor: 'pointer' }}
+                        onClick={() => setSelSku(r.sku)}>
+                        <TableCell sx={{ fontWeight: 600 }}>{r.sku}</TableCell>
+                        <TableCell>{r.model || '—'}</TableCell>
+                        <TableCell>{r.hub || '—'}</TableCell>
+                        <TableCell sx={{ fontFamily: 'monospace' }}>{r.trk || '—'}</TableCell>
+                        <TableCell>{r.ship || '—'}</TableCell>
+                        <TableCell>{r.arr || '—'}</TableCell>
+                        <TableCell>
+                          <Chip size="small" label={r.state}
+                            variant={r.state === '已到货' ? 'outlined' : 'filled'}
+                            sx={r.state === '已到货'
+                              ? { color: SEMANTIC.success, borderColor: SEMANTIC.success }
+                              : { bgcolor: SEMANTIC.warning, color: SEMANTIC.onColor }} />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  {arrivedRows.length > 0 && (
+                    <TableRow>
+                      <TableCell colSpan={7} sx={{ py: 0.5 }}>
+                        <Button size="small" onClick={() => setShowArrived((v) => !v)}>
+                          {showArrived
+                            ? `收起已到货 ${arrivedRows.length} 票`
+                            : `另有已到货 ${arrivedRows.length} 票（不影响催办）—— 展开查看`}
+                        </Button>
                       </TableCell>
                     </TableRow>
-                  ))}
+                  )}
                   {!transitRows.length && (
                     <TableRow>
                       <TableCell colSpan={7}>
-                        无在途运输（无未到货票 / 无未发货渠道）
+                        无待办运输（无未到货票 / 无未发货渠道）
                       </TableCell>
                     </TableRow>
                   )}
