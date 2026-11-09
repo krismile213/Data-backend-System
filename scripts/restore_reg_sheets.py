@@ -25,7 +25,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-ROOT = Path(r"D:\Desktop\work-main\数据后台系统")
+ROOT = Path(r"D:\Desktop\work-main\Data-Backend-System")
 REAL = Path(r"D:\Desktop\work-main\资产文件\商品资料.xlsx")
 BK = ROOT / "backups" / "商品资料_备份_20260929-1630_补子表前.xlsx"
 T1 = REAL.with_name("商品资料._tmp1.xlsx")

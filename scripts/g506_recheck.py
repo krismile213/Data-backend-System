@@ -11,7 +11,7 @@ g506_recheck.py — G506 考核口径复核（2026-09-21 用户纠偏后）
 """
 import sys
 
-sys.path.insert(0, r"D:\Desktop\work-main\数据后台系统\backend")
+sys.path.insert(0, r"D:\Desktop\work-main\Data-Backend-System\backend")
 
 from app.routers.review import get_review_data
 from app.seg_rules import ROUTE_TARGETS

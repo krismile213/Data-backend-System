@@ -1,6 +1,6 @@
 # AI 助手嵌入实现方案
 
-> 目标：把用户自研的通用 Agent（`C:\Users\dell\Desktop\Agent`）嵌进数据后台系统前端（`D:\Desktop\work-main\数据后台系统`），
+> 目标：把用户自研的通用 Agent（`C:\Users\dell\Desktop\Agent`）嵌进数据后台系统前端（`D:\Desktop\work-main\Data-Backend-System`），
 > 做成一个「懂当前屏幕、能查真实数据」的 AI 助手；并借着这个过程**逐步测试 Agent、把它推向工业级**。
 >
 > 版本：v1 · 定位：可直接照着实施的落地方案（结论先行 / 事实带 `文件:行号` 依据）。
@@ -12,7 +12,7 @@
 
 | 简称 | 指代 | 技术栈 | 入口 |
 |------|------|--------|------|
-| **平台** | 数据后台系统 `D:\Desktop\work-main\数据后台系统` | FastAPI(:8000) + React/Vite(:5173) + MUI | `python start.py`（`start.py:17-33`） |
+| **平台** | 数据后台系统 `D:\Desktop\work-main\Data-Backend-System` | FastAPI(:8000) + React/Vite(:5173) + MUI | `python start.py`（`start.py:17-33`） |
 | **Agent** | 用户自研通用 Agent `C:\Users\dell\Desktop\Agent` | agentcore 引擎 + FastAPI Web 适配器(:8765) | `python server.py`（`server.py:10-13`） |
 
 平台 = 用户日常用的运营数据后台（左侧导航 20 页，`App.jsx:63-86`）。

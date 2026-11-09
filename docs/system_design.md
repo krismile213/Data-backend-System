@@ -334,7 +334,7 @@ graph TD
 
 ### 8.4 风险与既定假设（UNCLEAR）
 
-1. **路径分叉**：仓库位于 `D:\Desktop\work-main\数据后台系统`，而 config.py 的 `DATA_ROOT` 与商品资料路径指向 `C:\Users\dell\Desktop\work-main\...`。方案以 **config.py 现值为准**运行时路径；商品资料路径已配置化（`products_xlsx_path`），首导失败时前端给出明确提示。若 C/D 盘为镜像副本需用户指认实际数据盘。
+1. **路径分叉**：仓库位于 `D:\Desktop\work-main\Data-Backend-System`，而 config.py 的 `DATA_ROOT` 与商品资料路径指向 `C:\Users\dell\Desktop\work-main\...`。方案以 **config.py 现值为准**运行时路径；商品资料路径已配置化（`products_xlsx_path`），首导失败时前端给出明确提示。若 C/D 盘为镜像副本需用户指认实际数据盘。
 2. **日报落盘批次目录**：PRD 写 `data\手机膜\<批次>\reports\`，但日报覆盖跨批次在研 SKU——假设落「最新批次」的 reports/ 子目录；如需独立 `_reports/` 根目录需用户确认。
 3. **售价列缺失**：商品资料无膜售价列，`price_type='参考成本价'`；补售价列后重导入即自动按售价重算（缓存指纹含 product 表）。
 4. **邮件授权码**：需用户提供 QQ 邮箱授权码写入 rule_config；缺失时仅记日志不报错。SMTP 走 465 直连，Clash 代理不干扰。

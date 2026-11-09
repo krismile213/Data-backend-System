@@ -2,7 +2,7 @@
 """apply_prd_confirmations.py — 把 2026-09-22 用户确认的 5 项决策原子写入 PRD"""
 import io
 
-P = r"D:\Desktop\work-main\数据后台系统\docs\PRD-流程事中管理与事后评估.md"
+P = r"D:\Desktop\work-main\Data-Backend-System\docs\PRD-流程事中管理与事后评估.md"
 
 with io.open(P, "r", encoding="utf-8") as f:
     t = f.read()
